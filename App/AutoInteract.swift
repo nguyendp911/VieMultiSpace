@@ -71,6 +71,7 @@ struct FacebookWebSessionTokens: Codable {
 
 enum WebSessionTokenCache {
     private static let cacheKey = "vie.multispace.fb_web_tokens.v1"
+    private static let ttlSeconds: TimeInterval = 300 // TTL 5 phút đảm bảo dtsg/lsd luôn hợp lệ
 
     static func load(for spaceId: UUID) -> FacebookWebSessionTokens? {
         guard let data = UserDefaults.standard.data(forKey: cacheKey),
@@ -80,6 +81,9 @@ enum WebSessionTokenCache {
               !cached.jazoest.isEmpty,
               !cached.lsdToken.isEmpty,
               !cached.dtsgToken.isEmpty else {
+            return nil
+        }
+        if Date().timeIntervalSince(cached.updatedAt) > ttlSeconds {
             return nil
         }
         return cached
@@ -814,7 +818,7 @@ final class FacebookGraphQLAutoClient {
         self.proxy = proxy
         self.userAgent = userAgent
 
-        // Giả lập Desktop Chrome để tương thích chính xác 100% với Relay Comet Web GraphQL
+        // Giả lập Desktop Chrome khớp 100% với 1758035539-Test.py
         let desktopUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
         self.baseHeaders = [
             "User-Agent": desktopUA,
@@ -822,15 +826,24 @@ final class FacebookGraphQLAutoClient {
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": "\"Windows\"",
             "sec-ch-ua-platform-version": "\"19.0.0\"",
+            "sec-ch-ua-model": "\"\"",
+            "sec-ch-ua-full-version-list": "\"Not)A;Brand\";v=\"8.0.0.0\", \"Chromium\";v=\"138.0.7204.97\", \"Google Chrome\";v=\"138.0.7204.97\"",
             "sec-ch-prefers-color-scheme": "dark",
             "accept-language": "vi,fr-FR;q=0.9,fr;q=0.8,en-US;q=0.7,en;q=0.6",
             "Cookie": cookieString
         ]
 
-        // Tạo session 1 lần, tái dùng toàn bộ
+        // Khởi tạo cookie storage riêng biệt và nạp cookie để URLSession tự động đính kèm không bị CFNetwork lọc
+        let cookieStorage = HTTPCookieStorage()
+        let parsedCookies = Self.parseCookies(from: cookieString)
+        for c in parsedCookies {
+            cookieStorage.setCookie(c)
+        }
+
         let config = URLSessionConfiguration.default
-        config.httpCookieAcceptPolicy = .never
-        config.httpShouldSetCookies = false
+        config.httpCookieStorage = cookieStorage
+        config.httpCookieAcceptPolicy = .always
+        config.httpShouldSetCookies = true
         if let proxy, proxy.isEnabled {
             config.proxyConfigurations = [proxy.toNetworkProxyConfiguration()]
         }
@@ -881,9 +894,12 @@ final class FacebookGraphQLAutoClient {
         let jazoest = Self.firstMatch(pattern: #"jazoest=(\d+)"#, in: html) ?? "25400"
         let lsdToken = Self.firstMatch(pattern: #""token":"([^"]+)"},323\]"#, in: html)
             ?? Self.firstMatch(pattern: #""LSD",\[\],\{"token":"([^"]+)""#, in: html)
+            ?? Self.firstMatch(pattern: #"name="lsd" value="([^"]+)""#, in: html)
             ?? ""
         guard let dtsgToken = Self.firstMatch(pattern: #""dtsg":\{"token":"([^"]+)""#, in: html)
-                ?? Self.firstMatch(pattern: #""DTSGInitialData",\[\],\{"token":"([^"]+)""#, in: html),
+                ?? Self.firstMatch(pattern: #""DTSGInitialData",\[\],\{"token":"([^"]+)""#, in: html)
+                ?? Self.firstMatch(pattern: #""DTSGInitData",\[\],\{"token":"([^"]+)""#, in: html)
+                ?? Self.firstMatch(pattern: #"name="fb_dtsg" value="([^"]+)""#, in: html),
               !dtsgToken.isEmpty else {
             let err = "Không lấy được fb_dtsg từ Cookie (Cookie có thể đã hết hạn hoặc bị checkpoint)."
             AppLogger.shared.error("FacebookWeb", "Lỗi lấy session tokens cho c_user=\(userId)", detail: err)
@@ -902,14 +918,9 @@ final class FacebookGraphQLAutoClient {
     }
 
     func getNewsFeedPosts() async throws -> [FeedPostItem] {
-        let tok: FacebookWebSessionTokens
-        if let existing = tokens {
-            tok = existing
-        } else {
-            tok = try await prepareTokens()
-        }
-
-        AppLogger.shared.info("NewsFeed", "Bắt đầu lấy News Feed — userId: \(tok.userId)")
+        // Luôn chuẩn bị token (TTL 5 phút đảm bảo fb_dtsg và lsd còn sống)
+        let tok = try await prepareTokens()
+        AppLogger.shared.info("NewsFeed", "Bắt đầu lấy News Feed — userId: \(tok.userId), dtsg: \(String(tok.dtsgToken.prefix(8)))...")
 
         // ── Ưu tiên 1: Graph API (nếu có access token, ổn định nhất) ──────
         if !accessToken.isEmpty {
@@ -921,26 +932,48 @@ final class FacebookGraphQLAutoClient {
             AppLogger.shared.warning("NewsFeed", "Graph API trả 0 bài, thử phương án GraphQL web...")
         }
 
-        // ── Ưu tiên 2: GraphQL Web với nhiều doc_id thay thế ───────────────
-        // doc_id thay đổi theo phiên bản FB — thử nhiều cái
+        // ── Ưu tiên 2: GraphQL Web theo đúng doc_id của 1758035539-Test.py ──
         let docIds = [
-            "24488967877354300",  // version cũ
-            "9117175968304833",   // version khác
+            "24488967877354300",  // chuẩn 1758035539-Test.py
+            "9117175968304833",
             "8858919374123928",
             "7851302958266762"
         ]
 
         for docId in docIds {
             AppLogger.shared.debug("NewsFeed", "Thử GraphQL doc_id: \(docId)")
-            if let posts = try? await fetchFeedViaGraphQL(tok: tok, docId: docId), !posts.isEmpty {
-                AppLogger.shared.info("NewsFeed", "✅ GraphQL (\(docId)) — \(posts.count) bài viết")
-                return posts
+            do {
+                let posts = try await fetchFeedViaGraphQL(tok: tok, docId: docId)
+                if !posts.isEmpty {
+                    AppLogger.shared.info("NewsFeed", "✅ GraphQL (\(docId)) — \(posts.count) bài viết")
+                    return posts
+                }
+            } catch {
+                AppLogger.shared.warning("NewsFeed", "GraphQL doc_id \(docId) exception: \(error.localizedDescription)")
+            }
+        }
+
+        // Tất cả doc_id thất bại → Bắt buộc làm mới token và thử lại 1 lần
+        AppLogger.shared.warning("NewsFeed", "⚠️ Tất cả doc_id thất bại, làm mới fb_dtsg/lsd và retry...")
+        let freshTok = try await prepareTokens(forceRefresh: true)
+        AppLogger.shared.info("NewsFeed", "Token mới: dtsg=\(String(freshTok.dtsgToken.prefix(8)))..., lsd=\(String(freshTok.lsdToken.prefix(8)))...")
+
+        for docId in docIds {
+            AppLogger.shared.debug("NewsFeed", "Retry GraphQL doc_id: \(docId)")
+            do {
+                let posts = try await fetchFeedViaGraphQL(tok: freshTok, docId: docId)
+                if !posts.isEmpty {
+                    AppLogger.shared.info("NewsFeed", "✅ GraphQL retry (\(docId)) — \(posts.count) bài viết")
+                    return posts
+                }
+            } catch {
+                AppLogger.shared.warning("NewsFeed", "Retry doc_id \(docId) exception: \(error.localizedDescription)")
             }
         }
 
         // ── Ưu tiên 3: Lấy trực tiếp từ trang chủ Facebook qua HTML scraping ──
-        AppLogger.shared.warning("NewsFeed", "GraphQL thất bại, thử scrape HTML homepage...")
-        let htmlPosts = try await fetchFeedViaHomepageScrape(tok: tok)
+        AppLogger.shared.warning("NewsFeed", "GraphQL thất bại hoàn toàn, thử scrape HTML homepage...")
+        let htmlPosts = try await fetchFeedViaHomepageScrape(tok: freshTok)
         AppLogger.shared.info("NewsFeed", htmlPosts.isEmpty ? "⚠️ Scrape cũng không tìm thấy bài viết" : "✅ Scrape — \(htmlPosts.count) bài viết")
         return htmlPosts
     }
@@ -1066,18 +1099,19 @@ final class FacebookGraphQLAutoClient {
         let (data, response) = try await session.data(for: request)
         let httpStatus = (response as? HTTPURLResponse)?.statusCode ?? 0
         let responseText = String(data: data, encoding: .utf8) ?? ""
-        AppLogger.shared.debug("NewsFeed", "GraphQL \(docId): HTTP \(httpStatus), \(data.count) bytes")
 
-        if responseText.contains("\"errors\"") && responseText.contains("doc_id") {
+        // Log raw response để người dùng xem được trong Log Console
+        let rawPreview = String(responseText.prefix(250)).replacingOccurrences(of: "\n", with: "↵")
+        AppLogger.shared.debug("NewsFeed-RAW", "doc_id \(docId): HTTP \(httpStatus), \(data.count)B → \(rawPreview)")
+
+        // Phát hiện lỗi doc_id không tồn tại
+        if responseText.contains("\"errors\"") && (responseText.contains("doc_id") || responseText.contains("DocumentID")) {
             let preview = String(responseText.prefix(200)).replacingOccurrences(of: "\n", with: " ")
             AppLogger.shared.warning("NewsFeed", "doc_id \(docId) lỗi: \(preview)")
             return []
         }
-        if httpStatus != 200 || (responseText.contains("\"login\"") && !responseText.contains("\"post_id\"") && !responseText.contains("\"story\"")) {
-            AppLogger.shared.warning("NewsFeed", "doc_id \(docId): HTTP \(httpStatus), có thể bị redirect login")
-            return []
-        }
 
+        // Bóc tách bài viết trực tiếp (không chặn nhầm nếu response chứa chữ login)
         var posts = extractPostItems(from: responseText)
         if !accessToken.isEmpty {
             for idx in posts.indices where posts[idx].postText.isEmpty {
@@ -1444,7 +1478,12 @@ final class FacebookGraphQLAutoClient {
         request.httpBody = Self.formEncode(payload)
 
         do {
-            let (data, _) = try await session.data(for: request)
+            let (data, httpResp) = try await session.data(for: request)
+            let httpStatus = (httpResp as? HTTPURLResponse)?.statusCode ?? 0
+            let rawStr = String(data: data, encoding: .utf8) ?? ""
+            let rawPrev = String(rawStr.prefix(300)).replacingOccurrences(of: "\n", with: "↵")
+            AppLogger.shared.debug("AutoReact-RAW", "HTTP \(httpStatus), \(data.count)B: \(rawPrev)")
+
             let json = Self.parseFacebookGraphQLResponse(data)
 
             if let json {
@@ -1612,7 +1651,12 @@ final class FacebookGraphQLAutoClient {
         request.httpBody = Self.formEncode(payload)
 
         do {
-            let (data, _) = try await session.data(for: request)
+            let (data, httpResp) = try await session.data(for: request)
+            let httpStatus = (httpResp as? HTTPURLResponse)?.statusCode ?? 0
+            let rawStr = String(data: data, encoding: .utf8) ?? ""
+            let rawPrev = String(rawStr.prefix(300)).replacingOccurrences(of: "\n", with: "↵")
+            AppLogger.shared.debug("AutoReact-RAW", "HTTP \(httpStatus), \(data.count)B: \(rawPrev)")
+
             let json = Self.parseFacebookGraphQLResponse(data)
 
             if let json {
@@ -1728,6 +1772,28 @@ final class FacebookGraphQLAutoClient {
             return "{}"
         }
         return str
+    }
+
+    private static func parseCookies(from cookieString: String) -> [HTTPCookie] {
+        var cookies: [HTTPCookie] = []
+        let pairs = cookieString.components(separatedBy: ";")
+        for pair in pairs {
+            let trimmed = pair.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let eqIdx = trimmed.firstIndex(of: "=") else { continue }
+            let name = String(trimmed[..<eqIdx]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = String(trimmed[trimmed.index(after: eqIdx)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { continue }
+            if let c = HTTPCookie(properties: [
+                .name: name,
+                .value: value,
+                .domain: ".facebook.com",
+                .path: "/",
+                .originURL: URL(string: "https://www.facebook.com")!
+            ]) {
+                cookies.append(c)
+            }
+        }
+        return cookies
     }
 
     private static func formEncode(_ params: [String: String]) -> Data {
