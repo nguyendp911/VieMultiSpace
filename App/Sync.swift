@@ -3,7 +3,7 @@ import WebKit
 import UIKit
 
 enum BatchMode: String, CaseIterable {
-    case targetInteract = "Reaction & Comment"
+    case targetInteract = "React & Comment"
     case openURL = "Mở URL"
     case refresh = "Nạp lại"
 }
@@ -18,8 +18,8 @@ enum TargetCategoryHint: String, CaseIterable, Identifiable {
 }
 
 enum TargetCommentSource: String, CaseIterable, Identifiable {
-    case manualLines = "📋 Dán Comment (1 hàng = 1 không gian)"
-    case geminiAI = "✨ AI Gemini tự sinh (Không trùng)"
+    case manualLines = "📋 Dán Comment (1 hàng/space)"
+    case geminiAI = "✨ Gemini tự sinh (Không trùng)"
     var id: String { rawValue }
 }
 
@@ -117,11 +117,15 @@ final class BatchSyncEngine: NSObject, ObservableObject, WKNavigationDelegate {
 
         var sampleCookie = ""
         var sampleToken = ""
+        var sampleProxy: SpaceProxy? = nil
+        var sampleUA: String? = nil
         for sp in spaces {
             let creds = await Self.resolveCookieAndToken(for: sp)
             if !creds.cookie.isEmpty {
                 sampleCookie = creds.cookie
                 sampleToken = creds.token
+                sampleProxy = sp.proxy
+                sampleUA = sp.fingerprint?.userAgent
                 break
             }
         }
@@ -129,7 +133,9 @@ final class BatchSyncEngine: NSObject, ObservableObject, WKNavigationDelegate {
         var resolved = try await FacebookTargetPostResolver.resolve(
             input: targetInput,
             cookieString: sampleCookie,
-            accessToken: sampleToken
+            accessToken: sampleToken,
+            proxy: sampleProxy,
+            userAgent: sampleUA
         )
         if categoryHint != .auto {
             resolved.targetKind = categoryHint.rawValue
@@ -230,7 +236,9 @@ final class BatchSyncEngine: NSObject, ObservableObject, WKNavigationDelegate {
                 let client = FacebookGraphQLAutoClient(
                     spaceId: space.id,
                     cookieString: creds.cookie,
-                    accessToken: creds.token
+                    accessToken: creds.token,
+                    proxy: space.proxy,
+                    userAgent: space.fingerprint?.userAgent
                 )
 
                 do {
@@ -487,7 +495,22 @@ final class BatchSyncEngine: NSObject, ObservableObject, WKNavigationDelegate {
         mark(space, status: .loading, detail: address.host ?? "Đang kết nối")
 
         let config = WKWebViewConfiguration()
-        config.websiteDataStore = WKWebsiteDataStore(forIdentifier: space.id)
+        let store = WKWebsiteDataStore(forIdentifier: space.id)
+        if let proxy = space.proxy, proxy.isEnabled {
+            store.proxyConfigurations = [proxy.toNetworkProxyConfiguration()]
+        } else {
+            store.proxyConfigurations = []
+        }
+        config.websiteDataStore = store
+
+        let fp = space.fingerprint ?? SpaceFingerprint.defaultFor(spaceId: space.id)
+        config.customUserAgent = fp.userAgent
+
+        let contentController = WKUserContentController()
+        let scriptSource = fp.buildAntiDetectScript()
+        contentController.addUserScript(WKUserScript(source: scriptSource, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        config.userContentController = contentController
+
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         activeWebView = webView
@@ -714,7 +737,7 @@ struct MultiSpaceSyncView: View {
                 .disabled(engine.isRunning)
             }
         } header: {
-            Text("1. Chọn các không gian thực hiện")
+            Text("1. Chọn không gian")
         } footer: {
             Text("Dùng trực tiếp Cookie & Token đã lưu của từng không gian mà không cần đăng nhập lại.")
         }
@@ -722,7 +745,7 @@ struct MultiSpaceSyncView: View {
 
     @ViewBuilder
     private var modeSelectionSection: some View {
-        Section("2. Chế độ MultiSpace Sync") {
+        Section("2. Chế độ hoạt động") {
             Picker("Thao tác", selection: $mode) {
                 ForEach(BatchMode.allCases, id: \.self) { action in
                     Text(action.rawValue).tag(action)
@@ -821,7 +844,7 @@ struct MultiSpaceSyncView: View {
                 .padding(.vertical, 4)
             }
         } header: {
-            Text("3. Ô nhập Bài viết / Reel / Nhóm / Fanpage chỉ định")
+            Text("3. Mục tiêu tương tác (Post / Reel / Group / Page)")
         } footer: {
             Text("Hỗ trợ mọi định dạng: Link bài viết cá nhân, Reel (facebook.com/reel/...), bài trong Nhóm (facebook.com/groups/...), bài Fanpage, link chia sẻ (share/p/..., share/r/...) hoặc ID số.")
         }
@@ -829,7 +852,7 @@ struct MultiSpaceSyncView: View {
 
     @ViewBuilder
     private var reactionAndCommentSection: some View {
-        Section("4. Tùy chọn Thả Cảm xúc & Bình luận (Không trùng)") {
+        Section("4. Cảm xúc & Bình luận (Không trùng)") {
             Toggle("Thả cảm xúc (Reaction)", isOn: $useReaction)
                 .disabled(engine.isRunning)
 
@@ -976,14 +999,14 @@ struct MultiSpaceSyncView: View {
     private var safeModeSection: some View {
         Section {
             Toggle(isOn: $safeModeEnabled) {
-                Label("Bật SafeMode (Ngẫu nhiên hóa thời gian chờ)", systemImage: "shield.lefthalf.filled.badge.checkmark")
+                Label("SafeMode ngẫu nhiên hóa thời gian chờ", systemImage: "shield.lefthalf.filled.badge.checkmark")
                     .fontWeight(.semibold)
             }
             .disabled(engine.isRunning)
 
             if useReaction && useComment {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Nghỉ ngẫu nhiên giữa Reaction và Comment (giây — không giới hạn):")
+                    Text("Nghỉ ngẫu nhiên giữa React & Comment (giây):")
                         .font(.caption).foregroundStyle(.secondary)
                     HStack {
                         Text("Từ (s):").font(.caption)
@@ -1001,7 +1024,7 @@ struct MultiSpaceSyncView: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Nghỉ ngẫu nhiên giữa các không gian (giây — không giới hạn):")
+                Text("Nghỉ ngẫu nhiên giữa các không gian (giây):")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Text("Từ (s):").font(.caption)
@@ -1017,7 +1040,7 @@ struct MultiSpaceSyncView: View {
                 }
             }
         } header: {
-            Text("5. SafeMode bảo vệ tài khoản (Tùy chỉnh giây không giới hạn)")
+            Text("5. SafeMode bảo vệ tài khoản")
         }
     }
 
@@ -1036,6 +1059,8 @@ struct MultiSpaceSyncView: View {
                     Label("Thực hiện với \(selectedSpaces.count) không gian",
                           systemImage: "play.fill")
                         .fontWeight(.bold)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                 }
                 .disabled(!canStart)
             }
@@ -1068,7 +1093,7 @@ struct MultiSpaceSyncView: View {
                     .padding(.vertical, 3)
                 }
             } header: {
-                Text("Trạng thái từng không gian")
+                Text("Tiến độ từng không gian")
             }
         }
     }

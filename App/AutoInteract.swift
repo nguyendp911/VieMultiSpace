@@ -543,7 +543,9 @@ enum FacebookTargetPostResolver {
     static func resolve(
         input: String,
         cookieString: String,
-        accessToken: String = ""
+        accessToken: String = "",
+        proxy: SpaceProxy? = nil,
+        userAgent: String? = nil
     ) async throws -> ResolvedTargetPost {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -596,17 +598,29 @@ enum FacebookTargetPostResolver {
         // Tải trang mục tiêu kèm Cookie để giải mã link rút gọn (share/p, share/r, pfbid...) và lấy feedback_id + nội dung bài viết
         var request = URLRequest(url: targetURL)
         request.httpMethod = "GET"
-        request.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+        let effectiveUA = (userAgent?.isEmpty == false)
+            ? userAgent!
+            : "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+        request.setValue(effectiveUA, forHTTPHeaderField: "User-Agent")
         request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
         request.setValue("vi,en-US;q=0.8,en;q=0.6", forHTTPHeaderField: "accept-language")
         if !cookieString.isEmpty {
             request.setValue(cookieString, forHTTPHeaderField: "Cookie")
         }
 
+        let session: URLSession
+        if let proxy, proxy.isEnabled {
+            let cfg = URLSessionConfiguration.default
+            cfg.proxyConfigurations = [proxy.toNetworkProxyConfiguration()]
+            session = URLSession(configuration: cfg)
+        } else {
+            session = URLSession.shared
+        }
+
         var finalURL: URL? = targetURL
         var html = ""
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             if let httpResp = response as? HTTPURLResponse, let redirected = httpResp.url {
                 finalURL = redirected
                 let redirectedStr = redirected.absoluteString
@@ -683,7 +697,7 @@ enum FacebookTargetPostResolver {
         }
 
         if postText.isEmpty, !accessToken.isEmpty {
-            postText = await fetchGraphMessage(id: finalPostId, accessToken: accessToken) ?? ""
+            postText = await fetchGraphMessage(id: finalPostId, accessToken: accessToken, session: session) ?? ""
         }
 
         return ResolvedTargetPost(
@@ -719,7 +733,7 @@ enum FacebookTargetPostResolver {
         return nil
     }
 
-    private static func fetchGraphMessage(id: String, accessToken: String) async -> String? {
+    private static func fetchGraphMessage(id: String, accessToken: String, session: URLSession = .shared) async -> String? {
         var comps = URLComponents(string: "https://graph.facebook.com/v18.0/\(id)")
         comps?.queryItems = [
             URLQueryItem(name: "fields", value: "message,description,story"),
@@ -727,7 +741,7 @@ enum FacebookTargetPostResolver {
         ]
         guard let url = comps?.url else { return nil }
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let (data, _) = try await session.data(from: url)
             if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 if let m = json["message"] as? String, !m.isEmpty { return m }
                 if let d = json["description"] as? String, !d.isEmpty { return d }
@@ -773,24 +787,44 @@ final class FacebookGraphQLAutoClient {
     let spaceId: UUID
     let cookieString: String
     let accessToken: String
+    let proxy: SpaceProxy?
+    let userAgent: String?
     private(set) var tokens: FacebookWebSessionTokens?
 
     private let baseHeaders: [String: String]
 
-    init(spaceId: UUID, cookieString: String, accessToken: String = "") {
+    private var session: URLSession {
+        let config = URLSessionConfiguration.default
+        if let proxy, proxy.isEnabled {
+            config.proxyConfigurations = [proxy.toNetworkProxyConfiguration()]
+        }
+        return URLSession(configuration: config)
+    }
+
+    init(
+        spaceId: UUID,
+        cookieString: String,
+        accessToken: String = "",
+        proxy: SpaceProxy? = nil,
+        userAgent: String? = nil
+    ) {
         self.spaceId = spaceId
         self.cookieString = cookieString
         self.accessToken = accessToken
+        self.proxy = proxy
+        self.userAgent = userAgent
+
+        let effectiveUA = (userAgent?.isEmpty == false)
+            ? userAgent!
+            : "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+
         self.baseHeaders = [
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+            "User-Agent": effectiveUA,
             "sec-ch-ua": "\"Not)A;Brand\";v=\"8\", \"Chromium\";v=\"138\", \"Google Chrome\";v=\"138\"",
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": "\"Windows\"",
-            "sec-ch-ua-platform-version": "\"19.0.0\"",
-            "sec-ch-ua-model": "\"\"",
-            "sec-ch-ua-full-version-list": "\"Not)A;Brand\";v=\"8.0.0.0\", \"Chromium\";v=\"138.0.7204.97\", \"Google Chrome\";v=\"138.0.7204.97\"",
+            "sec-ch-ua-mobile": "?1",
+            "sec-ch-ua-platform": "\"iOS\"",
             "sec-ch-prefers-color-scheme": "dark",
-            "accept-language": "vi,fr-FR;q=0.9,fr;q=0.8,en-US;q=0.7,en;q=0.6",
+            "accept-language": "vi,en-US;q=0.8,en;q=0.6",
             "Cookie": cookieString
         ]
     }
@@ -833,7 +867,7 @@ final class FacebookGraphQLAutoClient {
         request.setValue("document", forHTTPHeaderField: "sec-fetch-dest")
         request.setValue("u=0, i", forHTTPHeaderField: "priority")
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, _) = try await session.data(for: request)
         let html = String(data: data, encoding: .utf8) ?? ""
 
         let jazoest = Self.firstMatch(pattern: #"jazoest=(\d+)"#, in: html) ?? "25400"
@@ -943,7 +977,7 @@ final class FacebookGraphQLAutoClient {
         request.setValue("u=1, i", forHTTPHeaderField: "priority")
         request.httpBody = Self.formEncode(payload)
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, _) = try await session.data(for: request)
         let responseText = String(data: data, encoding: .utf8) ?? ""
         var posts = extractPostItems(from: responseText)
 
@@ -967,7 +1001,7 @@ final class FacebookGraphQLAutoClient {
         ]
         guard let url = comps?.url else { return nil }
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let (data, _) = try await session.data(from: url)
             if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 if let msg = json["message"] as? String, !msg.isEmpty { return msg }
                 if let desc = json["description"] as? String, !desc.isEmpty { return desc }
@@ -1134,7 +1168,7 @@ final class FacebookGraphQLAutoClient {
         request.httpBody = Self.formEncode(payload)
 
         do {
-            let (data, _) = try await URLSession.shared.data(for: request)
+            let (data, _) = try await session.data(for: request)
             if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 if let dataObj = json["data"] as? [String: Any],
                    let reactObj = dataObj["feedback_react"] as? [String: Any],
@@ -1237,7 +1271,7 @@ final class FacebookGraphQLAutoClient {
         request.httpBody = Self.formEncode(payload)
 
         do {
-            let (data, _) = try await URLSession.shared.data(for: request)
+            let (data, _) = try await session.data(for: request)
             if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 if let dataObj = json["data"] as? [String: Any],
                    let commentCreate = dataObj["comment_create"] as? [String: Any] {
@@ -1520,7 +1554,9 @@ final class AutoInteractCoordinator: ObservableObject {
         let client = FacebookGraphQLAutoClient(
             spaceId: space.id,
             cookieString: credentials.cookie,
-            accessToken: credentials.token
+            accessToken: credentials.token,
+            proxy: space.proxy,
+            userAgent: space.fingerprint?.userAgent
         )
 
         do {
@@ -1862,13 +1898,13 @@ struct AutoInteractView: View {
 
             Section {
                 Toggle(isOn: $safeModeEnabled) {
-                    Label("Bật SafeMode (Ngẫu nhiên hóa toàn bộ thời gian chờ)", systemImage: "shield.lefthalf.filled.badge.checkmark")
+                    Label("SafeMode ngẫu nhiên hóa thời gian chờ", systemImage: "shield.lefthalf.filled.badge.checkmark")
                         .fontWeight(.semibold)
                 }
                 .disabled(coordinator.isRunning)
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Thời gian nghỉ ngẫu nhiên giữa các bài viết (giây — không giới hạn):")
+                    Text("Nghỉ ngẫu nhiên giữa các bài viết (giây):")
                         .font(.caption).foregroundStyle(.secondary)
                     HStack {
                         Text("Từ (s):")
@@ -1888,7 +1924,7 @@ struct AutoInteractView: View {
 
                 if useReaction && useComment {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Nghỉ ngẫu nhiên giữa Thả cảm xúc và Bình luận (giây — không giới hạn):")
+                        Text("Nghỉ ngẫu nhiên giữa React & Comment (giây):")
                             .font(.caption).foregroundStyle(.secondary)
                         HStack {
                             Text("Từ (s):")
@@ -1923,7 +1959,7 @@ struct AutoInteractView: View {
 
                 if continuousLoop {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Nghỉ ngẫu nhiên giữa các đợt quét News Feed (giây — không giới hạn):")
+                        Text("Nghỉ ngẫu nhiên giữa các đợt quét (giây):")
                             .font(.caption).foregroundStyle(.secondary)
                         HStack {
                             Text("Từ (s):")
@@ -1942,7 +1978,7 @@ struct AutoInteractView: View {
                     }
                 }
             } header: {
-                Text("3. Chế độ an toàn SafeMode (Tùy chỉnh giây không giới hạn)")
+                Text("3. SafeMode bảo vệ tài khoản")
             } footer: {
                 Text("Mỗi lần chờ sẽ sinh ngẫu nhiên một giá trị thực (kèm độ lệch mili-giây) nằm trong khoảng Từ [Min] đến [Max] giây bạn nhập, không giới hạn trần tối đa.")
             }
@@ -1961,13 +1997,15 @@ struct AutoInteractView: View {
                     } label: {
                         Label("Bắt đầu chạy (\(selectedSpaces.count) không gian)", systemImage: "play.circle.fill")
                             .fontWeight(.bold)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
                     }
                     .disabled(selectedSpaces.isEmpty || (!useReaction && !useComment))
                 }
             }
 
             if !coordinator.states.isEmpty {
-                Section("Trạng thái từng không gian") {
+                Section("Tiến độ từng không gian") {
                     ForEach(selectedSpaces) { space in
                         if let st = coordinator.states[space.id] {
                             VStack(alignment: .leading, spacing: 4) {

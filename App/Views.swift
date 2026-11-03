@@ -10,6 +10,7 @@ struct SpaceDashboard: View {
     @State private var openSpace: Space?
     @State private var tokenSpace: Space?
     @State private var autoSpace: Space?
+    @State private var proxySpace: Space?
     @State private var renameSpace: Space?
     @State private var renameValue = ""
     @State private var deleteSpace: Space?
@@ -26,13 +27,21 @@ struct SpaceDashboard: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Label("Vie MultiSpace", systemImage: "square.stack.3d.up.fill")
                                 .font(.title2.bold())
-                            Text("Quản lý nhiều phiên đăng nhập web độc lập, Kho Token và Auto Tương tác AI trên iPhone.")
+                            Text("Quản lý nhiều phiên đăng nhập web độc lập, Proxy & Vân tay Anti-Detect, Kho Token và Auto AI.")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                             Text("\(library.spaces.count) không gian")
                                 .font(.caption.monospacedDigit())
                         }
                         .padding(.vertical, 10)
+                    }
+                    Section("Mạng & Bảo mật phiên") {
+                        NavigationLink {
+                            BatchProxyManagerView()
+                        } label: {
+                            Label("Proxy & Vân tay Anti-Detect", systemImage: "network.badge.shield.half.filled")
+                                .fontWeight(.semibold)
+                        }
                     }
                     Section("Quản lý tài khoản & Token") {
                         NavigationLink {
@@ -45,29 +54,32 @@ struct SpaceDashboard: View {
                         NavigationLink {
                             AutoInteractView()
                         } label: {
-                            Label("Auto Thả cảm xúc & Comment Gemini AI", systemImage: "sparkles")
+                            Label("Auto News Feed — Reaction & Cmt AI", systemImage: "sparkles")
                                 .fontWeight(.semibold)
                         }
                         NavigationLink {
                             MultiSpaceSyncView()
                         } label: {
-                            Label("MultiSpace Sync — Reaction & Cmt bài chỉ định", systemImage: "square.stack.3d.up")
+                            Label("MultiSpace Sync — Tương tác bài chỉ định", systemImage: "square.stack.3d.up")
                                 .fontWeight(.semibold)
                         }
                     }
                     Section("Không gian của tôi") {
                         ForEach(library.spaces) { space in
                             let summary = VaultMetadataIndex.get(space.id)
-                            HStack(spacing: 10) {
+                            HStack(spacing: 8) {
                                 Button { openSpace = space } label: {
-                                    HStack(spacing: 12) {
+                                    HStack(spacing: 10) {
                                         Image(systemName: space.platform.icon)
                                             .font(.title3)
                                             .foregroundStyle(.white)
-                                            .frame(width: 43, height: 43)
-                                            .background(space.platform.color, in: RoundedRectangle(cornerRadius: 11))
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            Text(space.name).font(.headline).foregroundStyle(.primary)
+                                            .frame(width: 40, height: 40)
+                                            .background(space.platform.color, in: RoundedRectangle(cornerRadius: 10))
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(space.name)
+                                                .font(.headline)
+                                                .foregroundStyle(.primary)
+                                                .lineLimit(1)
                                             HStack(spacing: 4) {
                                                 Text(space.platform.rawValue)
                                                 if summary.hasToken {
@@ -78,16 +90,34 @@ struct SpaceDashboard: View {
                                                     Text("· Đã lưu Cookie")
                                                         .foregroundStyle(.orange)
                                                 } else {
-                                                    Text("· Phiên web riêng")
+                                                    Text("· Phiên riêng")
                                                 }
                                             }
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+
+                                            if let pxy = space.proxy, pxy.isEnabled {
+                                                Text(pxy.displaySummary)
+                                                    .font(.caption2.monospaced())
+                                                    .foregroundStyle(.blue)
+                                                    .lineLimit(1)
+                                            }
                                         }
-                                        Spacer()
+                                        Spacer(minLength: 4)
                                     }
                                 }
                                 .buttonStyle(.plain)
+
+                                Button {
+                                    proxySpace = space
+                                } label: {
+                                    Image(systemName: space.proxy?.isEnabled == true ? "network" : "slider.horizontal.3")
+                                        .foregroundStyle(space.proxy?.isEnabled == true ? .blue : .secondary)
+                                        .frame(width: 28, height: 28)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.mini)
 
                                 if space.platform == .facebook {
                                     Button {
@@ -95,26 +125,31 @@ struct SpaceDashboard: View {
                                     } label: {
                                         Image(systemName: "sparkles")
                                             .foregroundStyle(.purple)
-                                            .padding(6)
+                                            .frame(width: 28, height: 28)
                                     }
                                     .buttonStyle(.bordered)
-                                    .controlSize(.small)
+                                    .controlSize(.mini)
 
                                     Button {
                                         tokenSpace = space
                                     } label: {
                                         Image(systemName: summary.hasToken ? "key.radiowaves.forward.fill" : "key.fill")
                                             .foregroundStyle(summary.hasToken ? .green : .blue)
-                                            .padding(6)
+                                            .frame(width: 28, height: 28)
                                     }
                                     .buttonStyle(.bordered)
-                                    .controlSize(.small)
+                                    .controlSize(.mini)
                                 }
 
-                                Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+                                Image(systemName: "chevron.right")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
                             }
-                            .padding(.vertical, 4)
+                            .padding(.vertical, 3)
                             .contextMenu {
+                                Button("Cấu hình Proxy & Dấu vân tay", systemImage: "slider.horizontal.3") {
+                                    proxySpace = space
+                                }
                                 if space.platform == .facebook {
                                     Button("Auto Thả cảm xúc & Comment AI", systemImage: "sparkles") {
                                         autoSpace = space
@@ -142,7 +177,7 @@ struct SpaceDashboard: View {
                         .disabled(busy)
                     }
                     Section {
-                        Text("Cookie, Access Token và dữ liệu web của mỗi không gian chỉ được lưu trong Keychain & WebKit trên iPhone.")
+                        Text("Cookie, Access Token, Proxy và dữ liệu web của mỗi không gian chỉ được lưu trong Keychain & WebKit trên iPhone.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
@@ -182,6 +217,11 @@ struct SpaceDashboard: View {
             .sheet(item: $autoSpace) { space in
                 NavigationStack {
                     AutoInteractView(preselectedSpace: space)
+                }
+            }
+            .sheet(item: $proxySpace) { space in
+                NavigationStack {
+                    SpaceProxyFingerprintSheet(space: space)
                 }
             }
             .sheet(item: $renameSpace) { space in
@@ -260,7 +300,7 @@ struct SpaceDashboard: View {
     private func authenticate() {
         let context = LAContext()
         context.evaluatePolicy(.deviceOwnerAuthentication,
-                               localizedReason: "Mở khóa Vie MultiSpace") { success, _ in
+                                localizedReason: "Mở khóa Vie MultiSpace") { success, _ in
             DispatchQueue.main.async {
                 if success { isLocked = false }
             }
@@ -298,7 +338,7 @@ struct AddSpaceSheet: View {
                         .autocorrectionDisabled()
                 }
                 Section {
-                    Label("Mỗi không gian có vùng cookie, dữ liệu web và Kho Token riêng biệt.",
+                    Label("Mỗi không gian có vùng cookie, dữ liệu web, Dấu vân tay và Kho Token riêng biệt.",
                           systemImage: "lock.shield")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
@@ -359,6 +399,11 @@ struct SpaceBrowser: View {
             HStack {
                 Label("Phiên độc lập • " + space.platform.rawValue, systemImage: "lock.shield.fill")
                     .font(.caption).foregroundStyle(.secondary)
+                if let pxy = space.proxy, pxy.isEnabled {
+                    Text("• \(pxy.displaySummary)")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.blue)
+                }
                 Spacer()
                 if browser.isLoading { ProgressView().controlSize(.small) }
             }
@@ -399,7 +444,26 @@ struct IsolatedWebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
-        config.websiteDataStore = WKWebsiteDataStore(forIdentifier: space.id)
+        let store = WKWebsiteDataStore(forIdentifier: space.id)
+
+        // 1. Cấu hình Proxy (nếu có và đang bật)
+        if let proxy = space.proxy, proxy.isEnabled {
+            store.proxyConfigurations = [proxy.toNetworkProxyConfiguration()]
+        } else {
+            store.proxyConfigurations = []
+        }
+        config.websiteDataStore = store
+
+        // 2. Cấu hình Dấu vân tay độc lập (Anti-Detect)
+        let fp = space.fingerprint ?? SpaceFingerprint.defaultFor(spaceId: space.id)
+        config.customUserAgent = fp.userAgent
+
+        let contentController = WKUserContentController()
+        let scriptSource = fp.buildAntiDetectScript()
+        let userScript = WKUserScript(source: scriptSource, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+        contentController.addUserScript(userScript)
+        config.userContentController = contentController
+
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true

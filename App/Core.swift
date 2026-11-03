@@ -43,10 +43,44 @@ enum SpacePlatform: String, Codable, CaseIterable, Identifiable {
 }
 
 struct Space: Identifiable, Codable, Hashable {
-    var id: UUID = UUID()
+    var id: UUID
     var name: String
     var platform: SpacePlatform
     var url: String
+    var proxy: SpaceProxy?
+    var fingerprint: SpaceFingerprint?
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        platform: SpacePlatform,
+        url: String,
+        proxy: SpaceProxy? = nil,
+        fingerprint: SpaceFingerprint? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.platform = platform
+        self.url = url
+        self.proxy = proxy
+        self.fingerprint = fingerprint ?? SpaceFingerprint.defaultFor(spaceId: id)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, platform, url, proxy, fingerprint
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedId = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        id = decodedId
+        name = try container.decode(String.self, forKey: .name)
+        platform = try container.decode(SpacePlatform.self, forKey: .platform)
+        url = try container.decode(String.self, forKey: .url)
+        proxy = try container.decodeIfPresent(SpaceProxy.self, forKey: .proxy)
+        fingerprint = try container.decodeIfPresent(SpaceFingerprint.self, forKey: .fingerprint)
+            ?? SpaceFingerprint.defaultFor(spaceId: decodedId)
+    }
 }
 
 enum SpaceError: LocalizedError {
@@ -69,7 +103,19 @@ final class SpaceLibrary: ObservableObject {
     init() {
         if let data = UserDefaults.standard.data(forKey: saveKey),
            let profiles = try? JSONDecoder().decode([Space].self, from: data) {
-            spaces = profiles
+            // Tự động gán Dấu vân tay riêng cho bất kỳ không gian nào chưa có
+            var updated = false
+            self.spaces = profiles.map { sp in
+                var mod = sp
+                if mod.fingerprint == nil {
+                    mod.fingerprint = SpaceFingerprint.defaultFor(spaceId: sp.id)
+                    updated = true
+                }
+                return mod
+            }
+            if updated {
+                persist()
+            }
         }
     }
 
@@ -132,6 +178,59 @@ final class SpaceLibrary: ObservableObject {
         var stored = UserDefaults.standard.dictionary(forKey: launchKey) as? [String: String] ?? [:]
         stored[space.id.uuidString] = url.absoluteString
         UserDefaults.standard.set(stored, forKey: launchKey)
+    }
+
+    // MARK: - Proxy & Fingerprint Management
+
+    func updateSpaceProxy(_ spaceId: UUID, proxy: SpaceProxy?) {
+        guard let index = spaces.firstIndex(where: { $0.id == spaceId }) else { return }
+        spaces[index].proxy = proxy
+        persist()
+    }
+
+    func updateSpaceFingerprint(_ spaceId: UUID, fingerprint: SpaceFingerprint) {
+        guard let index = spaces.firstIndex(where: { $0.id == spaceId }) else { return }
+        spaces[index].fingerprint = fingerprint
+        persist()
+    }
+
+    func batchApplyProxies(assignments: [(spaceId: UUID, proxy: SpaceProxy?)]) {
+        var didChange = false
+        for (sid, pxy) in assignments {
+            if let index = spaces.firstIndex(where: { $0.id == sid }) {
+                spaces[index].proxy = pxy
+                didChange = true
+            }
+        }
+        if didChange {
+            persist()
+        }
+    }
+
+    func batchClearProxies(for spaceIds: Set<UUID>) {
+        var didChange = false
+        for sid in spaceIds {
+            if let index = spaces.firstIndex(where: { $0.id == sid }) {
+                spaces[index].proxy = nil
+                didChange = true
+            }
+        }
+        if didChange {
+            persist()
+        }
+    }
+
+    func batchRegenerateFingerprints(for spaceIds: Set<UUID>, preset: DeviceModelPreset? = nil) {
+        var didChange = false
+        for sid in spaceIds {
+            if let index = spaces.firstIndex(where: { $0.id == sid }) {
+                spaces[index].fingerprint = SpaceFingerprint.generateRandom(preset: preset)
+                didChange = true
+            }
+        }
+        if didChange {
+            persist()
+        }
     }
 
     private func persist() {
