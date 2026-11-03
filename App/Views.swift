@@ -32,6 +32,13 @@ struct SpaceDashboard: View {
                         }
                         .padding(.vertical, 10)
                     }
+                    Section("Điều khiển nhóm") {
+                        NavigationLink {
+                            MultiSpaceSyncView()
+                        } label: {
+                            Label("MultiSpace Sync — thao tác theo nhóm", systemImage: "square.stack.3d.up")
+                        }
+                    }
                     Section("Không gian của tôi") {
                         ForEach(library.spaces) { space in
                             Button { openSpace = space } label: {
@@ -270,6 +277,7 @@ final class BrowserState: ObservableObject {
 }
 
 struct SpaceBrowser: View {
+    @EnvironmentObject private var library: SpaceLibrary
     @Environment(\.dismiss) private var dismiss
     @StateObject private var browser = BrowserState()
     let space: Space
@@ -283,7 +291,7 @@ struct SpaceBrowser: View {
                 if browser.isLoading { ProgressView().controlSize(.small) }
             }
             .padding(.horizontal, 14).padding(.vertical, 8)
-            IsolatedWebView(space: space, browser: browser)
+            IsolatedWebView(space: space, browser: browser, launchURL: library.lastPage(for: space))
             HStack {
                 Button(action: browser.back) { Image(systemName: "chevron.left") }
                     .disabled(!browser.canGoBack)
@@ -310,6 +318,7 @@ struct SpaceBrowser: View {
 struct IsolatedWebView: UIViewRepresentable {
     let space: Space
     @ObservedObject var browser: BrowserState
+    let launchURL: URL?
 
     func makeCoordinator() -> Coordinator { Coordinator(browser: browser) }
 
@@ -320,7 +329,7 @@ struct IsolatedWebView: UIViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         browser.webView = webView
-        if let url = SpaceLibrary.safeURL(space.url) {
+        if let url = launchURL ?? SpaceLibrary.safeURL(space.url) {
             webView.load(URLRequest(url: url))
         }
         return webView

@@ -95,6 +95,9 @@ final class SpaceLibrary: ObservableObject {
         // Do not keep this profile's WKWebView open while removing its store.
         try await WKWebsiteDataStore.remove(forIdentifier: space.id)
         spaces.removeAll { $0.id == space.id }
+        var stored = UserDefaults.standard.dictionary(forKey: launchKey) as? [String: String] ?? [:]
+        stored.removeValue(forKey: space.id.uuidString)
+        UserDefaults.standard.set(stored, forKey: launchKey)
         persist()
     }
 
@@ -111,6 +114,21 @@ final class SpaceLibrary: ObservableObject {
               components.user == nil, components.password == nil,
               let url = components.url else { return nil }
         return url
+    }
+
+    // Shared navigation targets are local to this phone and do not store logins.
+    private let launchKey = "vie.multispace.lastURL.v1"
+
+    func lastPage(for space: Space) -> URL? {
+        let stored = UserDefaults.standard.dictionary(forKey: launchKey) as? [String: String] ?? [:]
+        return stored[space.id.uuidString].flatMap(Self.safeURL)
+    }
+
+    func remember(_ url: URL, for space: Space) {
+        guard Self.safeURL(url.absoluteString) != nil else { return }
+        var stored = UserDefaults.standard.dictionary(forKey: launchKey) as? [String: String] ?? [:]
+        stored[space.id.uuidString] = url.absoluteString
+        UserDefaults.standard.set(stored, forKey: launchKey)
     }
 
     private func persist() {

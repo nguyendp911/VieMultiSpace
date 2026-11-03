@@ -32,3 +32,16 @@ open VieMultiSpace.xcodeproj
 Bundle ID là vn.vie.multispace, độc lập với HanziLock. Hãy giữ nguyên Bundle ID khi cập nhật để tránh mất dữ liệu.
 
 Không lưu mật khẩu trong mã nguồn, không đưa chứng chỉ .p12 hoặc tài khoản Apple ID lên repository công khai.
+
+
+## MultiSpace Sync — điều khiển theo nhóm
+
+Vào ứng dụng > **MultiSpace Sync**, chọn không gian (có Chọn tất cả / Bỏ chọn).
+- **Mở URL**: chỉ nhận HTTPS, mở theo hàng đợi **từng không gian một**, mỗi phiên có WKWebsiteDataStore riêng.
+- **Nạp lại**: tải lại liên kết nhóm cuối cùng đã nạp thành công hoặc URL trang chủ.
+- **Trạng thái**: Đang chờ, Đang tải, Đã nạp, Thất bại, Đã dừng; có thể dừng.
+- **Xem trước**: WKWebView thực đang tải được gắn vào khung xem trước; thời gian chờ 40 giây/không gian.
+- **Mở thủ công**: sau khi lệnh nhóm hoàn thành, khi mở từng không gian sẽ ưu tiên tải URL nhóm gần nhất.
+- Khi app vào nền, hàng đợi sẽ dừng; các phiên/chứng thực vẫn được tách độc lập.
+
+Lệnh này không đồng bộ cử chỉ và không tự động tương tác trên Facebook. "Đã nạp" là nạp xong tài liệu web, không có nghĩa website chấp nhận đăng nhập. Ứng dụng vẫn cần kiểm thử thực tế trên iPhone.
