@@ -814,17 +814,16 @@ final class FacebookGraphQLAutoClient {
         self.proxy = proxy
         self.userAgent = userAgent
 
-        let effectiveUA = (userAgent?.isEmpty == false)
-            ? userAgent!
-            : "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
-
+        // Giả lập Desktop Chrome để tương thích chính xác 100% với Relay Comet Web GraphQL
+        let desktopUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
         self.baseHeaders = [
-            "User-Agent": effectiveUA,
+            "User-Agent": desktopUA,
             "sec-ch-ua": "\"Not)A;Brand\";v=\"8\", \"Chromium\";v=\"138\", \"Google Chrome\";v=\"138\"",
-            "sec-ch-ua-mobile": "?1",
-            "sec-ch-ua-platform": "\"iOS\"",
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": "\"Windows\"",
+            "sec-ch-ua-platform-version": "\"19.0.0\"",
             "sec-ch-prefers-color-scheme": "dark",
-            "accept-language": "vi,en-US;q=0.8,en;q=0.6",
+            "accept-language": "vi,fr-FR;q=0.9,fr;q=0.8,en-US;q=0.7,en;q=0.6",
             "Cookie": cookieString
         ]
 
@@ -910,34 +909,103 @@ final class FacebookGraphQLAutoClient {
             tok = try await prepareTokens()
         }
 
+        AppLogger.shared.info("NewsFeed", "Bắt đầu lấy News Feed — userId: \(tok.userId)")
+
+        // ── Ưu tiên 1: Graph API (nếu có access token, ổn định nhất) ──────
+        if !accessToken.isEmpty {
+            let graphPosts = await fetchFeedViaGraphAPI(userId: tok.userId)
+            if !graphPosts.isEmpty {
+                AppLogger.shared.info("NewsFeed", "✅ Graph API — \(graphPosts.count) bài viết")
+                return graphPosts
+            }
+            AppLogger.shared.warning("NewsFeed", "Graph API trả 0 bài, thử phương án GraphQL web...")
+        }
+
+        // ── Ưu tiên 2: GraphQL Web với nhiều doc_id thay thế ───────────────
+        // doc_id thay đổi theo phiên bản FB — thử nhiều cái
+        let docIds = [
+            "24488967877354300",  // version cũ
+            "9117175968304833",   // version khác
+            "8858919374123928",
+            "7851302958266762"
+        ]
+
+        for docId in docIds {
+            AppLogger.shared.debug("NewsFeed", "Thử GraphQL doc_id: \(docId)")
+            if let posts = try? await fetchFeedViaGraphQL(tok: tok, docId: docId), !posts.isEmpty {
+                AppLogger.shared.info("NewsFeed", "✅ GraphQL (\(docId)) — \(posts.count) bài viết")
+                return posts
+            }
+        }
+
+        // ── Ưu tiên 3: Lấy trực tiếp từ trang chủ Facebook qua HTML scraping ──
+        AppLogger.shared.warning("NewsFeed", "GraphQL thất bại, thử scrape HTML homepage...")
+        let htmlPosts = try await fetchFeedViaHomepageScrape(tok: tok)
+        AppLogger.shared.info("NewsFeed", htmlPosts.isEmpty ? "⚠️ Scrape cũng không tìm thấy bài viết" : "✅ Scrape — \(htmlPosts.count) bài viết")
+        return htmlPosts
+    }
+
+    // MARK: - Phương án 1: Facebook Graph API /me/feed
+    private func fetchFeedViaGraphAPI(userId: String) async -> [FeedPostItem] {
+        guard !accessToken.isEmpty else { return [] }
+        var comps = URLComponents(string: "https://graph.facebook.com/v18.0/me/feed")
+        comps?.queryItems = [
+            URLQueryItem(name: "fields", value: "id,message,story,from,created_time"),
+            URLQueryItem(name: "limit", value: "20"),
+            URLQueryItem(name: "access_token", value: accessToken)
+        ]
+        guard let url = comps?.url else { return [] }
+        do {
+            let (data, _) = try await session.data(from: url)
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let dataArr = json["data"] as? [[String: Any]] else {
+                if let errJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let err = errJson["error"] as? [String: Any] {
+                    AppLogger.shared.warning("NewsFeed", "Graph API lỗi: \((err["message"] as? String) ?? "?")")
+                }
+                return []
+            }
+            return dataArr.compactMap { item -> FeedPostItem? in
+                // id trả về dạng "userId_postId"
+                let rawId = item["id"] as? String ?? ""
+                let postId = rawId.contains("_") ? String(rawId.split(separator: "_").last ?? Substring(rawId)) : rawId
+                guard !postId.isEmpty else { return nil }
+                let msg = (item["message"] as? String)
+                    ?? (item["story"] as? String)
+                    ?? ""
+                let fromName = (item["from"] as? [String: Any])?["name"] as? String ?? "Người dùng Facebook"
+                let fromId   = (item["from"] as? [String: Any])?["id"]   as? String ?? ""
+                return FeedPostItem(postId: postId, userName: fromName, userId: fromId, postText: msg)
+            }
+        } catch {
+            AppLogger.shared.warning("NewsFeed", "Graph API exception: \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    // MARK: - Phương án 2: GraphQL Web (NDJSON)
+    private func fetchFeedViaGraphQL(tok: FacebookWebSessionTokens, docId: String) async throws -> [FeedPostItem] {
         let variables: [String: Any] = [
             "RELAY_INCREMENTAL_DELIVERY": true,
             "clientQueryId": UUID().uuidString.lowercased(),
             "clientSession": NSNull(),
             "connectionClass": "GOOD",
             "count": 10,
-            "cursor": "",
-            "experimentalValues": NSNull(),
-            "feedLocation": "NEWSFEED",
-            "feedStyle": "DEFAULT",
-            "feedbackSource": 1,
             "focusCommentID": NSNull(),
             "orderby": ["TOP_STORIES"],
             "privacySelectorRenderLocation": "COMET_STREAM",
             "refreshMode": "COLD_START",
             "renderLocation": "homepage_stream",
             "scale": 1,
+            "useDefaultActor": false,
             "shouldChangeBRSLabelFieldName": false,
             "shouldChangeSponsoredAuctionDistanceFieldName": false,
             "shouldChangeSponsoredDataFieldName": false,
             "shouldObfuscateCategoryField": false,
-            "useDefaultActor": false,
             "__relay_internal__pv__GHLShouldChangeSponsoredAuctionDistanceFieldNamerelayprovider": false,
             "__relay_internal__pv__GHLShouldChangeSponsoredDataFieldNamerelayprovider": false,
-            "__relay_internal__pv__GHLShouldChangeAdIdFieldNamerelayprovider": false,
             "__relay_internal__pv__IsWorkUserrelayprovider": false,
             "__relay_internal__pv__FBReels_deprecate_short_form_video_context_gkrelayprovider": true,
-            "__relay_internal__pv__FeedDeepDiveTopicPillThreadViewEnabledrelayprovider": false,
             "__relay_internal__pv__CometImmersivePhotoCanUserDisable3DMotionrelayprovider": false,
             "__relay_internal__pv__WorkCometIsEmployeeGKProviderrelayprovider": false,
             "__relay_internal__pv__IsMergQAPollsrelayprovider": false,
@@ -949,68 +1017,134 @@ final class FacebookGraphQLAutoClient {
             "__relay_internal__pv__FBReelsIFUTileContent_reelsIFUPlayOnHoverrelayprovider": true
         ]
 
-        let variablesJSON = Self.jsonString(from: variables)
         let payload: [String: String] = [
             "av": tok.userId,
             "__aaid": "0",
-            "__user": tok.userId,
             "__a": "1",
-            "__req": "98",
+            "__req": String(Int.random(in: 10...99)),
             "dpr": "1",
-            "__ccg": "GOOD",
             "__rev": "1024608489",
-            "__comet_req": "15",
             "fb_dtsg": tok.dtsgToken,
             "jazoest": tok.jazoest,
-            "lsd": tok.lsdToken,
             "__spin_r": "1024608489",
             "__spin_b": "trunk",
-            "__crn": "comet.fbweb.CometHomeRoute",
             "fb_api_caller_class": "RelayModern",
             "fb_api_req_friendly_name": "CometNewsFeedPaginationQuery",
-            "variables": variablesJSON,
             "server_timestamps": "true",
-            "doc_id": "24488967877354300"
+            "doc_id": docId
         ]
 
         var request = URLRequest(url: URL(string: "https://www.facebook.com/api/graphql/")!)
-        request.httpMethod = "POST"
-        for (k, v) in baseHeaders {
-            request.setValue(v, forHTTPHeaderField: k)
-        }
-        request.setValue("CometNewsFeedPaginationQuery", forHTTPHeaderField: "x-fb-friendly-name")
+        request.timeoutInterval = 20
+        for (k, v) in baseHeaders { request.setValue(v, forHTTPHeaderField: k) }
         request.setValue("359341", forHTTPHeaderField: "x-asbd-id")
         request.setValue(tok.lsdToken, forHTTPHeaderField: "x-fb-lsd")
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "content-type")
         request.setValue("https://www.facebook.com", forHTTPHeaderField: "origin")
-        request.setValue("same-origin", forHTTPHeaderField: "sec-fetch-site")
-        request.setValue("cors", forHTTPHeaderField: "sec-fetch-mode")
-        request.setValue("empty", forHTTPHeaderField: "sec-fetch-dest")
-        request.setValue("https://www.facebook.com", forHTTPHeaderField: "referer")
         request.setValue("u=1, i", forHTTPHeaderField: "priority")
         request.httpBody = Self.formEncode(payload)
-
         let (data, response) = try await session.data(for: request)
         let httpStatus = (response as? HTTPURLResponse)?.statusCode ?? 0
         let responseText = String(data: data, encoding: .utf8) ?? ""
-        AppLogger.shared.debug("NewsFeed", "HTTP \(httpStatus) — \(data.count) bytes nhận về")
+        AppLogger.shared.debug("NewsFeed", "GraphQL \(docId): HTTP \(httpStatus), \(data.count) bytes")
 
-        // Kiểm tra phản hồi có phải HTML login page (cookie hết hạn)
-        if httpStatus == 200 && responseText.contains("\"login\"") && !responseText.contains("\"post_id\"") {
-            AppLogger.shared.warning("NewsFeed", "⚠️ Phản hồi trông giống trang đăng nhập — Cookie có thể đã hết hạn")
+            return []
         }
+        // Kiểm tra redirect về login
+        if httpStatus != 200 || (responseText.contains("\"login\"") && !responseText.contains("\"post_id\"") && !responseText.contains("\"story\"")) {
+            AppLogger.shared.warning("NewsFeed", "doc_id \(docId): có thể bị redirect login")
+            return []
 
         var posts = extractPostItems(from: responseText)
-        AppLogger.shared.info("NewsFeed", "Tìm thấy \(posts.count) bài viết trên News Feed")
-
-        if !accessToken.isEmpty {
             for idx in posts.indices where posts[idx].postText.isEmpty {
-                if let fetchedText = await fetchPostMessageViaGraphAPI(postId: posts[idx].postId, userId: posts[idx].userId) {
-                    posts[idx].postText = fetchedText
+                if let t = await fetchPostMessageViaGraphAPI(postId: posts[idx].postId, userId: posts[idx].userId) {
+                    posts[idx].postText = t
                 }
             }
         }
         return posts
+    }
+
+    private func fetchFeedViaHomepageScrape(tok: FacebookWebSessionTokens) async throws -> [FeedPostItem] {
+        guard let url = URL(string: "https://www.facebook.com") else { return [] }
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("navigate", forHTTPHeaderField: "sec-fetch-mode")
+        request.setValue("?1", forHTTPHeaderField: "sec-fetch-user")
+        request.setValue("document", forHTTPHeaderField: "sec-fetch-dest")
+
+        let (data, response) = try await session.data(for: request)
+        let httpStatus = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let html = String(data: data, encoding: .utf8) ?? ""
+        AppLogger.shared.debug("NewsFeed", "Homepage scrape: HTTP \(httpStatus), \(data.count) bytes")
+
+        // Parse JSON chunks nhúng trong HTML (FB inline data)
+        var posts: [FeedPostItem] = []
+        let patterns = [
+            #"(?:handleServerJS|bigPipe\.onPageletArrive)\((\{.+?\})\)(?:;|\s*,)"#,
+            #"<script[^>]*>[\s\S]*?(\{"require":.+?\})</script>"#
+        ]
+        _ = patterns // suppress unused warning — kept for potential future use
+
+        // FB embed data dưới dạng các chunk JSON trong thẻ <script>
+        let lines = html.components(separatedBy: .newlines)
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Tìm inline JSON có chứa post_id
+            if trimmed.contains("\"post_id\""),
+               let lineData = trimmed.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: lineData) {
+                extractPostsFromObject(json, into: &posts, seen: &seenIds)
+            }
+        }
+
+        // Fallback: tìm story_fbid/story_attachments trong HTML toàn bộ
+        if posts.isEmpty {
+            let postIdPattern = #""story_fbid"\s*:\s*"?(\d{10,20})"?"#
+            if let regex = try? NSRegularExpression(pattern: postIdPattern) {
+                let nsHtml = html as NSString
+                let matches = regex.matches(in: html, range: NSRange(location: 0, length: nsHtml.length))
+                for m in matches where m.numberOfRanges > 1 {
+                    if let range = Range(m.range(at: 1), in: html) {
+                        let pid = String(html[range])
+                        if !seenIds.contains(pid) {
+                            seenIds.insert(pid)
+                            posts.append(FeedPostItem(postId: pid, userName: "Người dùng Facebook", userId: "", postText: ""))
+                        }
+                    }
+                }
+            }
+        }
+
+        if !accessToken.isEmpty {
+            for idx in posts.indices where posts[idx].postText.isEmpty {
+                if let t = await fetchPostMessageViaGraphAPI(postId: posts[idx].postId, userId: posts[idx].userId) {
+                    posts[idx].postText = t
+                }
+            }
+        }
+        return posts
+    }
+
+    private func extractPostsFromObject(_ obj: Any, into posts: inout [FeedPostItem], seen: inout Set<String>) {
+        func walk(_ o: Any, depth: Int = 0) {
+            guard depth < 12 else { return }
+            if let dict = o as? [String: Any] {
+                if let postId = (dict["post_id"] as? String) ?? (dict["post_id"].flatMap { "\($0)" }),
+                   !postId.isEmpty, !seen.contains(postId) {
+                    seen.insert(postId)
+                    let msg = (dict["message"] as? [String: Any])?["text"] as? String ?? ""
+                    var name = "Người dùng Facebook"
+                    if let actors = dict["actors"] as? [[String: Any]],
+                       let first = actors.first,
+                       let n = first["name"] as? String { name = n }
+                    posts.append(FeedPostItem(postId: postId, userName: name, userId: "", postText: msg))
+                }
+                for (_, v) in dict { walk(v, depth: depth + 1) }
+            } else if let arr = o as? [Any] {
+                for v in arr { walk(v, depth: depth + 1) }
+            }
+        }
+        walk(obj)
     }
 
     private func fetchPostMessageViaGraphAPI(postId: String, userId: String) async -> String? {
@@ -1071,7 +1205,17 @@ final class FacebookGraphQLAutoClient {
                 let localText = extractStoryText(dict)
                 let effectiveText = !localText.isEmpty ? localText : parentText
 
-                if let postId = dict["post_id"] as? String, !postId.isEmpty {
+                let candidateId: String? = {
+                    if let s = dict["post_id"] as? String, !s.isEmpty { return s }
+                    if let n = dict["post_id"] as? NSNumber { return n.stringValue }
+                    if let s = dict["top_level_post_id"] as? String, !s.isEmpty { return s }
+                    if let n = dict["top_level_post_id"] as? NSNumber { return n.stringValue }
+                    if let s = dict["story_fbid"] as? String, !s.isEmpty { return s }
+                    if let n = dict["story_fbid"] as? NSNumber { return n.stringValue }
+                    return nil
+                }()
+
+                if let postId = candidateId, !postId.isEmpty {
                     if !seenIds.contains(postId) {
                         seenIds.insert(postId)
                         var userName = "Người dùng Facebook"
@@ -1080,7 +1224,7 @@ final class FacebookGraphQLAutoClient {
                             for actor in actors {
                                 if (actor["__typename"] as? String) == "User" || actor["name"] != nil {
                                     userName = (actor["name"] as? String)?.replacingOccurrences(of: "\\", with: "") ?? userName
-                                    authorId = (actor["id"] as? String) ?? ""
+                                    authorId = (actor["id"] as? String) ?? ((actor["id"] as? NSNumber)?.stringValue ?? "")
                                     break
                                 }
                             }
@@ -1114,6 +1258,30 @@ final class FacebookGraphQLAutoClient {
                 continue
             }
             searchRecursive(json)
+        }
+
+        // Fallback: nếu NDJSON không tách được (do FB gộp 1 dòng hoặc bọc ngoài), quét Regex trực tiếp
+        if posts.isEmpty {
+            let patterns = [
+                #""post_id"\s*:\s*"?(\d{8,25})"?"#,
+                #""top_level_post_id"\s*:\s*"?(\d{8,25})"?"#,
+                #""story_fbid"\s*:\s*"?(\d{8,25})"?"#
+            ]
+            let nsStr = responseText as NSString
+            for pat in patterns {
+                if let regex = try? NSRegularExpression(pattern: pat) {
+                    let matches = regex.matches(in: responseText, range: NSRange(location: 0, length: nsStr.length))
+                    for m in matches where m.numberOfRanges > 1 {
+                        if let range = Range(m.range(at: 1), in: responseText) {
+                            let pid = String(responseText[range])
+                            if !seenIds.contains(pid) {
+                                seenIds.insert(pid)
+                                posts.append(FeedPostItem(postId: pid, userName: "Người dùng Facebook", userId: "", postText: ""))
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         return posts
