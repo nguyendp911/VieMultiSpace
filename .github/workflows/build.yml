@@ -1,0 +1,59 @@
+name: Build Vie MultiSpace IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Vie MultiSpace project
+        run: xcodegen generate
+
+      - name: Build unsigned iOS app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project VieMultiSpace.xcodeproj \
+            -scheme VieMultiSpace \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$GITHUB_WORKSPACE/build-vie" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee xcodebuild.log
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-failure-log
+          path: xcodebuild.log
+
+      - name: Package IPA for Sideloadly
+        run: |
+          set -e
+          APP="$GITHUB_WORKSPACE/build-vie/Build/Products/Release-iphoneos/VieMultiSpace.app"
+          test -d "$APP"
+          codesign -f -s - "$APP"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry VieMultiSpace-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VieMultiSpace-unsigned-ipa
+          path: VieMultiSpace-unsigned.ipa
+          if-no-files-found: error
