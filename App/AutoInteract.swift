@@ -157,15 +157,81 @@ struct FeedPostItem: Identifiable, Hashable {
 struct GeminiAnalysisResult {
     let comment: String
     let suggestedReaction: FacebookReactionType
+    let usedModel: String
 }
 
 enum GeminiCommentService {
     static let availableModels = [
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-1.5-pro"
+        "auto",
+        "gemini-flash-latest",
+        "gemini-3-flash-preview",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash"
     ]
+
+    static func modelLabel(_ model: String) -> String {
+        if model == "auto" {
+            return "✨ Tự động dò Model khả dụng (Khuyên dùng)"
+        }
+        return model
+    }
+
+    private static var cachedWorkingModel: String?
+
+    static func discoverAvailableModels(apiKey: String) async -> [String] {
+        let cleanKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanKey.isEmpty,
+              let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models?key=\(cleanKey)") else {
+            return []
+        }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let httpResp = response as? HTTPURLResponse, httpResp.statusCode == 200,
+                  let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let models = root["models"] as? [[String: Any]] else {
+                return []
+            }
+
+            let excludedKeywords = [
+                "embedding", "imagen", "veo", "tts", "audio", "aqa",
+                "vision", "robotics", "computer-use", "learnlm", "bisheng", "thinking"
+            ]
+
+            var candidates: [String] = []
+            for m in models {
+                guard let rawName = m["name"] as? String else { continue }
+                let methods = m["supportedGenerationMethods"] as? [String] ?? []
+                guard methods.contains("generateContent") else { continue }
+
+                let shortName = rawName.replacingOccurrences(of: "models/", with: "")
+                let lower = shortName.lowercased()
+                guard lower.hasPrefix("gemini") else { continue }
+                if excludedKeywords.contains(where: { lower.contains($0) }) { continue }
+                candidates.append(shortName)
+            }
+
+            // Ưu tiên các dòng flash mới nhất (3.x -> 2.5-flash-lite -> flash-latest -> pro)
+            candidates.sort { a, b in
+                func score(_ s: String) -> Int {
+                    let l = s.lowercased()
+                    if l.contains("3.1-flash") || l.contains("3-flash") { return 100 }
+                    if l == "gemini-flash-latest" || l == "gemini-flash-lite-latest" { return 95 }
+                    if l.contains("2.5-flash-lite") { return 90 }
+                    if l.contains("2.5-flash") { return 85 }
+                    if l.contains("flash") { return 80 }
+                    if l.contains("pro") { return 60 }
+                    return 40
+                }
+                return score(a) > score(b)
+            }
+
+            return candidates
+        } catch {
+            return []
+        }
+    }
 
     static func analyzeAndGenerateComment(
         post: FeedPostItem,
@@ -176,10 +242,6 @@ enum GeminiCommentService {
         let cleanKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanKey.isEmpty else {
             throw SpaceLoginError.apiError("Chưa nhập Gemini API Key để phân tích bài viết và tạo comment.")
-        }
-        let chosenModel = model.isEmpty ? "gemini-2.5-flash" : model
-        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(chosenModel):generateContent?key=\(cleanKey)") else {
-            throw SpaceLoginError.apiError("URL Gemini API không hợp lệ.")
         }
 
         let contentContext = post.postText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -208,6 +270,87 @@ enum GeminiCommentService {
         2. Trường "comment" phải bám sát nội dung bài viết, tự nhiên, tuyệt đối KHÔNG dùng câu mẫu chung chung kiểu spam, KHÔNG lặp lại nguyên văn bài viết, KHÔNG giải thích gì thêm ngoài JSON.
         """
 
+        // Xây dựng danh sách model ưu tiên thử lần lượt (tự động vượt lỗi 404 deprecated model)
+        var modelsToTry: [String] = []
+        if let cached = cachedWorkingModel, !cached.isEmpty {
+            modelsToTry.append(cached)
+        }
+        if !model.isEmpty && model != "auto" && !modelsToTry.contains(model) {
+            modelsToTry.append(model)
+        }
+
+        let discovered = await discoverAvailableModels(apiKey: cleanKey)
+        for d in discovered where !modelsToTry.contains(d) {
+            modelsToTry.append(d)
+        }
+
+        let fallbackDefaults = [
+            "gemini-flash-latest",
+            "gemini-3-flash-preview",
+            "gemini-2.5-flash-lite",
+            "gemini-2.5-pro",
+            "gemini-pro-latest"
+        ]
+        for fb in fallbackDefaults where !modelsToTry.contains(fb) {
+            modelsToTry.append(fb)
+        }
+
+        var lastErrorMsg = "Không tìm thấy model Gemini khả dụng."
+        var index = 0
+
+        while index < modelsToTry.count {
+            let candidateModel = modelsToTry[index]
+            index += 1
+
+            let attempt = await callGenerateContent(
+                model: candidateModel,
+                apiKey: cleanKey,
+                prompt: prompt
+            )
+
+            switch attempt {
+            case .success(let result):
+                cachedWorkingModel = candidateModel
+                return result
+
+            case .suggestedRedirect(let suggestedModel, let errText):
+                lastErrorMsg = errText
+                if !modelsToTry.contains(suggestedModel) {
+                    modelsToTry.insert(suggestedModel, at: index)
+                }
+
+            case .notFoundOrUnsupported(let errText):
+                lastErrorMsg = errText
+                if cachedWorkingModel == candidateModel {
+                    cachedWorkingModel = nil
+                }
+                continue
+
+            case .fatalError(let errText):
+                throw SpaceLoginError.apiError(errText)
+            }
+        }
+
+        throw SpaceLoginError.apiError(lastErrorMsg)
+    }
+
+    private enum ModelCallOutcome {
+        case success(GeminiAnalysisResult)
+        case suggestedRedirect(String, String)
+        case notFoundOrUnsupported(String)
+        case fatalError(String)
+    }
+
+    private static func callGenerateContent(
+        model: String,
+        apiKey: String,
+        prompt: String
+    ) async -> ModelCallOutcome {
+        let cleanModel = model.replacingOccurrences(of: "models/", with: "")
+        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(cleanModel):generateContent?key=\(apiKey)") else {
+            return .notFoundOrUnsupported("URL model \(cleanModel) không hợp lệ.")
+        }
+
         let requestBody: [String: Any] = [
             "contents": [
                 [
@@ -218,47 +361,91 @@ enum GeminiCommentService {
             ],
             "generationConfig": [
                 "temperature": 0.85,
-                "maxOutputTokens": 250,
-                "responseMimeType": "application/json"
+                "maxOutputTokens": 250
             ]
         ]
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        if let httpResp = response as? HTTPURLResponse, httpResp.statusCode != 200 {
-            let errBody = String(data: data, encoding: .utf8) ?? "HTTP \(httpResp.statusCode)"
-            throw SpaceLoginError.apiError("Gemini API lỗi (\(httpResp.statusCode)): \(errBody.prefix(160))")
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: requestBody) else {
+            return .notFoundOrUnsupported("Lỗi đóng gói JSON.")
         }
+        request.httpBody = bodyData
 
-        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let candidates = root["candidates"] as? [[String: Any]],
-              let firstCandidate = candidates.first,
-              let content = firstCandidate["content"] as? [String: Any],
-              let parts = content["parts"] as? [[String: Any]],
-              let rawText = parts.first?["text"] as? String else {
-            throw SpaceLoginError.apiError("Gemini không trả về nội dung hợp lệ.")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+
+            if statusCode != 200 {
+                let errBody = String(data: data, encoding: .utf8) ?? "HTTP \(statusCode)"
+                // Nếu thông báo lỗi có gợi ý "use models/xxx" thì tự động trích xuất model được gợi ý
+                if let suggested = extractSuggestedModel(from: errBody) {
+                    return .suggestedRedirect(suggested, "Model \(cleanModel) đã ngừng hỗ trợ, chuyển sang \(suggested)")
+                }
+                if statusCode == 404 || statusCode == 400 || statusCode == 503 {
+                    return .notFoundOrUnsupported("Model \(cleanModel) lỗi (\(statusCode)): \(errBody.prefix(140))")
+                }
+                if statusCode == 401 || statusCode == 403 {
+                    return .fatalError("Gemini API Key không hợp lệ hoặc bị từ chối (\(statusCode)).")
+                }
+                return .notFoundOrUnsupported("Gemini API lỗi (\(statusCode)): \(errBody.prefix(140))")
+            }
+
+            guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let candidates = root["candidates"] as? [[String: Any]],
+                  let firstCandidate = candidates.first,
+                  let content = firstCandidate["content"] as? [String: Any],
+                  let parts = content["parts"] as? [[String: Any]] else {
+                return .notFoundOrUnsupported("Model \(cleanModel) không trả về nội dung.")
+            }
+
+            let combinedText = parts.compactMap { $0["text"] as? String }.joined(separator: "\n")
+            let parsed = parseGeminiOutput(combinedText, usedModel: cleanModel)
+            if parsed.comment.isEmpty {
+                return .notFoundOrUnsupported("Model \(cleanModel) trả về bình luận rỗng.")
+            }
+            return .success(parsed)
+        } catch {
+            return .notFoundOrUnsupported(error.localizedDescription)
         }
-
-        return parseGeminiOutput(rawText)
     }
 
-    private static func parseGeminiOutput(_ rawText: String) -> GeminiAnalysisResult {
+    private static func extractSuggestedModel(from text: String) -> String? {
+        let pattern = #"use models/([a-zA-Z0-9._-]+)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, options: [], range: nsRange),
+              match.numberOfRanges > 1,
+              let range = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+        return String(text[range]).trimmingCharacters(in: CharacterSet(charactersIn: ".,\"' "))
+    }
+
+    private static func parseGeminiOutput(_ rawText: String, usedModel: String) -> GeminiAnalysisResult {
         let cleaned = rawText
             .replacingOccurrences(of: "```json", with: "")
             .replacingOccurrences(of: "```", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if let jsonData = cleaned.data(using: .utf8),
+        // Tìm đoạn {...} nếu Gemini trả kèm văn bản bên ngoài JSON
+        var jsonCandidate = cleaned
+        if let firstBrace = cleaned.firstIndex(of: "{"),
+           let lastBrace = cleaned.lastIndex(of: "}"),
+           firstBrace <= lastBrace {
+            jsonCandidate = String(cleaned[firstBrace...lastBrace])
+        }
+
+        if let jsonData = jsonCandidate.data(using: .utf8),
            let obj = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
             let comment = (obj["comment"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let reactionRaw = (obj["reaction"] as? String)?.uppercased().trimmingCharacters(in: .whitespacesAndNewlines) ?? "LIKE"
             let reaction = FacebookReactionType(rawValue: reactionRaw) ?? .like
             if !comment.isEmpty {
-                return GeminiAnalysisResult(comment: comment, suggestedReaction: reaction)
+                return GeminiAnalysisResult(comment: comment, suggestedReaction: reaction, usedModel: usedModel)
             }
         }
 
@@ -266,7 +453,8 @@ enum GeminiCommentService {
             .trimmingCharacters(in: CharacterSet(charactersIn: "\"' \n\t"))
         return GeminiAnalysisResult(
             comment: fallbackComment,
-            suggestedReaction: .like
+            suggestedReaction: .like,
+            usedModel: usedModel
         )
     }
 }
@@ -451,7 +639,6 @@ final class FacebookGraphQLAutoClient {
         let responseText = String(data: data, encoding: .utf8) ?? ""
         var posts = extractPostItems(from: responseText)
 
-        // Enrich post text via Graph API if Access Token is available and postText is empty
         if !accessToken.isEmpty {
             for idx in posts.indices where posts[idx].postText.isEmpty {
                 if let fetchedText = await fetchPostMessageViaGraphAPI(postId: posts[idx].postId, userId: posts[idx].userId) {
@@ -745,7 +932,7 @@ final class FacebookGraphQLAutoClient {
                     if let edge = commentCreate["feedback_comment_edge"] as? [String: Any],
                        let node = edge["node"] as? [String: Any],
                        node["id"] != nil {
-                        return (true, "Đã bình luận: \"\(commentText.prefix(45))\"")
+                        return (true, "Đã bình luận: \"\(commentText.prefix(55))\"")
                     }
                     if let feedback = commentCreate["feedback"] as? [String: Any],
                        let notice = feedback["comments_disabled_notice_renderer"] as? [String: Any],
@@ -954,7 +1141,6 @@ final class AutoInteractCoordinator: ObservableObject {
         let low = max(0.1, min(minVal, maxVal))
         let high = max(low, max(minVal, maxVal))
         if safeMode {
-            // Ngẫu nhiên thực sự với độ lệch thập phân để tránh hành vi máy móc
             let base = Double.random(in: low...high)
             let microJitter = Double.random(in: 0.05...0.95)
             return base + microJitter
@@ -1065,6 +1251,8 @@ final class AutoInteractCoordinator: ObservableObject {
                     states[space.id]?.statusText = "Bài \(index + 1)/\(posts.count): \(post.userName)"
 
                     var geminiResult: GeminiAnalysisResult? = nil
+                    var geminiErrorText: String? = nil
+
                     if useComment || reactionType == .geminiAuto {
                         states[space.id]?.statusText = "✨ Gemini đang phân tích bài của \(post.userName)..."
                         do {
@@ -1075,15 +1263,7 @@ final class AutoInteractCoordinator: ObservableObject {
                                 customStylePrompt: geminiStylePrompt
                             )
                         } catch {
-                            appendLog(
-                                spaceName: space.name,
-                                postAuthor: post.userName,
-                                postId: post.postId,
-                                postSnippet: post.postText,
-                                reactionSummary: "-",
-                                commentSummary: "Lỗi Gemini: \(error.localizedDescription)",
-                                isError: true
-                            )
+                            geminiErrorText = error.localizedDescription
                         }
                     }
 
@@ -1130,7 +1310,7 @@ final class AutoInteractCoordinator: ObservableObject {
                                 hasError = true
                             }
                         } else {
-                            commentMsg = "Không tạo được bình luận từ Gemini"
+                            commentMsg = geminiErrorText ?? "Không tạo được bình luận từ Gemini"
                             hasError = true
                         }
                     }
@@ -1218,7 +1398,7 @@ struct AutoInteractView: View {
     @AppStorage("vie.auto.useReaction") private var useReaction = true
     @AppStorage("vie.auto.reactionType") private var reactionTypeRaw = FacebookReactionType.geminiAuto.rawValue
     @AppStorage("vie.auto.useComment") private var useComment = true
-    @AppStorage("vie.auto.geminiModel") private var geminiModel = "gemini-2.5-flash"
+    @AppStorage("vie.auto.geminiModelV2") private var geminiModel = "auto"
     @AppStorage("vie.auto.geminiStyle") private var geminiStylePrompt = "Tự nhiên như người thật trên Facebook, thân thiện, đúng trọng tâm nội dung bài viết, ngắn gọn 1-2 câu."
 
     @AppStorage("vie.auto.safeMode") private var safeModeEnabled = true
@@ -1232,6 +1412,7 @@ struct AutoInteractView: View {
     @AppStorage("vie.auto.maxPosts") private var maxPostsText = "10"
 
     @State private var geminiApiKey = ""
+    @State private var discoveredModels: [String] = GeminiCommentService.availableModels
     @State private var alertMessage: String?
 
     init(preselectedSpace: Space? = nil) {
@@ -1342,11 +1523,19 @@ struct AutoInteractView: View {
                         }
 
                     Picker("Model Gemini", selection: $geminiModel) {
-                        ForEach(GeminiCommentService.availableModels, id: \.self) { m in
-                            Text(m).tag(m)
+                        ForEach(discoveredModels, id: \.self) { m in
+                            Text(GeminiCommentService.modelLabel(m)).tag(m)
                         }
                     }
                     .disabled(coordinator.isRunning)
+
+                    Button {
+                        Task { await refreshModelsFromAPIKey() }
+                    } label: {
+                        Label("Tự dò danh sách Model từ API Key", systemImage: "arrow.triangle.2.circlepath")
+                            .font(.caption)
+                    }
+                    .disabled(coordinator.isRunning || geminiApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Yêu cầu phong cách bình luận cho Gemini:")
@@ -1545,6 +1734,22 @@ struct AutoInteractView: View {
             Button("OK") { alertMessage = nil }
         } message: {
             Text(alertMessage ?? "")
+        }
+    }
+
+    @MainActor
+    private func refreshModelsFromAPIKey() async {
+        let fetched = await GeminiCommentService.discoverAvailableModels(apiKey: geminiApiKey)
+        if fetched.isEmpty {
+            alertMessage = "Không lấy được danh sách model từ API Key này. Vui lòng kiểm tra lại Gemini API Key."
+        } else {
+            var list = ["auto"]
+            for m in fetched where !list.contains(m) {
+                list.append(m)
+            }
+            discoveredModels = list
+            geminiModel = "auto"
+            alertMessage = "Đã tìm thấy \(fetched.count) model khả dụng (ưu tiên: \(fetched.first ?? ""))."
         }
     }
 
