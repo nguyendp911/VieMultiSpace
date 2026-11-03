@@ -1,7 +1,5 @@
 import SwiftUI
-
-// Account hub for isolated first-party web sessions. It does not request,
-// inspect, export or transmit passwords, cookies, 2FA secrets or access tokens.
+import UIKit
 
 private enum ProfileFilter: String, CaseIterable, Identifiable {
     case all = "Tất cả"
@@ -19,6 +17,8 @@ struct AccountCenterView: View {
     @State private var isClearing = false
     @State private var showQuickCreate = false
     @State private var loginEditorSpace: Space?
+    @State private var toastMessage: String?
+    @State private var refreshTick = 0
 
     private var matches: [Space] {
         library.spaces.filter { space in
@@ -35,6 +35,11 @@ struct AccountCenterView: View {
         }
     }
 
+    private var savedTokenSpacesCount: Int {
+        _ = refreshTick
+        return library.spaces.filter { VaultMetadataIndex.get($0.id).hasToken }.count
+    }
+
     var body: some View {
         List {
             Section {
@@ -42,13 +47,15 @@ struct AccountCenterView: View {
                     Label("Vie Account Center", systemImage: "person.crop.rectangle.stack.fill")
                         .font(.title3.bold())
                         .foregroundStyle(.blue)
-                    Text("Quản lý đăng nhập các website theo từng không gian riêng tư.")
+                    Text("Quản lý đăng nhập, lưu trữ Access Token, Convert 6 App Token và nạp Cookie theo từng không gian riêng tư.")
                         .font(.subheadline).foregroundStyle(.secondary)
 
-                    HStack(spacing: 14) {
+                    HStack(spacing: 10) {
                         metric(value: "\(library.spaces.count)", label: "Không gian", icon: "square.stack.3d.up.fill")
                         metric(value: "\(library.spaces.filter { $0.platform == .facebook }.count)",
                                label: "Facebook", icon: "person.2.fill")
+                        metric(value: "\(savedTokenSpacesCount)",
+                               label: "Đã lưu Token", icon: "key.radiowaves.forward.fill")
                     }
                 }
                 .padding(.vertical, 10)
@@ -78,6 +85,7 @@ struct AccountCenterView: View {
                                            description: Text("Hãy tạo không gian hoặc đổi bộ lọc."))
                 } else {
                     ForEach(matches) { space in
+                        let summary = VaultMetadataIndex.get(space.id)
                         HStack(spacing: 12) {
                             Image(systemName: space.platform.icon)
                                 .foregroundStyle(.white)
@@ -86,19 +94,56 @@ struct AccountCenterView: View {
                                             in: RoundedRectangle(cornerRadius: 12))
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(space.name).font(.subheadline.bold())
-                                Text(space.platform.rawValue + " • Phiên riêng")
-                                    .font(.caption2).foregroundStyle(.secondary)
+                                HStack(spacing: 6) {
+                                    Text(space.platform.rawValue)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    if summary.hasToken {
+                                        Text("• \(summary.tokenPrefix.isEmpty ? "Token" : summary.tokenPrefix) (\(summary.convertedCount) App)")
+                                            .font(.caption2.bold())
+                                            .foregroundStyle(.green)
+                                    } else if summary.hasCookies {
+                                        Text("• Đã lưu Cookie")
+                                            .font(.caption2.bold())
+                                            .foregroundStyle(.orange)
+                                    } else if summary.hasCredentials {
+                                        Text("• Đã lưu Login")
+                                            .font(.caption2)
+                                            .foregroundStyle(.blue)
+                                    } else {
+                                        Text("• Phiên riêng")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
                             }
                             Spacer(minLength: 4)
+                            Button("Token") {
+                                loginEditorSpace = space
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+
                             Button("Mở") { opened = space }
                                 .buttonStyle(.borderedProminent)
                                 .controlSize(.small)
                                 .accessibilityLabel("Mở " + space.name)
+
                             Menu {
-                                Button("Lưu mật khẩu và 2FA", systemImage: "key.fill") {
+                                Button("Đăng nhập API & Kho Token", systemImage: "person.badge.key.fill") {
                                     loginEditorSpace = space
                                 }
-                                Button("Mở/Đăng nhập", systemImage: "rectangle.portrait.and.arrow.right") {
+                                Button("Nạp Cookie đã lưu & Mở", systemImage: "globe.badge.chevron.backward") {
+                                    Task { await injectAndOpen(space) }
+                                }
+                                Button("Sao chép Access Token gốc", systemImage: "doc.on.doc") {
+                                    copySavedToken(for: space)
+                                }
+                                Button("Sao chép Cookie phiên", systemImage: "link") {
+                                    copySavedCookie(for: space)
+                                }
+                                Divider()
+                                Button("Mở trình duyệt", systemImage: "rectangle.portrait.and.arrow.right") {
                                     opened = space
                                 }
                                 Button("Xóa dữ liệu phiên", systemImage: "trash", role: .destructive) {
@@ -117,25 +162,19 @@ struct AccountCenterView: View {
                 }
             }
 
-            Section("Đăng nhập an toàn") {
+            Section("Lưu trữ Token & Bảo mật") {
                 Label {
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("Đăng nhập trên website chính thức").font(.subheadline.bold())
-                        Text("Bấm Mở, nhập thông tin đăng nhập và mã 2FA trên website. WebKit duy trì dữ liệu web riêng của từng không gian.")
+                        Text("Lưu trữ Keychain theo từng không gian").font(.subheadline.bold())
+                        Text("Access Token gốc, 6 Converted App Tokens, Cookie phiên, mật khẩu và 2FA được mã hóa trong iOS Keychain riêng cho từng UUID không gian.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 } icon: {
                     Image(systemName: "lock.shield.fill").foregroundStyle(.green)
                 }
-                Label {
-                    Text("Ứng dụng không đọc hoặc hiển thị cookie, access token, mật khẩu hay khóa bí mật 2FA.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                } icon: {
-                    Image(systemName: "hand.raised.fill").foregroundStyle(.secondary)
-                }
             }
         }
-        .navigationTitle("Tài khoản")
+        .navigationTitle("Tài khoản & Token")
         .navigationBarTitleDisplayMode(.inline)
         .searchable(text: $query, prompt: "Tìm không gian hoặc nền tảng")
         .sheet(item: $opened) { space in
@@ -143,7 +182,9 @@ struct AccountCenterView: View {
                 SpaceBrowser(space: space)
             }
         }
-        .sheet(item: $loginEditorSpace) { space in
+        .sheet(item: $loginEditorSpace, onDismiss: {
+            refreshTick += 1
+        }) { space in
             LoginEditorSheet(space: space)
         }
         .sheet(isPresented: $showQuickCreate) {
@@ -163,7 +204,54 @@ struct AccountCenterView: View {
                 }
             }
         } message: {
-            Text("Chỉ dữ liệu web của không gian này bị xóa. Tài khoản và các không gian khác được giữ nguyên.")
+            Text("Chỉ dữ liệu web của không gian này bị xóa. Kho Token và các không gian khác được giữ nguyên.")
+        }
+        .alert("Thông báo", isPresented: Binding(
+            get: { toastMessage != nil },
+            set: { if !$0 { toastMessage = nil } }
+        )) {
+            Button("OK") { toastMessage = nil }
+        } message: {
+            Text(toastMessage ?? "")
+        }
+    }
+
+    @MainActor
+    private func injectAndOpen(_ space: Space) async {
+        do {
+            let vault = try SecureLoginStore.readTokenVault(space.id)
+            _ = await WebCookieBridge.injectCookies(from: vault, into: space.id)
+            opened = space
+        } catch {
+            toastMessage = error.localizedDescription
+        }
+    }
+
+    private func copySavedToken(for space: Space) {
+        do {
+            let vault = try SecureLoginStore.readTokenVault(space.id)
+            guard !vault.originalToken.isEmpty else {
+                toastMessage = "Không gian này chưa có Access Token gốc."
+                return
+            }
+            UIPasteboard.general.string = vault.originalToken
+            toastMessage = "Đã sao chép Access Token (\(vault.originalPrefix)) của \(space.name)."
+        } catch {
+            toastMessage = error.localizedDescription
+        }
+    }
+
+    private func copySavedCookie(for space: Space) {
+        do {
+            let vault = try SecureLoginStore.readTokenVault(space.id)
+            guard !vault.cookieString.isEmpty else {
+                toastMessage = "Không gian này chưa có Cookie đã lưu."
+                return
+            }
+            UIPasteboard.general.string = vault.cookieString
+            toastMessage = "Đã sao chép Cookie phiên của \(space.name)."
+        } catch {
+            toastMessage = error.localizedDescription
         }
     }
 
@@ -176,7 +264,7 @@ struct AccountCenterView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(12)
+        .padding(10)
         .frame(maxWidth: .infinity)
         .background(Color(uiColor: .tertiarySystemGroupedBackground),
                     in: RoundedRectangle(cornerRadius: 12))
@@ -222,7 +310,7 @@ struct QuickCreateProfilesSheet: View {
                 }
 
                 Section {
-                    Text("Mỗi không gian được tạo trống. Bạn tự đăng nhập từng tài khoản trên website chính thức. Không nhập mật khẩu hoặc 2FA vào trình tạo không gian.")
+                    Text("Mỗi không gian được tạo độc lập. Sau khi tạo, bấm nút Token ở từng không gian để đăng nhập API, lưu trữ Access Token hoặc nạp Cookie.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }

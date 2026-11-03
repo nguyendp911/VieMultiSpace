@@ -147,6 +147,10 @@ final class BatchSyncEngine: NSObject, ObservableObject, WKNavigationDelegate {
             await Task.yield()
             guard let self, let webView,
                   self.activeWebView === webView, self.isRunning else { return }
+            if let vault = try? SecureLoginStore.readTokenVault(space.id) {
+                _ = await WebCookieBridge.injectCookies(from: vault, into: space.id)
+            }
+            guard self.activeWebView === webView, self.isRunning else { return }
             webView.load(URLRequest(url: address))
         }
     }
@@ -259,7 +263,7 @@ struct MultiSpaceSyncView: View {
             } header: {
                 Text("Chọn các phiên đăng nhập")
             } footer: {
-                Text("Các không gian dùng cookie riêng; không sao chép thông tin đăng nhập.")
+                Text("Các không gian dùng cookie riêng; nếu đã lưu Cookie trong Kho Token, ứng dụng sẽ tự nạp trước khi mở.")
             }
 
             Section("Lệnh đồng bộ") {

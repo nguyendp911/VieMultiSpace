@@ -8,6 +8,7 @@ struct SpaceDashboard: View {
     @AppStorage("vie.multispace.requireUnlock") private var requireUnlock = false
     @State private var showAdd = false
     @State private var openSpace: Space?
+    @State private var tokenSpace: Space?
     @State private var renameSpace: Space?
     @State private var renameValue = ""
     @State private var deleteSpace: Space?
@@ -24,7 +25,7 @@ struct SpaceDashboard: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Label("Vie MultiSpace", systemImage: "square.stack.3d.up.fill")
                                 .font(.title2.bold())
-                            Text("Quản lý nhiều phiên đăng nhập web độc lập trên iPhone.")
+                            Text("Quản lý nhiều phiên đăng nhập web độc lập và Kho Token trên iPhone.")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                             Text("\(library.spaces.count) không gian")
@@ -32,11 +33,11 @@ struct SpaceDashboard: View {
                         }
                         .padding(.vertical, 10)
                     }
-                    Section("Quản lý tài khoản") {
+                    Section("Quản lý tài khoản & Token") {
                         NavigationLink {
                             AccountCenterView()
                         } label: {
-                            Label("Trung tâm tài khoản", systemImage: "person.2.crop.square.stack")
+                            Label("Trung tâm tài khoản & Kho Token", systemImage: "person.2.crop.square.stack")
                         }
                     }
                     Section("Điều khiển nhóm") {
@@ -48,24 +49,57 @@ struct SpaceDashboard: View {
                     }
                     Section("Không gian của tôi") {
                         ForEach(library.spaces) { space in
-                            Button { openSpace = space } label: {
-                                HStack(spacing: 12) {
-                                    Image(systemName: space.platform.icon)
-                                        .font(.title3)
-                                        .foregroundStyle(.white)
-                                        .frame(width: 43, height: 43)
-                                        .background(space.platform.color, in: RoundedRectangle(cornerRadius: 11))
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(space.name).font(.headline).foregroundStyle(.primary)
-                                        Text(space.platform.rawValue + " · Phiên web riêng")
-                                            .font(.caption).foregroundStyle(.secondary)
+                            let summary = VaultMetadataIndex.get(space.id)
+                            HStack(spacing: 12) {
+                                Button { openSpace = space } label: {
+                                    HStack(spacing: 12) {
+                                        Image(systemName: space.platform.icon)
+                                            .font(.title3)
+                                            .foregroundStyle(.white)
+                                            .frame(width: 43, height: 43)
+                                            .background(space.platform.color, in: RoundedRectangle(cornerRadius: 11))
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(space.name).font(.headline).foregroundStyle(.primary)
+                                            HStack(spacing: 4) {
+                                                Text(space.platform.rawValue)
+                                                if summary.hasToken {
+                                                    Text("· \(summary.tokenPrefix.isEmpty ? "Token" : summary.tokenPrefix) (\(summary.convertedCount) App)")
+                                                        .foregroundStyle(.green)
+                                                        .fontWeight(.semibold)
+                                                } else if summary.hasCookies {
+                                                    Text("· Đã lưu Cookie")
+                                                        .foregroundStyle(.orange)
+                                                } else {
+                                                    Text("· Phiên web riêng")
+                                                }
+                                            }
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
                                     }
-                                    Spacer()
-                                    Image(systemName: "chevron.right").foregroundStyle(.tertiary)
                                 }
-                                .padding(.vertical, 4)
+                                .buttonStyle(.plain)
+
+                                if space.platform == .facebook {
+                                    Button {
+                                        tokenSpace = space
+                                    } label: {
+                                        Image(systemName: summary.hasToken ? "key.radiowaves.forward.fill" : "key.fill")
+                                            .foregroundStyle(summary.hasToken ? .green : .blue)
+                                            .padding(6)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                }
+
+                                Image(systemName: "chevron.right").foregroundStyle(.tertiary)
                             }
+                            .padding(.vertical, 4)
                             .contextMenu {
+                                Button("Đăng nhập & Kho Token", systemImage: "person.badge.key.fill") {
+                                    tokenSpace = space
+                                }
                                 Button("Đổi tên", systemImage: "pencil") {
                                     renameSpace = space
                                     renameValue = space.name
@@ -85,7 +119,7 @@ struct SpaceDashboard: View {
                         .disabled(busy)
                     }
                     Section {
-                        Text("Ứng dụng không sao chép Facebook gốc. Cookie và dữ liệu web của mỗi không gian chỉ được lưu trên iPhone; không gửi về máy chủ của chúng tôi.")
+                        Text("Cookie, Access Token và dữ liệu web của mỗi không gian chỉ được lưu trong Keychain & WebKit trên iPhone.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
@@ -118,6 +152,9 @@ struct SpaceDashboard: View {
             .sheet(isPresented: $showAdd) { AddSpaceSheet() }
             .sheet(item: $openSpace) { space in
                 NavigationStack { SpaceBrowser(space: space) }
+            }
+            .sheet(item: $tokenSpace) { space in
+                LoginEditorSheet(space: space)
             }
             .sheet(item: $renameSpace) { space in
                 NavigationStack {
@@ -152,7 +189,7 @@ struct SpaceDashboard: View {
                     }
                 }
             } message: {
-                Text("Cookie, phiên đăng nhập và dữ liệu web của không gian này sẽ bị xóa.")
+                Text("Cookie, Token, phiên đăng nhập và dữ liệu web của không gian này sẽ bị xóa.")
             }
             .confirmationDialog("Đăng xuất không gian này?", isPresented: Binding(
                 get: { clearSpace != nil },
@@ -233,7 +270,7 @@ struct AddSpaceSheet: View {
                         .autocorrectionDisabled()
                 }
                 Section {
-                    Label("Chỉ đăng nhập trên website chính thức. Mỗi không gian có vùng cookie và dữ liệu web riêng.",
+                    Label("Mỗi không gian có vùng cookie, dữ liệu web và Kho Token riêng biệt.",
                           systemImage: "lock.shield")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
@@ -339,8 +376,14 @@ struct IsolatedWebView: UIViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         browser.webView = webView
-        if let url = launchURL ?? SpaceLibrary.safeURL(space.url) {
-            webView.load(URLRequest(url: url))
+        let targetURL = launchURL ?? SpaceLibrary.safeURL(space.url)
+        Task { @MainActor in
+            if let vault = try? SecureLoginStore.readTokenVault(space.id) {
+                _ = await WebCookieBridge.injectCookies(from: vault, into: space.id)
+            }
+            if let url = targetURL {
+                webView.load(URLRequest(url: url))
+            }
         }
         return webView
     }
