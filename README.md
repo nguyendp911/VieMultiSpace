@@ -58,3 +58,12 @@ Mở **Trung tâm tài khoản** ở trang chính:
 - WebKit lưu riêng từng phiên; app không xuất/đọc giá trị cookie, token, mật khẩu hoặc seed TOTP.
 
 Chức năng này **không chạy file Python trên iPhone**, và không tích hợp các API Facebook không công khai để lấy/chuyển đổi token. Đừng upload file Python có mật khẩu hoặc mã 2FA lên GitHub public. Nếu đã vô tình chia sẻ, đổi mật khẩu và xoay vòng 2FA.
+
+
+## Native Swift login và TOTP
+
+Phần lưu thông tin đăng nhập theo từng không gian và tạo mã TOTP 6 chữ số (chu kỳ 30 giây) đã được viết bằng Swift + CryptoKit + iOS Keychain; không cần runtime Python.
+
+Vào Trung tâm tài khoản > menu (...) > Lưu mật khẩu và 2FA. Trong trình duyệt Facebook, bấm Điền đăng nhập để điền vào biểu mẫu HTTPS facebook.com; ứng dụng không tự bấm Đăng nhập. Nút Mã 2FA tạo mã sau khi xác thực người dùng. Mỗi tài khoản lưu trong Keychain theo UUID và yêu cầu xác thực bằng thiết bị khi đọc.
+
+Không tích hợp API Facebook không công khai, giả lập thiết bị Android, chuyển đổi access token hoặc trích xuất cookie/token. Không đưa dữ liệu nhạy cảm trong file Python lên GitHub.

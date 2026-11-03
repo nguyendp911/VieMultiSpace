@@ -299,6 +299,9 @@ struct SpaceBrowser: View {
             }
             .padding(.horizontal, 14).padding(.vertical, 8)
             IsolatedWebView(space: space, browser: browser, launchURL: library.lastPage(for: space))
+            if space.platform == .facebook {
+                SecureLoginControls(space: space, webView: browser.webView)
+            }
             HStack {
                 Button(action: browser.back) { Image(systemName: "chevron.left") }
                     .disabled(!browser.canGoBack)

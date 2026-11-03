@@ -95,6 +95,7 @@ final class SpaceLibrary: ObservableObject {
         // Do not keep this profile's WKWebView open while removing its store.
         try await WKWebsiteDataStore.remove(forIdentifier: space.id)
         spaces.removeAll { $0.id == space.id }
+        SecureLoginStore.remove(space.id)
         var stored = UserDefaults.standard.dictionary(forKey: launchKey) as? [String: String] ?? [:]
         stored.removeValue(forKey: space.id.uuidString)
         UserDefaults.standard.set(stored, forKey: launchKey)

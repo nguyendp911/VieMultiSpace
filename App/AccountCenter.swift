@@ -18,6 +18,7 @@ struct AccountCenterView: View {
     @State private var pendingClear: Space?
     @State private var isClearing = false
     @State private var showQuickCreate = false
+    @State private var loginEditorSpace: Space?
 
     private var matches: [Space] {
         library.spaces.filter { space in
@@ -94,6 +95,9 @@ struct AccountCenterView: View {
                                 .controlSize(.small)
                                 .accessibilityLabel("Mở " + space.name)
                             Menu {
+                                Button("Lưu mật khẩu và 2FA", systemImage: "key.fill") {
+                                    loginEditorSpace = space
+                                }
                                 Button("Mở/Đăng nhập", systemImage: "rectangle.portrait.and.arrow.right") {
                                     opened = space
                                 }
@@ -138,6 +142,9 @@ struct AccountCenterView: View {
             NavigationStack {
                 SpaceBrowser(space: space)
             }
+        }
+        .sheet(item: $loginEditorSpace) { space in
+            LoginEditorSheet(space: space)
         }
         .sheet(isPresented: $showQuickCreate) {
             QuickCreateProfilesSheet()
