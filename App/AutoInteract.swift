@@ -1295,11 +1295,26 @@ final class FacebookGraphQLAutoClient {
         return posts
     }
 
+    // MARK: - React to Post (Dual Engine: Graph API -> Fallback Comet GraphQL)
+
     func reactToPost(postId: String, reaction: FacebookReactionType, explicitFeedbackId: String? = nil) async -> (success: Bool, message: String) {
+        let concrete = reaction.resolveConcrete()
+
+        // ── 1. Thử qua Facebook Graph API (Nếu có Access Token) ──
+        if !accessToken.isEmpty {
+            if let graphRes = await reactViaGraphAPI(postId: postId, reaction: concrete) {
+                if graphRes.success {
+                    AppLogger.shared.info("AutoReact", "✅ [\(concrete.rawValue)] Post ID: \(postId) (Graph API)")
+                    return graphRes
+                }
+                AppLogger.shared.debug("AutoReact", "Graph API react không khả dụng, chuyển sang Comet GraphQL...")
+            }
+        }
+
+        // ── 2. Comet Web GraphQL Mutation ──
         guard let tok = tokens else {
             return (false, "Chưa khởi tạo token phiên web.")
         }
-        let concrete = reaction.resolveConcrete()
         let feedbackId = (explicitFeedbackId?.isEmpty == false)
             ? explicitFeedbackId!
             : Data("feedback:\(postId)".utf8).base64EncodedString()
@@ -1349,9 +1364,7 @@ final class FacebookGraphQLAutoClient {
 
         var request = URLRequest(url: URL(string: "https://www.facebook.com/api/graphql/")!)
         request.httpMethod = "POST"
-        for (k, v) in baseHeaders {
-            request.setValue(v, forHTTPHeaderField: k)
-        }
+        for (k, v) in baseHeaders { request.setValue(v, forHTTPHeaderField: k) }
         request.setValue("CometUFIFeedbackReactMutation", forHTTPHeaderField: "x-fb-friendly-name")
         request.setValue("129477", forHTTPHeaderField: "x-asbd-id")
         request.setValue(tok.lsdToken, forHTTPHeaderField: "x-fb-lsd")
@@ -1367,7 +1380,9 @@ final class FacebookGraphQLAutoClient {
 
         do {
             let (data, _) = try await session.data(for: request)
-            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let json = Self.parseFacebookGraphQLResponse(data)
+
+            if let json {
                 if let dataObj = json["data"] as? [String: Any],
                    let reactObj = dataObj["feedback_react"] as? [String: Any],
                    reactObj["feedback"] != nil {
@@ -1381,7 +1396,15 @@ final class FacebookGraphQLAutoClient {
                     return (false, desc)
                 }
             }
-            let failMsg = "Thả cảm xúc \(concrete.rawValue) thất bại (Phản hồi không xác định)"
+
+            let rawStr = String(data: data, encoding: .utf8) ?? ""
+            if rawStr.contains("\"feedback_react\"") {
+                AppLogger.shared.info("AutoReact", "✅ [\(concrete.rawValue)] Post ID: \(postId) (Khớp chuỗi)")
+                return (true, "Đã thả cảm xúc \(concrete.rawValue)")
+            }
+
+            let preview = String(rawStr.prefix(150)).replacingOccurrences(of: "\n", with: " ")
+            let failMsg = "Phản hồi: \(preview.isEmpty ? "Rỗng" : preview)"
             AppLogger.shared.error("AutoReact", "❌ Post ID \(postId): \(failMsg)")
             return (false, failMsg)
         } catch {
@@ -1390,7 +1413,51 @@ final class FacebookGraphQLAutoClient {
         }
     }
 
+    private func reactViaGraphAPI(postId: String, reaction: FacebookReactionType) async -> (success: Bool, message: String)? {
+        guard !accessToken.isEmpty else { return nil }
+        guard let url = URL(string: "https://graph.facebook.com/v18.0/\(postId)/reactions") else { return nil }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        let bodyParams = [
+            "type": reaction.rawValue,
+            "access_token": accessToken
+        ]
+        req.httpBody = Self.formEncode(bodyParams)
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+
+        do {
+            let (data, response) = try await session.data(for: req)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if json["success"] as? Bool == true || status == 200 {
+                    return (true, "Đã thả cảm xúc \(reaction.rawValue)")
+                }
+                if let err = json["error"] as? [String: Any],
+                   let msg = err["message"] as? String {
+                    return (false, msg)
+                }
+            }
+            return (status == 200, status == 200 ? "Thành công" : "Mã phản hồi \(status)")
+        } catch {
+            return nil
+        }
+    }
+
+    // MARK: - Comment on Post (Dual Engine: Graph API -> Fallback Comet GraphQL)
+
     func commentOnPost(postId: String, commentText: String, explicitFeedbackId: String? = nil) async -> (success: Bool, message: String) {
+        // ── 1. Thử qua Facebook Graph API (Nếu có Access Token) ──
+        if !accessToken.isEmpty {
+            if let graphRes = await commentViaGraphAPI(postId: postId, text: commentText) {
+                if graphRes.success {
+                    AppLogger.shared.info("AutoComment", "✅ Post ID: \(postId) (Graph API)", detail: "Nội dung: \"\(commentText)\"")
+                    return graphRes
+                }
+                AppLogger.shared.debug("AutoComment", "Graph API comment không khả dụng, chuyển sang Comet GraphQL...")
+            }
+        }
+
+        // ── 2. Comet Web GraphQL Mutation ──
         guard let tok = tokens else {
             return (false, "Chưa khởi tạo token phiên web.")
         }
@@ -1458,9 +1525,7 @@ final class FacebookGraphQLAutoClient {
 
         var request = URLRequest(url: URL(string: "https://www.facebook.com/api/graphql/")!)
         request.httpMethod = "POST"
-        for (k, v) in baseHeaders {
-            request.setValue(v, forHTTPHeaderField: k)
-        }
+        for (k, v) in baseHeaders { request.setValue(v, forHTTPHeaderField: k) }
         request.setValue("useCometUFICreateCommentMutation", forHTTPHeaderField: "x-fb-friendly-name")
         request.setValue("359341", forHTTPHeaderField: "x-asbd-id")
         request.setValue(tok.lsdToken, forHTTPHeaderField: "x-fb-lsd")
@@ -1476,7 +1541,9 @@ final class FacebookGraphQLAutoClient {
 
         do {
             let (data, _) = try await session.data(for: request)
-            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let json = Self.parseFacebookGraphQLResponse(data)
+
+            if let json {
                 if let dataObj = json["data"] as? [String: Any],
                    let commentCreate = dataObj["comment_create"] as? [String: Any] {
                     if let edge = commentCreate["feedback_comment_edge"] as? [String: Any],
@@ -1500,13 +1567,77 @@ final class FacebookGraphQLAutoClient {
                     return (false, desc)
                 }
             }
-            let failMsg = "Comment thất bại (Phản hồi không xác định)"
+
+            let rawStr = String(data: data, encoding: .utf8) ?? ""
+            if rawStr.contains("\"comment_create\"") {
+                AppLogger.shared.info("AutoComment", "✅ Post ID: \(postId) (Khớp chuỗi)")
+                return (true, "Đã bình luận: \"\(commentText.prefix(55))\"")
+            }
+
+            let preview = String(rawStr.prefix(150)).replacingOccurrences(of: "\n", with: " ")
+            let failMsg = "Comment thất bại (\(preview.isEmpty ? "Phản hồi rỗng" : preview))"
             AppLogger.shared.error("AutoComment", "❌ Post ID \(postId): \(failMsg)")
             return (false, failMsg)
         } catch {
             AppLogger.shared.error("AutoComment", "❌ Lỗi mạng khi comment Post ID \(postId)", detail: error.localizedDescription)
             return (false, error.localizedDescription)
         }
+    }
+
+    private func commentViaGraphAPI(postId: String, text: String) async -> (success: Bool, message: String)? {
+        guard !accessToken.isEmpty else { return nil }
+        guard let url = URL(string: "https://graph.facebook.com/v18.0/\(postId)/comments") else { return nil }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        let bodyParams = [
+            "message": text,
+            "access_token": accessToken
+        ]
+        req.httpBody = Self.formEncode(bodyParams)
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+
+        do {
+            let (data, response) = try await session.data(for: req)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let newId = json["id"] as? String, !newId.isEmpty {
+                    return (true, "Đã bình luận: \"\(text.prefix(55))\"")
+                }
+                if let err = json["error"] as? [String: Any],
+                   let msg = err["message"] as? String {
+                    return (false, msg)
+                }
+            }
+            return (status == 200, status == 200 ? "Thành công" : "Mã phản hồi \(status)")
+        } catch {
+            return nil
+        }
+    }
+
+    // MARK: - Robust Facebook GraphQL Response Parser (Hỗ trợ NDJSON, loại bỏ for(;;);)
+
+    private static func parseFacebookGraphQLResponse(_ data: Data) -> [String: Any]? {
+        let rawStr = String(data: data, encoding: .utf8) ?? ""
+        var cleaned = rawStr.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.hasPrefix("for (;;);") {
+            cleaned = String(cleaned.dropFirst(9)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let directData = cleaned.data(using: .utf8),
+           let directJson = try? JSONSerialization.jsonObject(with: directData) as? [String: Any] {
+            return directJson
+        }
+        for line in cleaned.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, let lineData = trimmed.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+                continue
+            }
+            if obj["data"] != nil || obj["errors"] != nil {
+                return obj
+            }
+        }
+        return nil
+    }
     }
 
     private static func firstMatch(pattern: String, in text: String) -> String? {
