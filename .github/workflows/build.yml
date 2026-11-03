@@ -35,6 +35,11 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build 2>&1 | tee xcodebuild.log
 
+      - name: Print compiler errors on failure
+        if: failure()
+        run: |
+          grep -E "error:" xcodebuild.log || tail -n 120 xcodebuild.log
+
       - name: Upload build log on failure
         if: failure()
         uses: actions/upload-artifact@v4

@@ -1783,13 +1783,13 @@ final class FacebookGraphQLAutoClient {
             let name = String(trimmed[..<eqIdx]).trimmingCharacters(in: .whitespacesAndNewlines)
             let value = String(trimmed[trimmed.index(after: eqIdx)...]).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty else { continue }
-            if let c = HTTPCookie(properties: [
+            let props: [HTTPCookiePropertyKey: Any] = [
                 .name: name,
                 .value: value,
                 .domain: ".facebook.com",
-                .path: "/",
-                .originURL: URL(string: "https://www.facebook.com")!
-            ]) {
+                .path: "/"
+            ]
+            if let c = HTTPCookie(properties: props) {
                 cookies.append(c)
             }
         }
