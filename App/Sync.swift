@@ -168,25 +168,31 @@ final class BatchSyncEngine: NSObject, ObservableObject, WKNavigationDelegate {
         stop()
         mode = .targetInteract
         isRunning = true
-        rows = spaces.enumerated().map { idx, sp in
+
+        var initialRows: [BatchRow] = []
+        for idx in spaces.indices {
+            let sp = spaces[idx]
             var initialComment = ""
             if useComment && commentSource == .manualLines && idx < manualLines.count {
                 initialComment = manualLines[idx]
             }
-            return BatchRow(
-                id: sp.id,
-                name: sp.name,
-                status: .queued,
-                detail: "Đang chờ tới lượt",
-                assignedComment: initialComment
+            initialRows.append(
+                BatchRow(
+                    id: sp.id,
+                    name: sp.name,
+                    status: .queued,
+                    detail: "Đang chờ tới lượt",
+                    assignedComment: initialComment
+                )
             )
         }
+        rows = initialRows
 
         interactTask = Task {
             let target: ResolvedTargetPost
             do {
-                if let index = rows.indices.first {
-                    rows[index].detail = "Đang phân tích Link/ID mục tiêu..."
+                if !rows.isEmpty {
+                    rows[0].detail = "Đang phân tích Link/ID mục tiêu..."
                 }
                 target = try await resolveTargetInfo(
                     targetInput: targetInput,
@@ -210,8 +216,9 @@ final class BatchSyncEngine: NSObject, ObservableObject, WKNavigationDelegate {
                 }
             }
 
-            for (idx, space) in spaces.enumerated() {
+            for idx in spaces.indices {
                 if Task.isCancelled || !isRunning { break }
+                let space = spaces[idx]
 
                 mark(space, status: .loading, detail: "Đang chuẩn bị Cookie & fb_dtsg...")
                 let creds = await Self.resolveCookieAndToken(for: space)
@@ -233,7 +240,6 @@ final class BatchSyncEngine: NSObject, ObservableObject, WKNavigationDelegate {
                     continue
                 }
 
-                // Xác định nội dung bình luận & cảm xúc cho không gian này (Đảm bảo không trùng lặp)
                 var commentToSend = ""
                 var aiSuggestedReaction: FacebookReactionType? = nil
                 var commentError: String? = nil
@@ -565,7 +571,6 @@ struct MultiSpaceSyncView: View {
     @State private var mode: BatchMode = .targetInteract
     @State private var urlText = "https://www.facebook.com/"
 
-    // Cấu hình Tương tác Bài viết / Reel / Nhóm / Fanpage chỉ định
     @State private var targetCategory: TargetCategoryHint = .auto
     @State private var targetPostInput = ""
     @State private var manualContextText = ""
@@ -632,376 +637,16 @@ struct MultiSpaceSyncView: View {
 
     var body: some View {
         Form {
-            Section {
-                HStack {
-                    Text("Đã chọn \(selectedSpaces.count)/\(library.spaces.count) không gian")
-                        .font(.subheadline.bold())
-                    Spacer()
-                    Button("Tất cả") {
-                        selectedIDs = Set(library.spaces.map(\.id))
-                    }
-                    .disabled(engine.isRunning)
-                    Button("Bỏ chọn") {
-                        selectedIDs.removeAll()
-                    }
-                    .disabled(engine.isRunning)
-                }
-                ForEach(library.spaces) { space in
-                    let summary = VaultMetadataIndex.get(space.id)
-                    Button {
-                        guard !engine.isRunning else { return }
-                        if selectedIDs.contains(space.id) { selectedIDs.remove(space.id) }
-                        else { selectedIDs.insert(space.id) }
-                    } label: {
-                        HStack {
-                            Image(systemName: selectedIDs.contains(space.id)
-                                  ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(selectedIDs.contains(space.id) ? .blue : .secondary)
-                            Image(systemName: space.platform.icon)
-                                .foregroundStyle(space.platform.color)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(space.name).foregroundStyle(.primary)
-                                if summary.hasToken || summary.hasCookies {
-                                    Text("Sẵn sàng • Đã lưu Cookie & Token")
-                                        .font(.caption2).foregroundStyle(.green)
-                                }
-                            }
-                            Spacer()
-                        }
-                    }
-                    .disabled(engine.isRunning)
-                }
-            } header: {
-                Text("1. Chọn các không gian thực hiện")
-            } footer: {
-                Text("Dùng trực tiếp Cookie & Token đã lưu của từng không gian mà không cần đăng nhập lại.")
-            }
-
-            Section("2. Chế độ MultiSpace Sync") {
-                Picker("Thao tác", selection: $mode) {
-                    ForEach(BatchMode.allCases, id: \.self) { action in
-                        Text(action.rawValue).tag(action)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .disabled(engine.isRunning)
-
-                if mode == .openURL {
-                    TextField("https://www.facebook.com/", text: $urlText)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .disabled(engine.isRunning)
-                    if targetURL == nil {
-                        Text("Hãy nhập URL HTTPS hợp lệ.")
-                            .font(.caption).foregroundStyle(.red)
-                    }
-                } else if mode == .refresh {
-                    Text("Nạp lại URL cuối cùng đã mở theo nhóm, hoặc trang chủ của không gian.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                }
-            }
-
+            spaceSelectionSection
+            modeSelectionSection
             if mode == .targetInteract {
-                Section {
-                    Picker("Loại mục tiêu", selection: $targetCategory) {
-                        ForEach(TargetCategoryHint.allCases) { item in
-                            Text(item.rawValue).tag(item)
-                        }
-                    }
-                    .disabled(engine.isRunning)
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("Link hoặc ID Bài viết / Reel / Nhóm / Fanpage:")
-                                .font(.caption.bold())
-                            Spacer()
-                            Button("Dán") {
-                                if let clip = UIPasteboard.general.string {
-                                    targetPostInput = clip
-                                }
-                            }
-                            .font(.caption.bold())
-                            .buttonStyle(.bordered)
-                            .controlSize(.mini)
-                            .disabled(engine.isRunning)
-                        }
-                        TextField("Dán link bài viết, Reel, bài Group, Fanpage hoặc ID...", text: $targetPostInput)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .textFieldStyle(.roundedBorder)
-                            .disabled(engine.isRunning)
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Mô tả / Nội dung bài viết bổ sung (Tùy chọn cho AI):")
-                            .font(.caption).foregroundStyle(.secondary)
-                        TextField("Nhập thêm nội dung bài/Reel nếu muốn định hướng sát hơn...", text: $manualContextText, axis: .vertical)
-                            .lineLimit(1...3)
-                            .font(.caption)
-                            .textFieldStyle(.roundedBorder)
-                            .disabled(engine.isRunning)
-                    }
-
-                    Button {
-                        Task { await previewTargetPost() }
-                    } label: {
-                        HStack {
-                            if engine.isResolvingTarget {
-                                ProgressView().controlSize(.small)
-                            }
-                            Label("Kiểm tra Link & Đọc nội dung mục tiêu", systemImage: "magnifyingglass.circle.fill")
-                                .font(.caption.bold())
-                        }
-                    }
-                    .disabled(engine.isRunning || engine.isResolvingTarget || targetPostInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                    if let resolved = engine.resolvedTargetPreview {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("✅ Đã nhận diện: \(resolved.targetKind) • ID: \(resolved.postId)")
-                                .font(.caption.bold())
-                                .foregroundStyle(.green)
-                            Text("Đăng bởi: \(resolved.authorName)")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            if !resolved.postText.isEmpty {
-                                Text("Nội dung: \"\(resolved.postText.prefix(140))\"")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(3)
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                } header: {
-                    Text("3. Ô nhập Bài viết / Reel / Nhóm / Fanpage chỉ định")
-                } footer: {
-                    Text("Hỗ trợ mọi định dạng: Link bài viết cá nhân, Reel (facebook.com/reel/...), bài trong Nhóm (facebook.com/groups/...), bài Fanpage, link chia sẻ (share/p/..., share/r/...) hoặc ID số.")
-                }
-
-                Section("4. Tùy chọn Thả Cảm xúc & Bình luận (Không trùng)") {
-                    Toggle("Thả cảm xúc (Reaction)", isOn: $useReaction)
-                        .disabled(engine.isRunning)
-
-                    if useReaction {
-                        Picker("Cảm xúc", selection: $reactionTypeRaw) {
-                            ForEach(FacebookReactionType.allCases) { item in
-                                Text(item.label).tag(item.rawValue)
-                            }
-                        }
-                        .disabled(engine.isRunning)
-                    }
-
-                    Toggle("Bình luận (Comment) vào bài chỉ định", isOn: $useComment)
-                        .disabled(engine.isRunning)
-
-                    if useComment {
-                        Picker("Nguồn Comment", selection: $commentSourceRaw) {
-                            ForEach(TargetCommentSource.allCases) { src in
-                                Text(src.rawValue).tag(src.rawValue)
-                            }
-                        }
-                        .disabled(engine.isRunning)
-
-                        if commentSource == .manualLines {
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Text("Mỗi hàng = 1 không gian (\(parsedManualCommentLines.count)/\(selectedSpaces.count) hàng):")
-                                        .font(.caption.bold())
-                                    Spacer()
-                                    Button("Dán") {
-                                        if let clip = UIPasteboard.general.string {
-                                            rawManualComments = clip
-                                        }
-                                    }
-                                    .font(.caption)
-                                    .buttonStyle(.bordered)
-                                    .controlSize(.mini)
-
-                                    if hasDuplicateManualLines {
-                                        Button("Lọc trùng") {
-                                            deduplicateManualLines()
-                                        }
-                                        .font(.caption)
-                                        .buttonStyle(.borderedProminent)
-                                        .controlSize(.mini)
-                                    }
-
-                                    Button("Xóa") {
-                                        rawManualComments = ""
-                                    }
-                                    .font(.caption)
-                                    .buttonStyle(.bordered)
-                                    .controlSize(.mini)
-                                }
-
-                                TextEditor(text: $rawManualComments)
-                                    .frame(minHeight: 110)
-                                    .font(.caption)
-                                    .padding(6)
-                                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
-                                    .disabled(engine.isRunning)
-
-                                if hasDuplicateManualLines {
-                                    Text("⚠️ Có dòng bình luận bị trùng nhau. Bấm 'Lọc trùng' để mỗi không gian có nội dung riêng biệt.")
-                                        .font(.caption2)
-                                        .foregroundStyle(.orange)
-                                }
-
-                                if !selectedSpaces.isEmpty && !parsedManualCommentLines.isEmpty {
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text("Xem trước phân bổ từng hàng cho từng không gian:")
-                                            .font(.caption2.bold())
-                                            .foregroundStyle(.secondary)
-                                        ForEach(Array(selectedSpaces.enumerated()), id: \.element.id) { idx, sp in
-                                            let lineText = idx < parsedManualCommentLines.count
-                                                ? parsedManualCommentLines[idx]
-                                                : (aiFallbackWhenLinesShort ? "[✨ AI tự sinh bù không trùng]" : "[Bỏ qua]")
-                                            Text("• \(sp.name): \(lineText)")
-                                                .font(.caption2)
-                                                .foregroundStyle(idx < parsedManualCommentLines.count ? .primary : .blue)
-                                                .lineLimit(1)
-                                        }
-                                    }
-                                    .padding(.top, 2)
-                                }
-
-                                if parsedManualCommentLines.count < selectedSpaces.count {
-                                    Toggle("Tự dùng AI Gemini sinh bù (không trùng) nếu thiếu dòng", isOn: $aiFallbackWhenLinesShort)
-                                        .font(.caption)
-                                        .disabled(engine.isRunning)
-                                }
-                            }
-                        }
-
-                        if commentSource == .geminiAI ||
-                            (commentSource == .manualLines && aiFallbackWhenLinesShort && parsedManualCommentLines.count < selectedSpaces.count) ||
-                            reactionType == .geminiAuto {
-                            VStack(alignment: .leading, spacing: 8) {
-                                SecureField("Gemini API Key (AIza...)", text: $geminiApiKey)
-                                    .textInputAutocapitalization(.never)
-                                    .autocorrectionDisabled()
-                                    .textFieldStyle(.roundedBorder)
-                                    .disabled(engine.isRunning)
-                                    .onChange(of: geminiApiKey) { _, newValue in
-                                        SecureGeminiStore.saveKey(newValue)
-                                    }
-
-                                Text("Phong cách / Yêu cầu cho AI Gemini:")
-                                    .font(.caption).foregroundStyle(.secondary)
-                                TextField("Phong cách bình luận...", text: $geminiStylePrompt, axis: .vertical)
-                                    .lineLimit(2...3)
-                                    .font(.caption)
-                                    .textFieldStyle(.roundedBorder)
-                                    .disabled(engine.isRunning)
-                                Text("✨ AI tự động truyền danh sách bình luận đã tạo của các tài khoản trước vào bộ lọc loại trừ để đảm bảo mỗi không gian bình luận một câu hoàn toàn khác nhau.")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-
-                Section {
-                    Toggle(isOn: $safeModeEnabled) {
-                        Label("Bật SafeMode (Ngẫu nhiên hóa thời gian chờ)", systemImage: "shield.lefthalf.filled.badge.checkmark")
-                            .fontWeight(.semibold)
-                    }
-                    .disabled(engine.isRunning)
-
-                    if useReaction && useComment {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Nghỉ ngẫu nhiên giữa Reaction và Comment (giây — không giới hạn):")
-                                .font(.caption).foregroundStyle(.secondary)
-                            HStack {
-                                Text("Từ (s):").font(.caption)
-                                TextField("Min", text: $minActionGapText)
-                                    .keyboardType(.decimalPad)
-                                    .textFieldStyle(.roundedBorder)
-                                    .disabled(engine.isRunning)
-                                Text("Đến (s):").font(.caption)
-                                TextField("Max", text: $maxActionGapText)
-                                    .keyboardType(.decimalPad)
-                                    .textFieldStyle(.roundedBorder)
-                                    .disabled(engine.isRunning)
-                            }
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Nghỉ ngẫu nhiên giữa các không gian (giây — không giới hạn):")
-                            .font(.caption).foregroundStyle(.secondary)
-                        HStack {
-                            Text("Từ (s):").font(.caption)
-                            TextField("Min", text: $minSpaceDelayText)
-                                .keyboardType(.decimalPad)
-                                .textFieldStyle(.roundedBorder)
-                                .disabled(engine.isRunning)
-                            Text("Đến (s):").font(.caption)
-                            TextField("Max", text: $maxSpaceDelayText)
-                                .keyboardType(.decimalPad)
-                                .textFieldStyle(.roundedBorder)
-                                .disabled(engine.isRunning)
-                        }
-                    }
-                } header: {
-                    Text("5. SafeMode bảo vệ tài khoản (Tùy chỉnh giây không giới hạn)")
-                }
+                targetInputSection
+                reactionAndCommentSection
+                safeModeSection
             }
-
-            Section {
-                if engine.isRunning {
-                    Button(role: .destructive) { engine.stop() } label: {
-                        Label("Dừng hàng đợi đang chạy", systemImage: "stop.fill")
-                            .fontWeight(.bold)
-                    }
-                } else {
-                    Button {
-                        triggerStart()
-                    } label: {
-                        Label("Thực hiện với \(selectedSpaces.count) không gian",
-                              systemImage: "play.fill")
-                            .fontWeight(.bold)
-                    }
-                    .disabled(!canStart)
-                }
-            }
-
-            if !engine.rows.isEmpty {
-                Section {
-                    LabeledContent("Hoàn tất", value: "\(engine.completed)/\(engine.rows.count)")
-                    LabeledContent("Thành công", value: "\(engine.succeeded)")
-                    ForEach(engine.rows) { row in
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: row.status.symbol)
-                                .foregroundStyle(row.status.tint)
-                                .frame(width: 20)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(row.name).fontWeight(.semibold)
-                                Text(row.status.title + " · " + row.detail)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                if !row.assignedComment.isEmpty {
-                                    Text("💬 Nội dung: \"\(row.assignedComment)\"")
-                                        .font(.caption2)
-                                        .foregroundStyle(.blue)
-                                }
-                            }
-                        }
-                        .padding(.vertical, 3)
-                    }
-                } header: {
-                    Text("Trạng thái từng không gian")
-                }
-            }
-
-            if engine.isRunning && engine.activeWebView != nil {
-                Section("Xem trước phiên đang tải") {
-                    BatchWebPreview(webView: engine.activeWebView)
-                        .frame(height: 230)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                }
-            }
+            actionButtonSection
+            statusRowsSection
+            webPreviewSection
         }
         .navigationTitle("MultiSpace Sync")
         .navigationBarTitleDisplayMode(.inline)
@@ -1024,6 +669,418 @@ struct MultiSpaceSyncView: View {
             Button("OK") { alertMessage = nil }
         } message: {
             Text(alertMessage ?? "")
+        }
+    }
+
+    @ViewBuilder
+    private var spaceSelectionSection: some View {
+        Section {
+            HStack {
+                Text("Đã chọn \(selectedSpaces.count)/\(library.spaces.count) không gian")
+                    .font(.subheadline.bold())
+                Spacer()
+                Button("Tất cả") {
+                    selectedIDs = Set(library.spaces.map(\.id))
+                }
+                .disabled(engine.isRunning)
+                Button("Bỏ chọn") {
+                    selectedIDs.removeAll()
+                }
+                .disabled(engine.isRunning)
+            }
+            ForEach(library.spaces) { space in
+                let summary = VaultMetadataIndex.get(space.id)
+                let isSelected = selectedIDs.contains(space.id)
+                Button {
+                    guard !engine.isRunning else { return }
+                    if isSelected { selectedIDs.remove(space.id) }
+                    else { selectedIDs.insert(space.id) }
+                } label: {
+                    HStack {
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(isSelected ? .blue : .secondary)
+                        Image(systemName: space.platform.icon)
+                            .foregroundStyle(space.platform.color)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(space.name).foregroundStyle(.primary)
+                            if summary.hasToken || summary.hasCookies {
+                                Text("Sẵn sàng • Đã lưu Cookie & Token")
+                                    .font(.caption2).foregroundStyle(.green)
+                            }
+                        }
+                        Spacer()
+                    }
+                }
+                .disabled(engine.isRunning)
+            }
+        } header: {
+            Text("1. Chọn các không gian thực hiện")
+        } footer: {
+            Text("Dùng trực tiếp Cookie & Token đã lưu của từng không gian mà không cần đăng nhập lại.")
+        }
+    }
+
+    @ViewBuilder
+    private var modeSelectionSection: some View {
+        Section("2. Chế độ MultiSpace Sync") {
+            Picker("Thao tác", selection: $mode) {
+                ForEach(BatchMode.allCases, id: \.self) { action in
+                    Text(action.rawValue).tag(action)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(engine.isRunning)
+
+            if mode == .openURL {
+                TextField("https://www.facebook.com/", text: $urlText)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .disabled(engine.isRunning)
+                if targetURL == nil {
+                    Text("Hãy nhập URL HTTPS hợp lệ.")
+                        .font(.caption).foregroundStyle(.red)
+                }
+            } else if mode == .refresh {
+                Text("Nạp lại URL cuối cùng đã mở theo nhóm, hoặc trang chủ của không gian.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var targetInputSection: some View {
+        Section {
+            Picker("Loại mục tiêu", selection: $targetCategory) {
+                ForEach(TargetCategoryHint.allCases) { item in
+                    Text(item.rawValue).tag(item)
+                }
+            }
+            .disabled(engine.isRunning)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Link hoặc ID Bài viết / Reel / Nhóm / Fanpage:")
+                        .font(.caption.bold())
+                    Spacer()
+                    Button("Dán") {
+                        if let clip = UIPasteboard.general.string {
+                            targetPostInput = clip
+                        }
+                    }
+                    .font(.caption.bold())
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .disabled(engine.isRunning)
+                }
+                TextField("Dán link bài viết, Reel, bài Group, Fanpage hoặc ID...", text: $targetPostInput)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(engine.isRunning)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Mô tả / Nội dung bài viết bổ sung (Tùy chọn cho AI):")
+                    .font(.caption).foregroundStyle(.secondary)
+                TextField("Nhập thêm nội dung bài/Reel nếu muốn định hướng sát hơn...", text: $manualContextText, axis: .vertical)
+                    .lineLimit(1...3)
+                    .font(.caption)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(engine.isRunning)
+            }
+
+            Button {
+                Task { await previewTargetPost() }
+            } label: {
+                HStack {
+                    if engine.isResolvingTarget {
+                        ProgressView().controlSize(.small)
+                    }
+                    Label("Kiểm tra Link & Đọc nội dung mục tiêu", systemImage: "magnifyingglass.circle.fill")
+                        .font(.caption.bold())
+                }
+            }
+            .disabled(engine.isRunning || engine.isResolvingTarget || targetPostInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+            if let resolved = engine.resolvedTargetPreview {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("✅ Đã nhận diện: \(resolved.targetKind) • ID: \(resolved.postId)")
+                        .font(.caption.bold())
+                        .foregroundStyle(.green)
+                    Text("Đăng bởi: \(resolved.authorName)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    if !resolved.postText.isEmpty {
+                        Text("Nội dung: \"\(resolved.postText.prefix(140))\"")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        } header: {
+            Text("3. Ô nhập Bài viết / Reel / Nhóm / Fanpage chỉ định")
+        } footer: {
+            Text("Hỗ trợ mọi định dạng: Link bài viết cá nhân, Reel (facebook.com/reel/...), bài trong Nhóm (facebook.com/groups/...), bài Fanpage, link chia sẻ (share/p/..., share/r/...) hoặc ID số.")
+        }
+    }
+
+    @ViewBuilder
+    private var reactionAndCommentSection: some View {
+        Section("4. Tùy chọn Thả Cảm xúc & Bình luận (Không trùng)") {
+            Toggle("Thả cảm xúc (Reaction)", isOn: $useReaction)
+                .disabled(engine.isRunning)
+
+            if useReaction {
+                Picker("Cảm xúc", selection: $reactionTypeRaw) {
+                    ForEach(FacebookReactionType.allCases) { item in
+                        Text(item.label).tag(item.rawValue)
+                    }
+                }
+                .disabled(engine.isRunning)
+            }
+
+            Toggle("Bình luận (Comment) vào bài chỉ định", isOn: $useComment)
+                .disabled(engine.isRunning)
+
+            if useComment {
+                Picker("Nguồn Comment", selection: $commentSourceRaw) {
+                    ForEach(TargetCommentSource.allCases) { src in
+                        Text(src.rawValue).tag(src.rawValue)
+                    }
+                }
+                .disabled(engine.isRunning)
+
+                if commentSource == .manualLines {
+                    manualCommentLinesView
+                }
+
+                if shouldShowGeminiConfig {
+                    geminiConfigurationView
+                }
+            }
+        }
+    }
+
+    private var shouldShowGeminiConfig: Bool {
+        if commentSource == .geminiAI { return true }
+        if commentSource == .manualLines && aiFallbackWhenLinesShort && parsedManualCommentLines.count < selectedSpaces.count {
+            return true
+        }
+        if reactionType == .geminiAuto { return true }
+        return false
+    }
+
+    @ViewBuilder
+    private var manualCommentLinesView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Mỗi hàng = 1 không gian (\(parsedManualCommentLines.count)/\(selectedSpaces.count) hàng):")
+                    .font(.caption.bold())
+                Spacer()
+                Button("Dán") {
+                    if let clip = UIPasteboard.general.string {
+                        rawManualComments = clip
+                    }
+                }
+                .font(.caption)
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+
+                if hasDuplicateManualLines {
+                    Button("Lọc trùng") {
+                        deduplicateManualLines()
+                    }
+                    .font(.caption)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.mini)
+                }
+
+                Button("Xóa") {
+                    rawManualComments = ""
+                }
+                .font(.caption)
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+            }
+
+            TextEditor(text: $rawManualComments)
+                .frame(minHeight: 110)
+                .font(.caption)
+                .padding(6)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+                .disabled(engine.isRunning)
+
+            if hasDuplicateManualLines {
+                Text("⚠️ Có dòng bình luận bị trùng nhau. Bấm 'Lọc trùng' để mỗi không gian có nội dung riêng biệt.")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+
+            if !selectedSpaces.isEmpty && !parsedManualCommentLines.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Xem trước phân bổ từng hàng cho từng không gian:")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.secondary)
+                    ForEach(selectedSpaces.indices, id: \.self) { idx in
+                        let sp = selectedSpaces[idx]
+                        let isManual = idx < parsedManualCommentLines.count
+                        let lineText = isManual
+                            ? parsedManualCommentLines[idx]
+                            : (aiFallbackWhenLinesShort ? "[✨ AI tự sinh bù không trùng]" : "[Bỏ qua]")
+                        Text("• \(sp.name): \(lineText)")
+                            .font(.caption2)
+                            .foregroundStyle(isManual ? .primary : .blue)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(.top, 2)
+            }
+
+            if parsedManualCommentLines.count < selectedSpaces.count {
+                Toggle("Tự dùng AI Gemini sinh bù (không trùng) nếu thiếu dòng", isOn: $aiFallbackWhenLinesShort)
+                    .font(.caption)
+                    .disabled(engine.isRunning)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var geminiConfigurationView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SecureField("Gemini API Key (AIza...)", text: $geminiApiKey)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textFieldStyle(.roundedBorder)
+                .disabled(engine.isRunning)
+                .onChange(of: geminiApiKey) { _, newValue in
+                    SecureGeminiStore.saveKey(newValue)
+                }
+
+            Text("Phong cách / Yêu cầu cho AI Gemini:")
+                .font(.caption).foregroundStyle(.secondary)
+            TextField("Phong cách bình luận...", text: $geminiStylePrompt, axis: .vertical)
+                .lineLimit(2...3)
+                .font(.caption)
+                .textFieldStyle(.roundedBorder)
+                .disabled(engine.isRunning)
+            Text("✨ AI tự động truyền danh sách bình luận đã tạo của các tài khoản trước vào bộ lọc loại trừ để đảm bảo mỗi không gian bình luận một câu hoàn toàn khác nhau.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var safeModeSection: some View {
+        Section {
+            Toggle(isOn: $safeModeEnabled) {
+                Label("Bật SafeMode (Ngẫu nhiên hóa thời gian chờ)", systemImage: "shield.lefthalf.filled.badge.checkmark")
+                    .fontWeight(.semibold)
+            }
+            .disabled(engine.isRunning)
+
+            if useReaction && useComment {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Nghỉ ngẫu nhiên giữa Reaction và Comment (giây — không giới hạn):")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Text("Từ (s):").font(.caption)
+                        TextField("Min", text: $minActionGapText)
+                            .keyboardType(.decimalPad)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(engine.isRunning)
+                        Text("Đến (s):").font(.caption)
+                        TextField("Max", text: $maxActionGapText)
+                            .keyboardType(.decimalPad)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(engine.isRunning)
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Nghỉ ngẫu nhiên giữa các không gian (giây — không giới hạn):")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Text("Từ (s):").font(.caption)
+                    TextField("Min", text: $minSpaceDelayText)
+                        .keyboardType(.decimalPad)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(engine.isRunning)
+                    Text("Đến (s):").font(.caption)
+                    TextField("Max", text: $maxSpaceDelayText)
+                        .keyboardType(.decimalPad)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(engine.isRunning)
+                }
+            }
+        } header: {
+            Text("5. SafeMode bảo vệ tài khoản (Tùy chỉnh giây không giới hạn)")
+        }
+    }
+
+    @ViewBuilder
+    private var actionButtonSection: some View {
+        Section {
+            if engine.isRunning {
+                Button(role: .destructive) { engine.stop() } label: {
+                    Label("Dừng hàng đợi đang chạy", systemImage: "stop.fill")
+                        .fontWeight(.bold)
+                }
+            } else {
+                Button {
+                    triggerStart()
+                } label: {
+                    Label("Thực hiện với \(selectedSpaces.count) không gian",
+                          systemImage: "play.fill")
+                        .fontWeight(.bold)
+                }
+                .disabled(!canStart)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var statusRowsSection: some View {
+        if !engine.rows.isEmpty {
+            Section {
+                LabeledContent("Hoàn tất", value: "\(engine.completed)/\(engine.rows.count)")
+                LabeledContent("Thành công", value: "\(engine.succeeded)")
+                ForEach(engine.rows) { row in
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: row.status.symbol)
+                            .foregroundStyle(row.status.tint)
+                            .frame(width: 20)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(row.name).fontWeight(.semibold)
+                            Text(row.status.title + " · " + row.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if !row.assignedComment.isEmpty {
+                                Text("💬 Nội dung: \"\(row.assignedComment)\"")
+                                    .font(.caption2)
+                                    .foregroundStyle(.blue)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 3)
+                }
+            } header: {
+                Text("Trạng thái từng không gian")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var webPreviewSection: some View {
+        if engine.isRunning && engine.activeWebView != nil {
+            Section("Xem trước phiên đang tải") {
+                BatchWebPreview(webView: engine.activeWebView)
+                    .frame(height: 230)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
         }
     }
 
