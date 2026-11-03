@@ -45,3 +45,16 @@ Vào ứng dụng > **MultiSpace Sync**, chọn không gian (có Chọn tất c�
 - Khi app vào nền, hàng đợi sẽ dừng; các phiên/chứng thực vẫn được tách độc lập.
 
 Lệnh này không đồng bộ cử chỉ và không tự động tương tác trên Facebook. "Đã nạp" là nạp xong tài liệu web, không có nghĩa website chấp nhận đăng nhập. Ứng dụng vẫn cần kiểm thử thực tế trên iPhone.
+
+
+## Vie Account Center (giao diện quản lý tài khoản)
+
+Mở **Trung tâm tài khoản** ở trang chính:
+
+- Tìm kiếm tài khoản, lọc Facebook/website khác, mở phiên đăng nhập riêng.
+- Tạo nhanh 1–50 không gian trống; đặt tên Facebook 01, Facebook 02…
+- Xóa dữ liệu web của một không gian mà không ảnh hưởng không gian khác.
+- Đăng nhập, nhập 2FA trực tiếp trên trang web chính thức; không đưa thông tin đăng nhập vào biểu mẫu trung tâm.
+- WebKit lưu riêng từng phiên; app không xuất/đọc giá trị cookie, token, mật khẩu hoặc seed TOTP.
+
+Chức năng này **không chạy file Python trên iPhone**, và không tích hợp các API Facebook không công khai để lấy/chuyển đổi token. Đừng upload file Python có mật khẩu hoặc mã 2FA lên GitHub public. Nếu đã vô tình chia sẻ, đổi mật khẩu và xoay vòng 2FA.

@@ -32,6 +32,13 @@ struct SpaceDashboard: View {
                         }
                         .padding(.vertical, 10)
                     }
+                    Section("Quản lý tài khoản") {
+                        NavigationLink {
+                            AccountCenterView()
+                        } label: {
+                            Label("Trung tâm tài khoản", systemImage: "person.2.crop.square.stack")
+                        }
+                    }
                     Section("Điều khiển nhóm") {
                         NavigationLink {
                             MultiSpaceSyncView()
