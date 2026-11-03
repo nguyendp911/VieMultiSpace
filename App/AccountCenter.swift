@@ -17,6 +17,7 @@ struct AccountCenterView: View {
     @State private var isClearing = false
     @State private var showQuickCreate = false
     @State private var loginEditorSpace: Space?
+    @State private var autoInteractSpace: Space?
     @State private var toastMessage: String?
     @State private var refreshTick = 0
 
@@ -47,7 +48,7 @@ struct AccountCenterView: View {
                     Label("Vie Account Center", systemImage: "person.crop.rectangle.stack.fill")
                         .font(.title3.bold())
                         .foregroundStyle(.blue)
-                    Text("Quản lý đăng nhập, lưu trữ Access Token, Convert 6 App Token và nạp Cookie theo từng không gian riêng tư.")
+                    Text("Quản lý đăng nhập, lưu trữ Access Token, Convert 6 App Token, nạp Cookie và chạy Auto Tương tác AI.")
                         .font(.subheadline).foregroundStyle(.secondary)
 
                     HStack(spacing: 10) {
@@ -62,6 +63,14 @@ struct AccountCenterView: View {
             }
 
             Section("Công cụ") {
+                NavigationLink {
+                    AutoInteractView()
+                } label: {
+                    Label("Auto Thả cảm xúc & Comment Gemini AI", systemImage: "sparkles")
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.purple)
+                }
+
                 Button {
                     showQuickCreate = true
                 } label: {
@@ -130,6 +139,11 @@ struct AccountCenterView: View {
                                 .accessibilityLabel("Mở " + space.name)
 
                             Menu {
+                                if space.platform == .facebook {
+                                    Button("Auto Thả cảm xúc & Comment AI", systemImage: "sparkles") {
+                                        autoInteractSpace = space
+                                    }
+                                }
                                 Button("Đăng nhập API & Kho Token", systemImage: "person.badge.key.fill") {
                                     loginEditorSpace = space
                                 }
@@ -165,8 +179,8 @@ struct AccountCenterView: View {
             Section("Lưu trữ Token & Bảo mật") {
                 Label {
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("Lưu trữ Keychain theo từng không gian").font(.subheadline.bold())
-                        Text("Access Token gốc, 6 Converted App Tokens, Cookie phiên, mật khẩu và 2FA được mã hóa trong iOS Keychain riêng cho từng UUID không gian.")
+                        Text("Dùng chung Cookie & Token tự động").font(.subheadline.bold())
+                        Text("Access Token gốc, 6 Converted App Tokens và Cookie lưu trong Keychain được tự động dùng cho cả WebView và tính năng Auto Thả cảm xúc + Comment Gemini AI.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 } icon: {
@@ -186,6 +200,11 @@ struct AccountCenterView: View {
             refreshTick += 1
         }) { space in
             LoginEditorSheet(space: space)
+        }
+        .sheet(item: $autoInteractSpace) { space in
+            NavigationStack {
+                AutoInteractView(preselectedSpace: space)
+            }
         }
         .sheet(isPresented: $showQuickCreate) {
             QuickCreateProfilesSheet()
@@ -339,12 +358,16 @@ struct QuickCreateProfilesSheet: View {
             }
             .alert("Không thể tạo", isPresented: Binding(
                 get: { errorText != nil },
-                set: { if !$0 { errorText = nil } }
+                set: { if !$0 { errorMessageReset() } }
             )) {
                 Button("OK") { errorText = nil }
             } message: {
                 Text(errorText ?? "")
             }
         }
+    }
+
+    private func errorMessageReset() {
+        errorText = nil
     }
 }

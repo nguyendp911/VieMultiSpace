@@ -9,6 +9,7 @@ struct SpaceDashboard: View {
     @State private var showAdd = false
     @State private var openSpace: Space?
     @State private var tokenSpace: Space?
+    @State private var autoSpace: Space?
     @State private var renameSpace: Space?
     @State private var renameValue = ""
     @State private var deleteSpace: Space?
@@ -25,7 +26,7 @@ struct SpaceDashboard: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Label("Vie MultiSpace", systemImage: "square.stack.3d.up.fill")
                                 .font(.title2.bold())
-                            Text("Quản lý nhiều phiên đăng nhập web độc lập và Kho Token trên iPhone.")
+                            Text("Quản lý nhiều phiên đăng nhập web độc lập, Kho Token và Auto Tương tác AI trên iPhone.")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                             Text("\(library.spaces.count) không gian")
@@ -40,17 +41,23 @@ struct SpaceDashboard: View {
                             Label("Trung tâm tài khoản & Kho Token", systemImage: "person.2.crop.square.stack")
                         }
                     }
-                    Section("Điều khiển nhóm") {
+                    Section("Tự động hóa & Điều khiển nhóm") {
+                        NavigationLink {
+                            AutoInteractView()
+                        } label: {
+                            Label("Auto Thả cảm xúc & Comment Gemini AI", systemImage: "sparkles")
+                                .fontWeight(.semibold)
+                        }
                         NavigationLink {
                             MultiSpaceSyncView()
                         } label: {
-                            Label("MultiSpace Sync — thao tác theo nhóm", systemImage: "square.stack.3d.up")
+                            Label("MultiSpace Sync — mở URL theo nhóm", systemImage: "square.stack.3d.up")
                         }
                     }
                     Section("Không gian của tôi") {
                         ForEach(library.spaces) { space in
                             let summary = VaultMetadataIndex.get(space.id)
-                            HStack(spacing: 12) {
+                            HStack(spacing: 10) {
                                 Button { openSpace = space } label: {
                                     HStack(spacing: 12) {
                                         Image(systemName: space.platform.icon)
@@ -83,6 +90,16 @@ struct SpaceDashboard: View {
 
                                 if space.platform == .facebook {
                                     Button {
+                                        autoSpace = space
+                                    } label: {
+                                        Image(systemName: "sparkles")
+                                            .foregroundStyle(.purple)
+                                            .padding(6)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+
+                                    Button {
                                         tokenSpace = space
                                     } label: {
                                         Image(systemName: summary.hasToken ? "key.radiowaves.forward.fill" : "key.fill")
@@ -97,6 +114,11 @@ struct SpaceDashboard: View {
                             }
                             .padding(.vertical, 4)
                             .contextMenu {
+                                if space.platform == .facebook {
+                                    Button("Auto Thả cảm xúc & Comment AI", systemImage: "sparkles") {
+                                        autoSpace = space
+                                    }
+                                }
                                 Button("Đăng nhập & Kho Token", systemImage: "person.badge.key.fill") {
                                     tokenSpace = space
                                 }
@@ -155,6 +177,11 @@ struct SpaceDashboard: View {
             }
             .sheet(item: $tokenSpace) { space in
                 LoginEditorSheet(space: space)
+            }
+            .sheet(item: $autoSpace) { space in
+                NavigationStack {
+                    AutoInteractView(preselectedSpace: space)
+                }
             }
             .sheet(item: $renameSpace) { space in
                 NavigationStack {

@@ -96,6 +96,7 @@ final class SpaceLibrary: ObservableObject {
         try await WKWebsiteDataStore.remove(forIdentifier: space.id)
         spaces.removeAll { $0.id == space.id }
         SecureLoginStore.remove(space.id)
+        WebSessionTokenCache.clear(for: space.id)
         var stored = UserDefaults.standard.dictionary(forKey: launchKey) as? [String: String] ?? [:]
         stored.removeValue(forKey: space.id.uuidString)
         UserDefaults.standard.set(stored, forKey: launchKey)
@@ -106,6 +107,7 @@ final class SpaceLibrary: ObservableObject {
         let store = WKWebsiteDataStore(forIdentifier: space.id)
         await store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
                                modifiedSince: .distantPast)
+        WebSessionTokenCache.clear(for: space.id)
     }
 
     static func safeURL(_ input: String) -> URL? {

@@ -1173,6 +1173,7 @@ struct SecureLoginControls: View {
     let webView: WKWebView?
     @State private var notice: String?
     @State private var showVaultSheet = false
+    @State private var showAutoSheet = false
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -1191,6 +1192,9 @@ struct SecureLoginControls: View {
                 Button { showVaultSheet = true } label: {
                     Label("Kho Token", systemImage: "person.badge.key.fill")
                 }
+                Button { showAutoSheet = true } label: {
+                    Label("Auto AI", systemImage: "sparkles")
+                }
             }
             .font(.caption)
             .buttonStyle(.bordered)
@@ -1200,6 +1204,11 @@ struct SecureLoginControls: View {
         .sheet(isPresented: $showVaultSheet) {
             LoginEditorSheet(space: space) {
                 webView?.reload()
+            }
+        }
+        .sheet(isPresented: $showAutoSheet) {
+            NavigationStack {
+                AutoInteractView(preselectedSpace: space)
             }
         }
         .alert("Tài khoản", isPresented: Binding(
