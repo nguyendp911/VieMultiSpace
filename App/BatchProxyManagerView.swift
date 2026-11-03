@@ -257,14 +257,7 @@ struct BatchProxyManagerView: View {
                                 .foregroundStyle(.secondary)
                             ForEach(0..<selectedSpaces.count, id: \.self) { idx in
                                 let sp = selectedSpaces[idx]
-                                let pxy: SpaceProxy?
-                                if idx < parsedProxyList.count {
-                                    pxy = parsedProxyList[idx]
-                                } else if roundRobin && !parsedProxyList.isEmpty {
-                                    pxy = parsedProxyList[idx % parsedProxyList.count]
-                                } else {
-                                    pxy = nil
-                                }
+                                let pxy = previewProxy(forIndex: idx)
                                 Text("• \(sp.name): \(pxy?.displaySummary ?? "[Bỏ qua - giữ nguyên]")")
                                     .font(.caption2)
                                     .foregroundStyle(pxy != nil ? Color.primary : Color.secondary)
@@ -421,6 +414,17 @@ struct BatchProxyManagerView: View {
     }
 
     // MARK: - Actions
+
+    private func previewProxy(forIndex idx: Int) -> SpaceProxy? {
+        let proxies = parsedProxyList
+        if idx < proxies.count {
+            return proxies[idx]
+        } else if roundRobin && !proxies.isEmpty {
+            return proxies[idx % proxies.count]
+        } else {
+            return nil
+        }
+    }
 
     private func applyBatchDistributeProxies() {
         let proxies = parsedProxyList
