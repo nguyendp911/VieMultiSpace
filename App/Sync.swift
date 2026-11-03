@@ -504,7 +504,6 @@ final class BatchSyncEngine: NSObject, ObservableObject, WKNavigationDelegate {
         config.websiteDataStore = store
 
         let fp = space.fingerprint ?? SpaceFingerprint.defaultFor(spaceId: space.id)
-        config.customUserAgent = fp.userAgent
 
         let contentController = WKUserContentController()
         let scriptSource = fp.buildAntiDetectScript()
@@ -512,6 +511,7 @@ final class BatchSyncEngine: NSObject, ObservableObject, WKNavigationDelegate {
         config.userContentController = contentController
 
         let webView = WKWebView(frame: .zero, configuration: config)
+        webView.customUserAgent = fp.userAgent
         webView.navigationDelegate = self
         activeWebView = webView
 

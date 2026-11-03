@@ -237,7 +237,7 @@ struct BatchProxyManagerView: View {
                     HStack {
                         Text("Đã nhận diện: \(parsedProxyList.count) proxy")
                             .font(.caption.bold())
-                            .foregroundStyle(parsedProxyList.isEmpty ? .secondary : .green)
+                            .foregroundStyle(parsedProxyList.isEmpty ? Color.secondary : Color.green)
                         Spacer()
                         Picker("Mặc định", selection: $defaultProtocol) {
                             ForEach(ProxyProtocol.allCases) { p in

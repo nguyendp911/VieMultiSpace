@@ -113,7 +113,7 @@ struct SpaceDashboard: View {
                                     proxySpace = space
                                 } label: {
                                     Image(systemName: space.proxy?.isEnabled == true ? "network" : "slider.horizontal.3")
-                                        .foregroundStyle(space.proxy?.isEnabled == true ? .blue : .secondary)
+                                        .foregroundStyle(space.proxy?.isEnabled == true ? Color.blue : Color.secondary)
                                         .frame(width: 28, height: 28)
                                 }
                                 .buttonStyle(.bordered)
@@ -134,7 +134,7 @@ struct SpaceDashboard: View {
                                         tokenSpace = space
                                     } label: {
                                         Image(systemName: summary.hasToken ? "key.radiowaves.forward.fill" : "key.fill")
-                                            .foregroundStyle(summary.hasToken ? .green : .blue)
+                                            .foregroundStyle(summary.hasToken ? Color.green : Color.blue)
                                             .frame(width: 28, height: 28)
                                     }
                                     .buttonStyle(.bordered)
@@ -456,7 +456,6 @@ struct IsolatedWebView: UIViewRepresentable {
 
         // 2. Cấu hình Dấu vân tay độc lập (Anti-Detect)
         let fp = space.fingerprint ?? SpaceFingerprint.defaultFor(spaceId: space.id)
-        config.customUserAgent = fp.userAgent
 
         let contentController = WKUserContentController()
         let scriptSource = fp.buildAntiDetectScript()
@@ -465,6 +464,7 @@ struct IsolatedWebView: UIViewRepresentable {
         config.userContentController = contentController
 
         let webView = WKWebView(frame: .zero, configuration: config)
+        webView.customUserAgent = fp.userAgent
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         browser.webView = webView

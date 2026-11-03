@@ -1813,7 +1813,7 @@ struct AutoInteractView: View {
                         } label: {
                             HStack(spacing: 10) {
                                 Image(systemName: selectedIDs.contains(space.id) ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(selectedIDs.contains(space.id) ? .blue : .secondary)
+                                    .foregroundStyle(selectedIDs.contains(space.id) ? Color.blue : Color.secondary)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(space.name).foregroundStyle(.primary).font(.subheadline.bold())
                                     if summary.hasToken || summary.hasCookies {
@@ -2021,7 +2021,7 @@ struct AutoInteractView: View {
                                 }
                                 Text(st.statusText)
                                     .font(.caption)
-                                    .foregroundStyle(st.isRunning ? .blue : .secondary)
+                                    .foregroundStyle(st.isRunning ? Color.blue : Color.secondary)
                             }
                             .padding(.vertical, 3)
                         }
@@ -2056,7 +2056,7 @@ struct AutoInteractView: View {
                                 .font(.caption2)
                             Text("• Bình luận AI: \(log.commentSummary)")
                                 .font(.caption2)
-                                .foregroundStyle(log.isError ? .red : .green)
+                                .foregroundStyle(log.isError ? Color.red : Color.green)
                         }
                         .padding(.vertical, 3)
                     }
