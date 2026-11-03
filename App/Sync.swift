@@ -924,8 +924,7 @@ struct MultiSpaceSyncView: View {
                     Text("Xem trước phân bổ từng hàng cho từng không gian:")
                         .font(.caption2.bold())
                         .foregroundStyle(.secondary)
-                    ForEach(selectedSpaces.indices, id: \.self) { idx in
-                        let sp = selectedSpaces[idx]
+                    ForEach(Array(selectedSpaces.enumerated()), id: \.element.id) { idx, sp in
                         let isManual = idx < parsedManualCommentLines.count
                         let lineText = isManual
                             ? parsedManualCommentLines[idx]
