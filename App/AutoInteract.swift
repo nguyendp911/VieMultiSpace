@@ -1079,6 +1079,7 @@ final class FacebookGraphQLAutoClient {
 
         // Parse JSON chunks nhúng trong HTML (FB inline data)
         var posts: [FeedPostItem] = []
+        var seenIds = Set<String>()
         let patterns = [
             #"(?:handleServerJS|bigPipe\.onPageletArrive)\((\{.+?\})\)(?:;|\s*,)"#,
             #"<script[^>]*>[\s\S]*?(\{"require":.+?\})</script>"#
