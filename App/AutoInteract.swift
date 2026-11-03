@@ -1048,14 +1048,17 @@ final class FacebookGraphQLAutoClient {
         let responseText = String(data: data, encoding: .utf8) ?? ""
         AppLogger.shared.debug("NewsFeed", "GraphQL \(docId): HTTP \(httpStatus), \(data.count) bytes")
 
+        if responseText.contains("\"errors\"") && responseText.contains("doc_id") {
+            AppLogger.shared.warning("NewsFeed", "doc_id \(docId) không hợp lệ với FB hiện tại")
             return []
         }
-        // Kiểm tra redirect về login
         if httpStatus != 200 || (responseText.contains("\"login\"") && !responseText.contains("\"post_id\"") && !responseText.contains("\"story\"")) {
             AppLogger.shared.warning("NewsFeed", "doc_id \(docId): có thể bị redirect login")
             return []
+        }
 
         var posts = extractPostItems(from: responseText)
+        if !accessToken.isEmpty {
             for idx in posts.indices where posts[idx].postText.isEmpty {
                 if let t = await fetchPostMessageViaGraphAPI(postId: posts[idx].postId, userId: posts[idx].userId) {
                     posts[idx].postText = t
@@ -1067,6 +1070,10 @@ final class FacebookGraphQLAutoClient {
 
     private func fetchFeedViaHomepageScrape(tok: FacebookWebSessionTokens) async throws -> [FeedPostItem] {
         guard let url = URL(string: "https://www.facebook.com") else { return [] }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 20
+        for (k, v) in baseHeaders { request.setValue(v, forHTTPHeaderField: k) }
         request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
         request.setValue("navigate", forHTTPHeaderField: "sec-fetch-mode")
         request.setValue("?1", forHTTPHeaderField: "sec-fetch-user")
