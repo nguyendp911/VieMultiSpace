@@ -207,6 +207,7 @@ final class BatchSyncEngine: NSObject, ObservableObject, WKNavigationDelegate {
                     spaces: spaces
                 )
             } catch {
+                AppLogger.shared.error("Sync", "Lỗi phân tích mục tiêu: \(targetInput)", detail: error.localizedDescription)
                 for i in rows.indices {
                     rows[i].status = .failed
                     rows[i].detail = error.localizedDescription
@@ -464,6 +465,17 @@ final class BatchSyncEngine: NSObject, ObservableObject, WKNavigationDelegate {
         guard let index = rows.firstIndex(where: { $0.id == space.id }) else { return }
         rows[index].status = status
         rows[index].detail = detail
+
+        switch status {
+        case .failed:
+            AppLogger.shared.error("Sync", "[\(space.name)] Thất bại", detail: detail)
+        case .success:
+            AppLogger.shared.info("Sync", "[\(space.name)] Hoàn tất: \(detail)")
+        case .loading:
+            AppLogger.shared.debug("Sync", "[\(space.name)] \(detail)")
+        case .queued, .cancelled:
+            break
+        }
     }
 
     private func updateRowMeta(_ space: Space, reaction: String?, comment: String?) {

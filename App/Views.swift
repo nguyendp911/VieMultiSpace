@@ -18,6 +18,8 @@ struct SpaceDashboard: View {
     @State private var errorMessage: String?
     @State private var busy = false
     @State private var isLocked = false
+    @State private var showLog = false
+    @ObservedObject private var logger = AppLogger.shared
 
     var body: some View {
         NavigationStack {
@@ -41,6 +43,23 @@ struct SpaceDashboard: View {
                         } label: {
                             Label("Proxy & Vân tay Anti-Detect", systemImage: "network.badge.shield.half.filled")
                                 .fontWeight(.semibold)
+                        }
+                        Button {
+                            logger.clearErrorBadge()
+                            showLog = true
+                        } label: {
+                            HStack {
+                                Label("Nhật ký hoạt động & Lỗi", systemImage: "list.bullet.rectangle")
+                                Spacer()
+                                if logger.errorCount > 0 {
+                                    Text("\(logger.errorCount) lỗi")
+                                        .font(.caption.bold())
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 3)
+                                        .background(.red, in: Capsule())
+                                }
+                            }
                         }
                     }
                     Section("Quản lý tài khoản & Token") {
@@ -206,6 +225,9 @@ struct SpaceDashboard: View {
                         Image(systemName: "gearshape")
                     }
                 }
+            }
+            .sheet(isPresented: $showLog) {
+                LogConsoleView()
             }
             .sheet(isPresented: $showAdd) { AddSpaceSheet() }
             .sheet(item: $openSpace) { space in
@@ -440,7 +462,7 @@ struct IsolatedWebView: UIViewRepresentable {
     @ObservedObject var browser: BrowserState
     let launchURL: URL?
 
-    func makeCoordinator() -> Coordinator { Coordinator(browser: browser) }
+    func makeCoordinator() -> Coordinator { Coordinator(spaceName: space.name, browser: browser) }
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -483,20 +505,27 @@ struct IsolatedWebView: UIViewRepresentable {
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 
     final class Coordinator: NSObject, WKNavigationDelegate {
+        let spaceName: String
         let browser: BrowserState
-        init(browser: BrowserState) { self.browser = browser }
+        init(spaceName: String, browser: BrowserState) {
+            self.spaceName = spaceName
+            self.browser = browser
+        }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             browser.sync(webView)
         }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             browser.sync(webView)
+            AppLogger.shared.debug("WebView", "[\(spaceName)] Tải xong: \(webView.url?.host ?? "?")")
         }
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             browser.sync(webView)
+            AppLogger.shared.error("WebView", "[\(spaceName)] Lỗi điều hướng", detail: error.localizedDescription)
         }
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             browser.sync(webView)
+            AppLogger.shared.error("WebView", "[\(spaceName)] Lỗi tải trang", detail: error.localizedDescription)
         }
     }
 }

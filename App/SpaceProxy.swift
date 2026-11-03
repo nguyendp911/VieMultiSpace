@@ -87,6 +87,7 @@ struct SpaceProxy: Codable, Hashable, Identifiable {
         if let user = username, !user.isEmpty, let pass = password, !pass.isEmpty {
             config.applyCredential(username: user, password: pass)
         }
+        AppLogger.shared.debug("Proxy", "Áp dụng proxy \(scheme.rawValue) → \(host):\(port)", detail: hasAuth ? "Có xác thực" : "Không xác thực")
         return config
     }
 }
@@ -251,6 +252,7 @@ enum ProxyTester {
     /// Kiểm tra kết nối thực tế qua Proxy bằng cách gửi request qua URLSession proxy-routed
     static func test(proxy: SpaceProxy, timeoutSeconds: Double = 8) async -> TestResult {
         let startTime = Date()
+        AppLogger.shared.info("Proxy", "Bắt đầu kiểm tra proxy \(proxy.displaySummary)")
 
         let config = URLSessionConfiguration.ephemeral
         config.proxyConfigurations = [proxy.toNetworkProxyConfiguration()]
@@ -293,6 +295,7 @@ enum ProxyTester {
                     }
 
                     if !detectedIP.isEmpty {
+                        AppLogger.shared.info("Proxy", "✅ Proxy OK — IP: \(detectedIP) (\(detectedCountry.isEmpty ? "Khả dụng" : detectedCountry)) — \(elapsedMs)ms")
                         return TestResult(
                             success: true,
                             ip: detectedIP,
@@ -309,6 +312,7 @@ enum ProxyTester {
 
         let elapsedMs = Int(Date().timeIntervalSince(startTime) * 1000)
         let message = lastError?.localizedDescription ?? "Không thể kết nối qua Proxy (Quá thời gian chờ)."
+        AppLogger.shared.error("Proxy", "❌ Proxy thất bại — \(proxy.displaySummary)", detail: message)
         return TestResult(
             success: false,
             ip: "",

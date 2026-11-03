@@ -553,6 +553,7 @@ enum FacebookTargetPostResolver {
         }
 
         var kind = detectKind(from: trimmed)
+        AppLogger.shared.info("TargetResolver", "Bắt đầu phân tích liên kết: \(trimmed)")
 
         // Trường hợp người dùng nhập thẳng chuỗi ID số
         if trimmed.allSatisfy(\.isNumber) {
@@ -561,6 +562,7 @@ enum FacebookTargetPostResolver {
             if !accessToken.isEmpty {
                 postText = await fetchGraphMessage(id: trimmed, accessToken: accessToken) ?? ""
             }
+            AppLogger.shared.info("TargetResolver", "Nhận diện ID bài viết số trực tiếp: \(trimmed)")
             return ResolvedTargetPost(
                 rawInput: trimmed,
                 targetKind: kind,
@@ -675,7 +677,9 @@ enum FacebookTargetPostResolver {
         }
 
         guard let finalPostId = extractedId, !finalPostId.isEmpty else {
-            throw SpaceLoginError.apiError("Không tìm thấy Post ID / Feedback ID từ liên kết này. Hãy dán link trực tiếp của bài viết/Reel hoặc kiểm tra lại Cookie.")
+            let errMsg = "Không tìm thấy Post ID / Feedback ID từ liên kết này. Hãy dán link trực tiếp của bài viết/Reel hoặc kiểm tra lại Cookie."
+            AppLogger.shared.error("TargetResolver", "Giải mã thất bại cho: \(trimmed)", detail: errMsg)
+            throw SpaceLoginError.apiError(errMsg)
         }
 
         let resolvedFeedbackId = !explicitFeedbackId.isEmpty
@@ -699,6 +703,8 @@ enum FacebookTargetPostResolver {
         if postText.isEmpty, !accessToken.isEmpty {
             postText = await fetchGraphMessage(id: finalPostId, accessToken: accessToken, session: session) ?? ""
         }
+
+        AppLogger.shared.info("TargetResolver", "✅ Giải mã thành công: [\(kind)] ID: \(finalPostId) (Tác giả: \(authorName))", detail: postText.isEmpty ? "Không có trích đoạn văn bản" : "Trích: \(postText.prefix(60))...")
 
         return ResolvedTargetPost(
             rawInput: trimmed,
@@ -877,8 +883,12 @@ final class FacebookGraphQLAutoClient {
         guard let dtsgToken = Self.firstMatch(pattern: #""dtsg":\{"token":"([^"]+)""#, in: html)
                 ?? Self.firstMatch(pattern: #""DTSGInitialData",\[\],\{"token":"([^"]+)""#, in: html),
               !dtsgToken.isEmpty else {
-            throw SpaceLoginError.apiError("Không lấy được fb_dtsg từ Cookie (Cookie có thể đã hết hạn hoặc bị checkpoint).")
+            let err = "Không lấy được fb_dtsg từ Cookie (Cookie có thể đã hết hạn hoặc bị checkpoint)."
+            AppLogger.shared.error("FacebookWeb", "Lỗi lấy session tokens cho c_user=\(userId)", detail: err)
+            throw SpaceLoginError.apiError(err)
         }
+
+        AppLogger.shared.info("FacebookWeb", "Lấy thành công fb_dtsg & lsd cho c_user=\(userId)")
 
         return FacebookWebSessionTokens(
             userId: userId,
@@ -1173,15 +1183,21 @@ final class FacebookGraphQLAutoClient {
                 if let dataObj = json["data"] as? [String: Any],
                    let reactObj = dataObj["feedback_react"] as? [String: Any],
                    reactObj["feedback"] != nil {
-                    return (true, "Đã thả cảm xúc \(concrete.rawValue)")
+                    let msg = "Đã thả cảm xúc \(concrete.rawValue)"
+                    AppLogger.shared.info("AutoReact", "✅ [\(concrete.rawValue)] Post ID: \(postId)")
+                    return (true, msg)
                 }
                 if let errors = json["errors"] as? [[String: Any]],
                    let desc = errors.first?["description"] as? String {
+                    AppLogger.shared.error("AutoReact", "❌ Thả cảm xúc thất bại: Post ID \(postId)", detail: desc)
                     return (false, desc)
                 }
             }
-            return (false, "Thả cảm xúc \(concrete.rawValue) thất bại")
+            let failMsg = "Thả cảm xúc \(concrete.rawValue) thất bại (Phản hồi không xác định)"
+            AppLogger.shared.error("AutoReact", "❌ Post ID \(postId): \(failMsg)")
+            return (false, failMsg)
         } catch {
+            AppLogger.shared.error("AutoReact", "❌ Lỗi mạng khi react Post ID \(postId)", detail: error.localizedDescription)
             return (false, error.localizedDescription)
         }
     }
@@ -1278,21 +1294,29 @@ final class FacebookGraphQLAutoClient {
                     if let edge = commentCreate["feedback_comment_edge"] as? [String: Any],
                        let node = edge["node"] as? [String: Any],
                        node["id"] != nil {
-                        return (true, "Đã bình luận: \"\(commentText.prefix(55))\"")
+                        let successMsg = "Đã bình luận: \"\(commentText.prefix(55))\""
+                        AppLogger.shared.info("AutoComment", "✅ Post ID: \(postId)", detail: "Nội dung: \"\(commentText)\"")
+                        return (true, successMsg)
                     }
                     if let feedback = commentCreate["feedback"] as? [String: Any],
                        let notice = feedback["comments_disabled_notice_renderer"] as? [String: Any],
                        (notice["__typename"] as? String) == "GeneralCommentDisableNotice" {
-                        return (true, "Bài viết tắt bình luận UI nhưng API đã xử lý")
+                        let noticeMsg = "Bài viết tắt bình luận UI nhưng API đã xử lý"
+                        AppLogger.shared.warning("AutoComment", "⚠️ Post ID: \(postId) — \(noticeMsg)")
+                        return (true, noticeMsg)
                     }
                 }
                 if let errors = json["errors"] as? [[String: Any]],
                    let desc = errors.first?["description"] as? String {
+                    AppLogger.shared.error("AutoComment", "❌ Comment thất bại: Post ID \(postId)", detail: desc)
                     return (false, desc)
                 }
             }
-            return (false, "Comment thất bại")
+            let failMsg = "Comment thất bại (Phản hồi không xác định)"
+            AppLogger.shared.error("AutoComment", "❌ Post ID \(postId): \(failMsg)")
+            return (false, failMsg)
         } catch {
+            AppLogger.shared.error("AutoComment", "❌ Lỗi mạng khi comment Post ID \(postId)", detail: error.localizedDescription)
             return (false, error.localizedDescription)
         }
     }
@@ -1728,6 +1752,13 @@ final class AutoInteractCoordinator: ObservableObject {
         logs.insert(entry, at: 0)
         if logs.count > 200 {
             logs.removeLast(logs.count - 200)
+        }
+
+        let summary = "[\(spaceName)] \(postAuthor) — React: \(reactionSummary) | Cmt: \(commentSummary)"
+        if isError {
+            AppLogger.shared.error("AutoInteract", summary, detail: "Post ID: \(postId)")
+        } else {
+            AppLogger.shared.info("AutoInteract", summary)
         }
     }
 }
