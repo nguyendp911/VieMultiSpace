@@ -798,14 +798,8 @@ final class FacebookGraphQLAutoClient {
     private(set) var tokens: FacebookWebSessionTokens?
 
     private let baseHeaders: [String: String]
-
-    private var session: URLSession {
-        let config = URLSessionConfiguration.default
-        if let proxy, proxy.isEnabled {
-            config.proxyConfigurations = [proxy.toNetworkProxyConfiguration()]
-        }
-        return URLSession(configuration: config)
-    }
+    // Dùng 1 session duy nhất cho toàn bộ vòng đời client — tránh tạo mới mỗi request
+    private let session: URLSession
 
     init(
         spaceId: UUID,
@@ -833,6 +827,15 @@ final class FacebookGraphQLAutoClient {
             "accept-language": "vi,en-US;q=0.8,en;q=0.6",
             "Cookie": cookieString
         ]
+
+        // Tạo session 1 lần, tái dùng toàn bộ
+        let config = URLSessionConfiguration.default
+        config.httpCookieAcceptPolicy = .never
+        config.httpShouldSetCookies = false
+        if let proxy, proxy.isEnabled {
+            config.proxyConfigurations = [proxy.toNetworkProxyConfiguration()]
+        }
+        self.session = URLSession(configuration: config)
     }
 
     func prepareTokens(forceRefresh: Bool = false) async throws -> FacebookWebSessionTokens {
@@ -987,9 +990,18 @@ final class FacebookGraphQLAutoClient {
         request.setValue("u=1, i", forHTTPHeaderField: "priority")
         request.httpBody = Self.formEncode(payload)
 
-        let (data, _) = try await session.data(for: request)
+        let (data, response) = try await session.data(for: request)
+        let httpStatus = (response as? HTTPURLResponse)?.statusCode ?? 0
         let responseText = String(data: data, encoding: .utf8) ?? ""
+        AppLogger.shared.debug("NewsFeed", "HTTP \(httpStatus) — \(data.count) bytes nhận về")
+
+        // Kiểm tra phản hồi có phải HTML login page (cookie hết hạn)
+        if httpStatus == 200 && responseText.contains("\"login\"") && !responseText.contains("\"post_id\"") {
+            AppLogger.shared.warning("NewsFeed", "⚠️ Phản hồi trông giống trang đăng nhập — Cookie có thể đã hết hạn")
+        }
+
         var posts = extractPostItems(from: responseText)
+        AppLogger.shared.info("NewsFeed", "Tìm thấy \(posts.count) bài viết trên News Feed")
 
         if !accessToken.isEmpty {
             for idx in posts.indices where posts[idx].postText.isEmpty {
@@ -1609,7 +1621,9 @@ final class AutoInteractCoordinator: ObservableObject {
             do {
                 allPosts = try await client.getNewsFeedPosts()
             } catch {
-                states[space.id]?.statusText = "Lỗi News Feed: \(error.localizedDescription)"
+                let errMsg = "Lỗi News Feed: \(error.localizedDescription)"
+                states[space.id]?.statusText = errMsg
+                AppLogger.shared.error("AutoInteract", "[\(space.name)] Lỗi lấy News Feed", detail: error.localizedDescription)
                 break
             }
 
@@ -2135,9 +2149,11 @@ struct AutoInteractView: View {
     }
 
     private func startExecution() {
-        if (useComment || reactionType == .geminiAuto) &&
-            geminiApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        // Chỉ cần Gemini API Key khi: bình luận AI hoặc reaction Gemini tự chọn
+        let needsGemini = useComment || reactionType == .geminiAuto
+        if needsGemini && geminiApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             alertMessage = "Vui lòng nhập Gemini API Key để phân tích bài viết và tự sinh bình luận."
+            AppLogger.shared.warning("AutoInteract", "Bắt đầu bị từ chối — thiếu Gemini API Key (cần cho comment/geminiAuto reaction)")
             return
         }
         SecureGeminiStore.saveKey(geminiApiKey)
@@ -2149,6 +2165,8 @@ struct AutoInteractView: View {
         let minCycle = Double(minCycleDelayText.replacingOccurrences(of: ",", with: ".")) ?? 180
         let maxCycle = Double(maxCycleDelayText.replacingOccurrences(of: ",", with: ".")) ?? 420
         let maxPosts = Int(maxPostsText) ?? 10
+
+        AppLogger.shared.info("AutoInteract", "▶️ Bắt đầu chạy — \(selectedSpaces.count) không gian | React: \(useReaction ? reactionType.rawValue : "Tắt") | Cmt: \(useComment ? "Bật" : "Tắt") | SafeMode: \(safeModeEnabled ? "Bật" : "Tắt")")
 
         coordinator.start(
             spaces: selectedSpaces,
