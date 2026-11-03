@@ -698,7 +698,7 @@ struct MultiSpaceSyncView: View {
                 } label: {
                     HStack {
                         Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(isSelected ? .blue : .secondary)
+                            .foregroundStyle(isSelected ? Color.blue : Color.secondary)
                         Image(systemName: space.platform.icon)
                             .foregroundStyle(space.platform.color)
                         VStack(alignment: .leading, spacing: 2) {
@@ -924,14 +924,15 @@ struct MultiSpaceSyncView: View {
                     Text("Xem trước phân bổ từng hàng cho từng không gian:")
                         .font(.caption2.bold())
                         .foregroundStyle(.secondary)
-                    ForEach(Array(selectedSpaces.enumerated()), id: \.element.id) { idx, sp in
+                    ForEach(0..<selectedSpaces.count, id: \.self) { (idx: Int) in
+                        let sp = selectedSpaces[idx]
                         let isManual = idx < parsedManualCommentLines.count
                         let lineText = isManual
                             ? parsedManualCommentLines[idx]
                             : (aiFallbackWhenLinesShort ? "[✨ AI tự sinh bù không trùng]" : "[Bỏ qua]")
                         Text("• \(sp.name): \(lineText)")
                             .font(.caption2)
-                            .foregroundStyle(isManual ? .primary : .blue)
+                            .foregroundStyle(isManual ? Color.primary : Color.blue)
                             .lineLimit(1)
                     }
                 }
