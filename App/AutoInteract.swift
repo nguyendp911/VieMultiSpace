@@ -1501,7 +1501,6 @@ final class FacebookGraphQLAutoClient {
                 }
             }
 
-            let rawStr = String(data: data, encoding: .utf8) ?? ""
             if rawStr.contains("\"feedback_react\"") {
                 AppLogger.shared.info("AutoReact", "✅ [\(concrete.rawValue)] Post ID: \(postId) (Khớp chuỗi)")
                 return (true, "Đã thả cảm xúc \(concrete.rawValue)")
@@ -1655,7 +1654,7 @@ final class FacebookGraphQLAutoClient {
             let httpStatus = (httpResp as? HTTPURLResponse)?.statusCode ?? 0
             let rawStr = String(data: data, encoding: .utf8) ?? ""
             let rawPrev = String(rawStr.prefix(300)).replacingOccurrences(of: "\n", with: "↵")
-            AppLogger.shared.debug("AutoReact-RAW", "HTTP \(httpStatus), \(data.count)B: \(rawPrev)")
+            AppLogger.shared.debug("AutoComment-RAW", "HTTP \(httpStatus), \(data.count)B: \(rawPrev)")
 
             let json = Self.parseFacebookGraphQLResponse(data)
 
@@ -1684,7 +1683,6 @@ final class FacebookGraphQLAutoClient {
                 }
             }
 
-            let rawStr = String(data: data, encoding: .utf8) ?? ""
             if rawStr.contains("\"comment_create\"") {
                 AppLogger.shared.info("AutoComment", "✅ Post ID: \(postId) (Khớp chuỗi)")
                 return (true, "Đã bình luận: \"\(commentText.prefix(55))\"")
