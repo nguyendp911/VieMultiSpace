@@ -457,6 +457,314 @@ enum GeminiCommentService {
             usedModel: usedModel
         )
     }
+
+    static func generateUniqueCommentForTarget(
+        target: ResolvedTargetPost,
+        spaceName: String,
+        spaceIndex: Int,
+        totalSpaces: Int,
+        previousComments: [String],
+        apiKey: String,
+        model: String,
+        customStylePrompt: String
+    ) async throws -> GeminiAnalysisResult {
+        var avoidSection = ""
+        if !previousComments.isEmpty {
+            let bulletList = previousComments.suffix(15).enumerated().map { idx, text in
+                "   - Đã dùng #\(idx + 1): \"\(text)\""
+            }.joined(separator: "\n")
+            avoidSection = """
+
+            DANH SÁCH CÁC BÌNH LUẬN ĐÃ ĐƯỢC CÁC TÀI KHOẢN TRƯỚC SỬ DỤNG (TUYỆT ĐỐI KHÔNG TRÙNG LẶP CÂU CHỮ, Ý TƯỞNG HOẶC CẤU TRÚC CÂU):
+            \(bulletList)
+            """
+        }
+
+        let angles = [
+            "tập trung nhận xét trực tiếp vào điểm thú vị nhất của nội dung",
+            "bày tỏ sự đồng cảm hoặc chia sẻ góc nhìn cá nhân ngắn gọn",
+            "khen ngợi tự nhiên hoặc đặt một câu hỏi tương tác thân thiện",
+            "nhận xét ngắn gọn đời thường như bạn bè tương tác",
+            "tập trung vào chi tiết cụ thể trong bài đăng với giọng điệu hào hứng",
+            "phản hồi ngắn gọn, lịch sự, mang sắc thái riêng biệt"
+        ]
+        let angleHint = angles[spaceIndex % angles.count]
+
+        let enrichedStyle = """
+        \(customStylePrompt)
+        Đây là tài khoản thứ \(spaceIndex + 1)/\(totalSpaces) (\(spaceName)) cùng bình luận vào 1 \(target.targetKind).
+        Hãy viết với góc nhìn riêng biệt (\(angleHint)), TUYỆT ĐỐI KHÁC BIỆT 100% so với các tài khoản khác.
+        \(avoidSection)
+        """
+
+        let postItem = FeedPostItem(
+            postId: target.postId,
+            userName: target.authorName,
+            userId: "",
+            postText: "[\(target.targetKind)] \(target.postText)"
+        )
+
+        return try await analyzeAndGenerateComment(
+            post: postItem,
+            apiKey: apiKey,
+            model: model,
+            customStylePrompt: enrichedStyle
+        )
+    }
+}
+
+// MARK: - Target Post / Reel / Group / Fanpage Resolver
+
+struct ResolvedTargetPost {
+    var rawInput: String
+    var targetKind: String
+    var postId: String
+    var feedbackId: String
+    var authorName: String
+    var postText: String
+    var canonicalURL: URL?
+}
+
+enum FacebookTargetPostResolver {
+    static func detectKind(from input: String) -> String {
+        let lower = input.lowercased()
+        if lower.contains("/reel/") || lower.contains("/reels/") || lower.contains("/share/r/") || lower.contains("fb.watch") || lower.contains("/watch") {
+            return "Reel / Video"
+        }
+        if lower.contains("/groups/") {
+            return "Bài viết Nhóm (Group)"
+        }
+        if lower.contains("/pages/") || lower.contains("fanpage") || lower.contains("/photo") || lower.contains("/videos/") {
+            return "Bài viết Fanpage / Media"
+        }
+        return "Bài viết (Post)"
+    }
+
+    static func resolve(
+        input: String,
+        cookieString: String,
+        accessToken: String = ""
+    ) async throws -> ResolvedTargetPost {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw SpaceLoginError.apiError("Vui lòng nhập Link hoặc ID của Bài viết, Reel, Nhóm hoặc Fanpage.")
+        }
+
+        var kind = detectKind(from: trimmed)
+
+        // Trường hợp người dùng nhập thẳng chuỗi ID số
+        if trimmed.allSatisfy(\.isNumber) {
+            let feedbackId = Data("feedback:\(trimmed)".utf8).base64EncodedString()
+            var postText = ""
+            if !accessToken.isEmpty {
+                postText = await fetchGraphMessage(id: trimmed, accessToken: accessToken) ?? ""
+            }
+            return ResolvedTargetPost(
+                rawInput: trimmed,
+                targetKind: kind,
+                postId: trimmed,
+                feedbackId: feedbackId,
+                authorName: "Chủ bài đăng",
+                postText: postText,
+                canonicalURL: URL(string: "https://www.facebook.com/\(trimmed)")
+            )
+        }
+
+        // Bóc tách sơ bộ ID số nếu có sẵn trên URL
+        var extractedId = extractNumericIdFromURL(trimmed)
+
+        var urlStr = trimmed
+        if !urlStr.lowercased().hasPrefix("http://") && !urlStr.lowercased().hasPrefix("https://") {
+            urlStr = "https://" + urlStr
+        }
+
+        guard let targetURL = URL(string: urlStr) else {
+            if let id = extractedId {
+                return ResolvedTargetPost(
+                    rawInput: trimmed,
+                    targetKind: kind,
+                    postId: id,
+                    feedbackId: Data("feedback:\(id)".utf8).base64EncodedString(),
+                    authorName: "Chủ bài đăng",
+                    postText: "",
+                    canonicalURL: nil
+                )
+            }
+            throw SpaceLoginError.apiError("Định dạng Link hoặc ID bài viết không hợp lệ.")
+        }
+
+        // Tải trang mục tiêu kèm Cookie để giải mã link rút gọn (share/p, share/r, pfbid...) và lấy feedback_id + nội dung bài viết
+        var request = URLRequest(url: targetURL)
+        request.httpMethod = "GET"
+        request.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("vi,en-US;q=0.8,en;q=0.6", forHTTPHeaderField: "accept-language")
+        if !cookieString.isEmpty {
+            request.setValue(cookieString, forHTTPHeaderField: "Cookie")
+        }
+
+        var finalURL: URL? = targetURL
+        var html = ""
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let httpResp = response as? HTTPURLResponse, let redirected = httpResp.url {
+                finalURL = redirected
+                let redirectedStr = redirected.absoluteString
+                kind = detectKind(from: redirectedStr)
+                if extractedId == nil {
+                    extractedId = extractNumericIdFromURL(redirectedStr)
+                }
+            }
+            html = String(data: data, encoding: .utf8) ?? ""
+        } catch {
+            // Nếu lỗi mạng khi tải HTML nhưng đã có ID số trên URL thì vẫn dùng ID đó
+        }
+
+        if extractedId == nil, !html.isEmpty {
+            let idPatterns = [
+                #""post_id":"(\d+)""#,
+                #""top_level_post_id":"(\d+)""#,
+                #""story_fbid":"(\d+)""#,
+                #""video_id":"(\d+)""#,
+                #"story_fbid=(\d+)"#,
+                #"fbid=(\d+)"#,
+                #"/posts/(\d+)"#,
+                #"/reel/(\d+)"#,
+                #"/videos/(\d+)"#
+            ]
+            for pat in idPatterns {
+                if let m = firstMatch(pattern: pat, in: html) {
+                    extractedId = m
+                    break
+                }
+            }
+        }
+
+        var explicitFeedbackId = ""
+        if !html.isEmpty {
+            let fbPatterns = [
+                #""feedback":\{"id":"([A-Za-z0-9+/=]+)""#,
+                #""feedback_id":"([A-Za-z0-9+/=]+)""#
+            ]
+            for pat in fbPatterns {
+                if let fb = firstMatch(pattern: pat, in: html), !fb.isEmpty {
+                    explicitFeedbackId = fb
+                    if extractedId == nil,
+                       let decodedData = Data(base64Encoded: fb),
+                       let decodedStr = String(data: decodedData, encoding: .utf8),
+                       let idPart = firstMatch(pattern: #"(\d+)"#, in: decodedStr) {
+                        extractedId = idPart
+                    }
+                    break
+                }
+            }
+        }
+
+        guard let finalPostId = extractedId, !finalPostId.isEmpty else {
+            throw SpaceLoginError.apiError("Không tìm thấy Post ID / Feedback ID từ liên kết này. Hãy dán link trực tiếp của bài viết/Reel hoặc kiểm tra lại Cookie.")
+        }
+
+        let resolvedFeedbackId = !explicitFeedbackId.isEmpty
+            ? explicitFeedbackId
+            : Data("feedback:\(finalPostId)".utf8).base64EncodedString()
+
+        var authorName = "Chủ bài đăng"
+        if let actorName = firstMatch(pattern: #""actors":\[\{"__typename":"[^"]+","name":"([^"]+)""#, in: html)
+            ?? firstMatch(pattern: #"<meta property="og:title" content="([^"]+)""#, in: html) {
+            authorName = decodeJSONEscapes(actorName)
+        }
+
+        var postText = ""
+        if let msgText = firstMatch(pattern: #""message":\{"text":"([^"]+)""#, in: html) {
+            postText = decodeJSONEscapes(msgText)
+        } else if let ogDesc = firstMatch(pattern: #"<meta property="og:description" content="([^"]+)""#, in: html)
+                    ?? firstMatch(pattern: #"<meta name="description" content="([^"]+)""#, in: html) {
+            postText = decodeHTMLEntities(ogDesc)
+        }
+
+        if postText.isEmpty, !accessToken.isEmpty {
+            postText = await fetchGraphMessage(id: finalPostId, accessToken: accessToken) ?? ""
+        }
+
+        return ResolvedTargetPost(
+            rawInput: trimmed,
+            targetKind: kind,
+            postId: finalPostId,
+            feedbackId: resolvedFeedbackId,
+            authorName: authorName,
+            postText: postText,
+            canonicalURL: finalURL
+        )
+    }
+
+    private static func extractNumericIdFromURL(_ urlStr: String) -> String? {
+        let patterns = [
+            #"/reel/(\d+)"#,
+            #"/reels/(\d+)"#,
+            #"/videos/(\d+)"#,
+            #"watch/\?v=(\d+)"#,
+            #"[?&]v=(\d+)"#,
+            #"story_fbid=(\d+)"#,
+            #"[?&]fbid=(\d+)"#,
+            #"/posts/(\d+)"#,
+            #"/permalink/(\d+)"#,
+            #"/activity/(\d+)"#,
+            #"multi_permalinks=(\d+)"#
+        ]
+        for pat in patterns {
+            if let found = firstMatch(pattern: pat, in: urlStr) {
+                return found
+            }
+        }
+        return nil
+    }
+
+    private static func fetchGraphMessage(id: String, accessToken: String) async -> String? {
+        var comps = URLComponents(string: "https://graph.facebook.com/v18.0/\(id)")
+        comps?.queryItems = [
+            URLQueryItem(name: "fields", value: "message,description,story"),
+            URLQueryItem(name: "access_token", value: accessToken)
+        ]
+        guard let url = comps?.url else { return nil }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let m = json["message"] as? String, !m.isEmpty { return m }
+                if let d = json["description"] as? String, !d.isEmpty { return d }
+                if let s = json["story"] as? String, !s.isEmpty { return s }
+            }
+        } catch {}
+        return nil
+    }
+
+    private static func firstMatch(pattern: String, in text: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, options: [], range: nsRange),
+              match.numberOfRanges > 1,
+              let range = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+        return String(text[range])
+    }
+
+    private static func decodeJSONEscapes(_ raw: String) -> String {
+        let wrapped = "\"\(raw)\""
+        if let data = wrapped.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode(String.self, from: data) {
+            return decoded
+        }
+        return decodeHTMLEntities(raw)
+    }
+
+    private static func decodeHTMLEntities(_ raw: String) -> String {
+        raw.replacingOccurrences(of: "&quot;", with: "\"")
+           .replacingOccurrences(of: "&#039;", with: "'")
+           .replacingOccurrences(of: "&apos;", with: "'")
+           .replacingOccurrences(of: "&amp;", with: "&")
+           .replacingOccurrences(of: "&lt;", with: "<")
+           .replacingOccurrences(of: "&gt;", with: ">")
+    }
 }
 
 // MARK: - Facebook GraphQL Auto Reaction & Comment Client (Ported from 1758035539-Test.py)
@@ -755,12 +1063,14 @@ final class FacebookGraphQLAutoClient {
         return posts
     }
 
-    func reactToPost(postId: String, reaction: FacebookReactionType) async -> (success: Bool, message: String) {
+    func reactToPost(postId: String, reaction: FacebookReactionType, explicitFeedbackId: String? = nil) async -> (success: Bool, message: String) {
         guard let tok = tokens else {
             return (false, "Chưa khởi tạo token phiên web.")
         }
         let concrete = reaction.resolveConcrete()
-        let feedbackId = Data("feedback:\(postId)".utf8).base64EncodedString()
+        let feedbackId = (explicitFeedbackId?.isEmpty == false)
+            ? explicitFeedbackId!
+            : Data("feedback:\(postId)".utf8).base64EncodedString()
 
         let variables: [String: Any] = [
             "input": [
@@ -842,11 +1152,13 @@ final class FacebookGraphQLAutoClient {
         }
     }
 
-    func commentOnPost(postId: String, commentText: String) async -> (success: Bool, message: String) {
+    func commentOnPost(postId: String, commentText: String, explicitFeedbackId: String? = nil) async -> (success: Bool, message: String) {
         guard let tok = tokens else {
             return (false, "Chưa khởi tạo token phiên web.")
         }
-        let feedbackId = Data("feedback:\(postId)".utf8).base64EncodedString()
+        let feedbackId = (explicitFeedbackId?.isEmpty == false)
+            ? explicitFeedbackId!
+            : Data("feedback:\(postId)".utf8).base64EncodedString()
         let sessionId = UUID().uuidString.lowercased()
         let trackingId = "client:\(UUID().uuidString.lowercased())"
 

@@ -51,7 +51,8 @@ struct SpaceDashboard: View {
                         NavigationLink {
                             MultiSpaceSyncView()
                         } label: {
-                            Label("MultiSpace Sync — mở URL theo nhóm", systemImage: "square.stack.3d.up")
+                            Label("MultiSpace Sync — Reaction & Cmt bài chỉ định", systemImage: "square.stack.3d.up")
+                                .fontWeight(.semibold)
                         }
                     }
                     Section("Không gian của tôi") {
