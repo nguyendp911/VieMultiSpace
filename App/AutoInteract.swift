@@ -1638,7 +1638,6 @@ final class FacebookGraphQLAutoClient {
         }
         return nil
     }
-    }
 
     private static func firstMatch(pattern: String, in text: String) -> String? {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
