@@ -755,7 +755,7 @@ enum FacebookTargetPostResolver {
         )
     }
 
-    private static func extractNumericIdFromURL(_ urlStr: String) -> String? {
+    static func extractNumericIdFromURL(_ urlStr: String) -> String? {
         let patterns = [
             #"/reel/(\d+)"#,
             #"/reels/(\d+)"#,
@@ -793,6 +793,95 @@ enum FacebookTargetPostResolver {
             }
         } catch {}
         return nil
+    }
+
+    /// Giải mã link chia sẻ rút gọn Facebook thành URL chính xác (theo redirect, lấy canonical ID).
+    /// Trả về (canonicalURL, postId, kind) hoặc nil nếu thất bại.
+    static func resolveShareURLToCanonical(input: String) async -> (canonicalURL: String, postId: String, kind: String)? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        var urlStr = trimmed
+        if !urlStr.lowercased().hasPrefix("http://") && !urlStr.lowercased().hasPrefix("https://") {
+            urlStr = "https://" + urlStr
+        }
+        guard let url = URL(string: urlStr) else { return nil }
+
+        // Nếu URL đã có ID số ngay trên path, không cần fetch
+        if let directId = extractNumericIdFromURL(urlStr) {
+            let kind = detectKind(from: urlStr)
+            let canonical = buildCanonicalURL(id: directId, kind: kind, originalURL: urlStr)
+            return (canonical, directId, kind)
+        }
+
+        // Follow redirects để lấy final URL
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 15
+        let session = URLSession(configuration: config)
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("text/html,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("vi,en-US;q=0.8,en;q=0.6", forHTTPHeaderField: "Accept-Language")
+
+        do {
+            let (data, response) = try await session.data(for: request)
+            var finalURLStr = urlStr
+            if let httpResp = response as? HTTPURLResponse, let respURL = httpResp.url {
+                finalURLStr = respURL.absoluteString
+            }
+
+            // Thử lấy ID từ final URL sau redirect
+            var extractedId = extractNumericIdFromURL(finalURLStr)
+            var kind = detectKind(from: finalURLStr)
+
+            // Nếu chưa có ID, parse HTML
+            if extractedId == nil {
+                let html = String(data: data, encoding: .utf8) ?? ""
+                let idPatterns = [
+                    #"\"post_id\":\"(\d+)\""#,
+                    #"\"top_level_post_id\":\"(\d+)\""#,
+                    #"\"story_fbid\":\"(\d+)\""#,
+                    #"\"video_id\":\"(\d+)\""#,
+                    #"story_fbid=(\d+)"#,
+                    #"fbid=(\d+)"#,
+                    #"/reel/(\d+)"#,
+                    #"/posts/(\d+)"#,
+                    #"/videos/(\d+)"#
+                ]
+                for pat in idPatterns {
+                    if let m = firstMatch(pattern: pat, in: html) {
+                        extractedId = m
+                        break
+                    }
+                }
+            }
+
+            guard let postId = extractedId, !postId.isEmpty else { return nil }
+            let canonical = buildCanonicalURL(id: postId, kind: kind, originalURL: finalURLStr)
+            return (canonical, postId, kind)
+        } catch {
+            return nil
+        }
+    }
+
+    private static func buildCanonicalURL(id: String, kind: String, originalURL: String) -> String {
+        let lower = originalURL.lowercased()
+        if lower.contains("/reel/") || lower.contains("/reels/") || lower.contains("/share/r/") || lower.contains("fb.watch") || lower.contains("/watch") {
+            return "https://www.facebook.com/reel/\(id)"
+        }
+        if lower.contains("/groups/") {
+            if let groupId = FacebookTargetPostResolver.firstMatch(pattern: #"/groups/([^/?#]+)"#, in: originalURL) {
+                return "https://www.facebook.com/groups/\(groupId)/posts/\(id)"
+            }
+        }
+        if lower.contains("/videos/") {
+            return "https://www.facebook.com/videos/\(id)"
+        }
+        return "https://www.facebook.com/posts/\(id)"
     }
 
     static func firstMatch(pattern: String, in text: String) -> String? {

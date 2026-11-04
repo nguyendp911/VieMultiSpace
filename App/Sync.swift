@@ -609,6 +609,8 @@ struct MultiSpaceSyncView: View {
     @State private var targetCategory: TargetCategoryHint = .auto
     @State private var targetPostInput = ""
     @State private var manualContextText = ""
+    @State private var isResolvingLink = false
+    @State private var resolvedLinkMessage: String? = nil
 
     @AppStorage("vie.sync.useReaction") private var useReaction = true
     @AppStorage("vie.sync.reactionType") private var reactionTypeRaw = FacebookReactionType.love.rawValue
@@ -807,12 +809,32 @@ struct MultiSpaceSyncView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.mini)
                     .disabled(engine.isRunning)
+                    Button {
+                        Task { await resolveShareLink() }
+                    } label: {
+                        if isResolvingLink {
+                            ProgressView().controlSize(.mini).scaleEffect(0.8)
+                        } else {
+                            Label("Mở rộng link", systemImage: "arrow.triangle.2.circlepath")
+                                .font(.caption.bold())
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .tint(.orange)
+                    .disabled(engine.isRunning || isResolvingLink || targetPostInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
                 TextField("Dán link bài viết, Reel, bài Group, Fanpage hoặc ID...", text: $targetPostInput)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .textFieldStyle(.roundedBorder)
                     .disabled(engine.isRunning)
+                if let msg = resolvedLinkMessage {
+                    Text(msg)
+                        .font(.caption2)
+                        .foregroundStyle(msg.hasPrefix("✅") ? Color.green : Color.orange)
+                        .lineLimit(2)
+                }
             }
 
             VStack(alignment: .leading, spacing: 4) {
@@ -1134,6 +1156,22 @@ struct MultiSpaceSyncView: View {
     }
 
     @MainActor
+    /// Giải mã link chia sẻ rút gọn Facebook thành canonical URL
+    private func resolveShareLink() async {
+        let raw = targetPostInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return }
+        isResolvingLink = true
+        resolvedLinkMessage = nil
+        defer { isResolvingLink = false }
+
+        if let result = await FacebookTargetPostResolver.resolveShareURLToCanonical(input: raw) {
+            targetPostInput = result.canonicalURL
+            resolvedLinkMessage = "✅ Đã chuyển thành: \(result.canonicalURL)"
+        } else {
+            resolvedLinkMessage = "⚠️ Không thể giải mã link. Hãy dán trực tiếp link bài viết."
+        }
+    }
+
     private func previewTargetPost() async {
         do {
             _ = try await engine.resolveTargetInfo(
