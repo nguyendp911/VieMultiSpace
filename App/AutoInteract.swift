@@ -434,9 +434,9 @@ enum GeminiCommentService {
         let cleaned = rawText
             .replacingOccurrences(of: "```json", with: "")
             .replacingOccurrences(of: "```", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
 
-        // Tìm đoạn {...} nếu Gemini trả kèm văn bản bên ngoài JSON
+        // 1. Thử parse JSON trực tiếp
         var jsonCandidate = cleaned
         if let firstBrace = cleaned.firstIndex(of: "{"),
            let lastBrace = cleaned.lastIndex(of: "}"),
@@ -446,25 +446,25 @@ enum GeminiCommentService {
 
         if let jsonData = jsonCandidate.data(using: .utf8),
            let obj = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
-            let comment = (obj["comment"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let reactionRaw = (obj["reaction"] as? String)?.uppercased().trimmingCharacters(in: .whitespacesAndNewlines) ?? "LIKE"
+            let comment = (obj["comment"] as? String)?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) ?? ""
+            let reactionRaw = (obj["reaction"] as? String)?.uppercased().trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) ?? "LIKE"
             let reaction = FacebookReactionType(rawValue: reactionRaw) ?? .like
             if !comment.isEmpty {
                 return GeminiAnalysisResult(comment: comment, suggestedReaction: reaction, usedModel: usedModel)
             }
         }
 
-        // Trích xuất bằng Regex nếu JSON parse thất bại hoặc comment bị lỗi escape
+        // 2. Dự phòng: Trích xuất bằng Regex chuẩn
         let commentRegex = #""comment"\s*:\s*"((?:[^"\\]|\\.)*)""#
         let reactionRegex = #""reaction"\s*:\s*"([A-Za-z]+)""#
 
         var extractedComment = ""
         var extractedReaction = FacebookReactionType.like
 
-        if let m = Self.firstMatch(pattern: commentRegex, in: cleaned) {
-            extractedComment = Self.decodeJSONEscapes(m).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let m = FacebookTargetPostResolver.firstMatch(pattern: commentRegex, in: cleaned) {
+            extractedComment = FacebookTargetPostResolver.decodeJSONEscapes(m).trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
         }
-        if let r = Self.firstMatch(pattern: reactionRegex, in: cleaned)?.uppercased() {
+        if let r = FacebookTargetPostResolver.firstMatch(pattern: reactionRegex, in: cleaned)?.uppercased() {
             extractedReaction = FacebookReactionType(rawValue: r) ?? .like
         }
 
@@ -476,17 +476,17 @@ enum GeminiCommentService {
             )
         }
 
-        // Nếu vẫn không bóc tách được và chuỗi bắt đầu bằng {, tuyệt đối không lấy nguyên chuỗi JSON làm comment
+        // 3. Fallback: Nếu vẫn không bóc tách được, làm sạch ký tự thừa nhưng loại bỏ dấu ngoặc nhọn JSON
         var fallbackComment = cleaned
             .trimmingCharacters(in: CharacterSet(charactersIn: "\"' \n\t"))
-        if fallbackComment.hasPrefix("{") && fallbackComment.contains(""comment"") {
-            // Loại bỏ các trường kỹ thuật nếu lỡ dính
+        if fallbackComment.hasPrefix("{") {
+            if let lastB = fallbackComment.lastIndex(of: "}") {
+                fallbackComment = String(fallbackComment[fallbackComment.index(after: fallbackComment.startIndex)..<lastB])
+            }
             fallbackComment = fallbackComment
-                .replacingOccurrences(of: "{
-", with: "")
-                .replacingOccurrences(of: "{", with: "")
-                .replacingOccurrences(of: "}", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\"comment\":", with: "")
+                .replacingOccurrences(of: "\"reaction\":", with: "")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"' \n\t,"))
         }
 
         return GeminiAnalysisResult(
@@ -496,7 +496,7 @@ enum GeminiCommentService {
         )
     }
 
-    static func generateUniqueCommentForTarget(
+        static func generateUniqueCommentForTarget(
         target: ResolvedTargetPost,
         spaceName: String,
         spaceIndex: Int,
