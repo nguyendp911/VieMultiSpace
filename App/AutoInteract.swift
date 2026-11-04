@@ -365,7 +365,8 @@ enum GeminiCommentService {
             ],
             "generationConfig": [
                 "temperature": 0.85,
-                "maxOutputTokens": 250
+                "maxOutputTokens": 250,
+                "responseMimeType": "application/json"
             ]
         ]
 
@@ -453,8 +454,41 @@ enum GeminiCommentService {
             }
         }
 
-        let fallbackComment = cleaned
+        // Trích xuất bằng Regex nếu JSON parse thất bại hoặc comment bị lỗi escape
+        let commentRegex = #""comment"\s*:\s*"((?:[^"\\]|\\.)*)""#
+        let reactionRegex = #""reaction"\s*:\s*"([A-Za-z]+)""#
+
+        var extractedComment = ""
+        var extractedReaction = FacebookReactionType.like
+
+        if let m = Self.firstMatch(pattern: commentRegex, in: cleaned) {
+            extractedComment = Self.decodeJSONEscapes(m).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let r = Self.firstMatch(pattern: reactionRegex, in: cleaned)?.uppercased() {
+            extractedReaction = FacebookReactionType(rawValue: r) ?? .like
+        }
+
+        if !extractedComment.isEmpty {
+            return GeminiAnalysisResult(
+                comment: extractedComment,
+                suggestedReaction: extractedReaction,
+                usedModel: usedModel
+            )
+        }
+
+        // Nếu vẫn không bóc tách được và chuỗi bắt đầu bằng {, tuyệt đối không lấy nguyên chuỗi JSON làm comment
+        var fallbackComment = cleaned
             .trimmingCharacters(in: CharacterSet(charactersIn: "\"' \n\t"))
+        if fallbackComment.hasPrefix("{") && fallbackComment.contains(""comment"") {
+            // Loại bỏ các trường kỹ thuật nếu lỡ dính
+            fallbackComment = fallbackComment
+                .replacingOccurrences(of: "{
+", with: "")
+                .replacingOccurrences(of: "{", with: "")
+                .replacingOccurrences(of: "}", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
         return GeminiAnalysisResult(
             comment: fallbackComment,
             suggestedReaction: .like,
@@ -1495,8 +1529,13 @@ final class FacebookGraphQLAutoClient {
                     return (true, msg)
                 }
                 if let errors = json["errors"] as? [[String: Any]],
-                   let desc = errors.first?["description"] as? String {
+                   let desc = (errors.first?["description"] as? String) ?? (errors.first?["message"] as? String) {
                     AppLogger.shared.error("AutoReact", "❌ Thả cảm xúc thất bại: Post ID \(postId)", detail: desc)
+                    return (false, desc)
+                }
+                if let errDesc = (json["errorDescription"] as? String) ?? (json["errorSummary"] as? String) {
+                    let desc = errDesc.replacingOccurrences(of: "\\n", with: " ")
+                    AppLogger.shared.error("AutoReact", "❌ Facebook chặn cảm xúc: Post ID \(postId)", detail: desc)
                     return (false, desc)
                 }
             }
@@ -1677,9 +1716,19 @@ final class FacebookGraphQLAutoClient {
                     }
                 }
                 if let errors = json["errors"] as? [[String: Any]],
-                   let desc = errors.first?["description"] as? String {
+                   let desc = (errors.first?["description"] as? String) ?? (errors.first?["message"] as? String) {
                     AppLogger.shared.error("AutoComment", "❌ Comment thất bại: Post ID \(postId)", detail: desc)
                     return (false, desc)
+                }
+                if let errDesc = (json["errorDescription"] as? String) ?? (json["errorSummary"] as? String) {
+                    let desc = errDesc.replacingOccurrences(of: "\\n", with: " ")
+                    AppLogger.shared.error("AutoComment", "❌ Facebook chặn bình luận: Post ID \(postId)", detail: desc)
+                    return (false, desc)
+                }
+                if let errorObj = json["error"] as? [String: Any],
+                   let msg = (errorObj["message"] as? String) ?? (errorObj["description"] as? String) {
+                    AppLogger.shared.error("AutoComment", "❌ Comment thất bại: Post ID \(postId)", detail: msg)
+                    return (false, msg)
                 }
             }
 
@@ -1746,7 +1795,7 @@ final class FacebookGraphQLAutoClient {
                   let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
                 continue
             }
-            if obj["data"] != nil || obj["errors"] != nil {
+            if obj["data"] != nil || obj["errors"] != nil || obj["error"] != nil || obj["errorSummary"] != nil || obj["errorDescription"] != nil {
                 return obj
             }
         }
