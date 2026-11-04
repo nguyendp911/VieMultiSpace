@@ -795,7 +795,7 @@ enum FacebookTargetPostResolver {
         return nil
     }
 
-    private static func firstMatch(pattern: String, in text: String) -> String? {
+    static func firstMatch(pattern: String, in text: String) -> String? {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
         let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
         guard let match = regex.firstMatch(in: text, options: [], range: nsRange),
@@ -806,7 +806,7 @@ enum FacebookTargetPostResolver {
         return String(text[range])
     }
 
-    private static func decodeJSONEscapes(_ raw: String) -> String {
+    static func decodeJSONEscapes(_ raw: String) -> String {
         let wrapped = "\"\(raw)\""
         if let data = wrapped.data(using: .utf8),
            let decoded = try? JSONDecoder().decode(String.self, from: data) {
