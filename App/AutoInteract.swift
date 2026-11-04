@@ -268,10 +268,12 @@ enum GeminiCommentService {
 
         Phong cách bình luận yêu cầu: \(styleInstruction)
 
-        Yêu cầu bắt buộc:
-        1. Trả về ĐÚNG định dạng JSON hợp lệ với 2 trường:
-           {"reaction": "LIKE|LOVE|CARE|HAHA|WOW|SAD", "comment": "nội dung bình luận"}
-        2. Trường "comment" phải bám sát nội dung bài viết, tự nhiên, tuyệt đối KHÔNG dùng câu mẫu chung chung kiểu spam, KHÔNG lặp lại nguyên văn bài viết, KHÔNG giải thích gì thêm ngoài JSON.
+        YÊU CẦU ĐẦU RA (QUAN TRỌNG):
+        - CHỈ trả về một đối tượng JSON DUY NHẤT, bắt đầu bằng { và kết thúc bằng }
+        - TUYỆT ĐỐI KHÔNG viết bất kỳ chữ nào trước hoặc sau JSON
+        - KHÔNG giải thích, KHÔNG "Here is...", KHÔNG markdown, KHÔNG code block
+        - Định dạng bắt buộc: {"reaction":"LIKE|LOVE|CARE|HAHA|WOW|SAD","comment":"nội dung bình luận"}
+        - Trường "comment": bám sát bài viết, tự nhiên, 1-2 câu ngắn, không spam, không lặp nguyên văn
         """
 
         // Xây dựng danh sách model ưu tiên thử lần lượt (tự động vượt lỗi 404 deprecated model)
@@ -431,32 +433,15 @@ enum GeminiCommentService {
     }
 
     private static func parseGeminiOutput(_ rawText: String, usedModel: String) -> GeminiAnalysisResult {
+        // Làm sạch markdown/code block nếu có
         let cleaned = rawText
             .replacingOccurrences(of: "```json", with: "")
             .replacingOccurrences(of: "```", with: "")
             .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
 
-        // 1. Thử parse JSON trực tiếp
-        var jsonCandidate = cleaned
-        if let firstBrace = cleaned.firstIndex(of: "{"),
-           let lastBrace = cleaned.lastIndex(of: "}"),
-           firstBrace <= lastBrace {
-            jsonCandidate = String(cleaned[firstBrace...lastBrace])
-        }
-
-        if let jsonData = jsonCandidate.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
-            let comment = (obj["comment"] as? String)?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) ?? ""
-            let reactionRaw = (obj["reaction"] as? String)?.uppercased().trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) ?? "LIKE"
-            let reaction = FacebookReactionType(rawValue: reactionRaw) ?? .like
-            if !comment.isEmpty {
-                return GeminiAnalysisResult(comment: comment, suggestedReaction: reaction, usedModel: usedModel)
-            }
-        }
-
-        // 2. Dự phòng: Trích xuất bằng Regex chuẩn
+        // 1. Ưu tiên Regex trực tiếp - hoạt động kể cả khi Gemini thêm text thừa trước/sau JSON
         let commentRegex = #""comment"\s*:\s*"((?:[^"\\]|\\.)*)""#
-        let reactionRegex = #""reaction"\s*:\s*"([A-Za-z]+)""#
+        let reactionRegex = #""reaction"\s*:\s*"([A-Za-z_]+)""#
 
         var extractedComment = ""
         var extractedReaction = FacebookReactionType.like
@@ -476,21 +461,26 @@ enum GeminiCommentService {
             )
         }
 
-        // 3. Fallback: Nếu vẫn không bóc tách được, làm sạch ký tự thừa nhưng loại bỏ dấu ngoặc nhọn JSON
-        var fallbackComment = cleaned
-            .trimmingCharacters(in: CharacterSet(charactersIn: "\"' \n\t"))
-        if fallbackComment.hasPrefix("{") {
-            if let lastB = fallbackComment.lastIndex(of: "}") {
-                fallbackComment = String(fallbackComment[fallbackComment.index(after: fallbackComment.startIndex)..<lastB])
+        // 2. Thử parse JSON block {} đầu tiên tìm được
+        if let firstBrace = cleaned.firstIndex(of: "{"),
+           let lastBrace = cleaned.lastIndex(of: "}"),
+           firstBrace <= lastBrace {
+            let jsonCandidate = String(cleaned[firstBrace...lastBrace])
+            if let jsonData = jsonCandidate.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                let comment = (obj["comment"] as? String)?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) ?? ""
+                let reactionRaw = (obj["reaction"] as? String)?.uppercased().trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) ?? "LIKE"
+                let reaction = FacebookReactionType(rawValue: reactionRaw) ?? .like
+                if !comment.isEmpty {
+                    return GeminiAnalysisResult(comment: comment, suggestedReaction: reaction, usedModel: usedModel)
+                }
             }
-            fallbackComment = fallbackComment
-                .replacingOccurrences(of: "\"comment\":", with: "")
-                .replacingOccurrences(of: "\"reaction\":", with: "")
-                .trimmingCharacters(in: CharacterSet(charactersIn: "\"' \n\t,"))
         }
 
+        // 3. Parse hoàn toàn thất bại - trả rỗng để tránh đăng raw text lên Facebook
+        AppLogger.shared.warning("GeminiCommentService", "parseGeminiOutput: không tách được comment", detail: "Raw[0:200]: \(rawText.prefix(200))")
         return GeminiAnalysisResult(
-            comment: fallbackComment,
+            comment: "",
             suggestedReaction: .like,
             usedModel: usedModel
         )
