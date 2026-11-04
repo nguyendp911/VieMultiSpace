@@ -725,6 +725,116 @@ enum WebCookieBridge {
 
 // MARK: - UI: Login & Token Vault Sheet
 
+// MARK: - TXT Account Loader
+
+struct TxtAccount: Identifiable {
+    let id = UUID()
+    let uid: String
+    let password: String
+    let twoFA: String
+    var display: String {
+        let u = uid.trimmingCharacters(in: .whitespaces)
+        return u.isEmpty ? String(password.prefix(10)) + "..." : u
+    }
+}
+
+struct TxtDocumentPicker: UIViewControllerRepresentable {
+    var onPicked: (String) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onPicked: onPicked) }
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let vc = UIDocumentPickerViewController(forOpeningContentTypes: [.plainText], asCopy: true)
+        vc.delegate = context.coordinator
+        return vc
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    class Coordinator: NSObject, UIDocumentPickerDelegate {
+        var onPicked: (String) -> Void
+        init(onPicked: @escaping (String) -> Void) { self.onPicked = onPicked }
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            guard let url = urls.first, let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+            onPicked(text)
+        }
+    }
+}
+
+struct TxtAccountPickerSheet: View {
+    let accounts: [TxtAccount]
+    var onSelect: (TxtAccount) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedId: UUID? = nil
+
+    private let columns = [GridItem(.flexible()), GridItem(.flexible())]
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 10) {
+                    ForEach(accounts) { acc in
+                        let isSelected = selectedId == acc.id
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(isSelected ? Color.blue : Color.secondary)
+                                Spacer()
+                                if !acc.twoFA.isEmpty {
+                                    Image(systemName: "lock.shield")
+                                        .font(.caption2)
+                                        .foregroundStyle(.orange)
+                                }
+                            }
+                            Text(acc.display)
+                                .font(.caption.bold())
+                                .lineLimit(1)
+                            if !acc.uid.isEmpty {
+                                Text("UID: " + acc.uid)
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Text(String(acc.password.prefix(8)) + "••••")
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(isSelected ? Color.blue.opacity(0.12) : Color(uiColor: .secondarySystemGroupedBackground))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .stroke(isSelected ? Color.blue : Color.clear, lineWidth: 1.5)
+                                )
+                        )
+                        .onTapGesture { selectedId = acc.id }
+                    }
+                }
+                .padding()
+            }
+            .background(Color(uiColor: .systemGroupedBackground))
+            .navigationTitle("Chọn tài khoản (\(accounts.count))")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Hủy") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Dùng tài khoản này") {
+                        if let acc = accounts.first(where: { $0.id == selectedId }) {
+                            onSelect(acc)
+                        }
+                        dismiss()
+                    }
+                    .disabled(selectedId == nil)
+                    .fontWeight(.semibold)
+                }
+            }
+        }
+    }
+}
+
 struct LoginEditorSheet: View {
     let space: Space
     var onReloadWebView: (() -> Void)? = nil
@@ -743,6 +853,9 @@ struct LoginEditorSheet: View {
     @State private var busyLabel = ""
     @State private var showDeleteConfirm = false
     @State private var message: String?
+    @State private var showFilePicker = false
+    @State private var parsedTxtAccounts: [TxtAccount] = []
+    @State private var showTxtAccountPicker = false
 
     var body: some View {
         NavigationStack {
@@ -789,6 +902,15 @@ struct LoginEditorSheet: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .font(.caption.monospaced())
+
+                    Button {
+                        showFilePicker = true
+                    } label: {
+                        Label("Nạp danh sách từ file TXT (uid|pass|2fa)", systemImage: "doc.text.below.ecg")
+                            .font(.subheadline)
+                    }
+                    .disabled(isBusy)
+                    .tint(.orange)
 
                     Button {
                         saveCredentialsOnly()
@@ -980,6 +1102,25 @@ struct LoginEditorSheet: View {
             )) {
                 Button("OK") { message = nil }
             } message: { Text(message ?? "") }
+            .sheet(isPresented: $showFilePicker) {
+                TxtDocumentPicker { text in
+                    let accounts = parseTxtAccounts(text)
+                    if accounts.isEmpty {
+                        message = "File không có dòng hợp lệ.\nĐịnh dạng: uid|matkhau|2fa"
+                    } else {
+                        parsedTxtAccounts = accounts
+                        showTxtAccountPicker = true
+                    }
+                }
+            }
+            .sheet(isPresented: $showTxtAccountPicker) {
+                TxtAccountPickerSheet(accounts: parsedTxtAccounts) { acc in
+                    username = acc.uid
+                    password = acc.password
+                    seed = acc.twoFA
+                }
+                .presentationDetents([.medium, .large])
+            }
         }
     }
 
@@ -995,6 +1136,21 @@ struct LoginEditorSheet: View {
         }
     }
 
+
+    private func parseTxtAccounts(_ text: String) -> [TxtAccount] {
+        text.components(separatedBy: .newlines)
+            .compactMap { line -> TxtAccount? in
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return nil }
+                let parts = trimmed.components(separatedBy: "|")
+                guard parts.count >= 2 else { return nil }
+                let uid = parts[0].trimmingCharacters(in: .whitespaces)
+                let pass = parts[1].trimmingCharacters(in: .whitespaces)
+                let fa = parts.count >= 3 ? parts[2].trimmingCharacters(in: .whitespaces) : ""
+                guard !pass.isEmpty else { return nil }
+                return TxtAccount(uid: uid, password: pass, twoFA: fa)
+            }
+    }
     private func saveCredentialsOnly() {
         do {
             let resolvedMachine = machineId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

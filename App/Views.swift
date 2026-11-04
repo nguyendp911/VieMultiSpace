@@ -19,6 +19,9 @@ struct SpaceDashboard: View {
     @State private var busy = false
     @State private var isLocked = false
     @State private var showLog = false
+    @State private var editMode: EditMode = .inactive
+    @State private var inlineRenameId: UUID? = nil
+    @State private var inlineRenameText = ""
     @ObservedObject private var logger = AppLogger.shared
 
     var body: some View {
@@ -189,6 +192,9 @@ struct SpaceDashboard: View {
                                 }
                             }
                         }
+                        .onMove { from, to in
+                            library.move(from: from, to: to)
+                        }
                         Button { showAdd = true } label: {
                             Label("Tạo không gian mới", systemImage: "plus.circle.fill")
                                 .fontWeight(.semibold)
@@ -200,6 +206,7 @@ struct SpaceDashboard: View {
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
+                .environment(\.editMode, $editMode)
                 .scrollContentBackground(.hidden)
                 .background(Color(uiColor: .systemGroupedBackground))
 
@@ -216,6 +223,9 @@ struct SpaceDashboard: View {
             }
             .navigationTitle("MultiSpace")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    EditButton()
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Toggle("Khóa bằng Face ID / mã máy", isOn: $requireUnlock)

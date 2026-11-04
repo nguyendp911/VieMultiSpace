@@ -233,6 +233,11 @@ final class SpaceLibrary: ObservableObject {
         }
     }
 
+    func move(from source: IndexSet, to destination: Int) {
+        spaces.move(fromOffsets: source, toOffset: destination)
+        persist()
+    }
+
     private func persist() {
         if let data = try? JSONEncoder().encode(spaces) {
             UserDefaults.standard.set(data, forKey: saveKey)
