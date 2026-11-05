@@ -873,7 +873,7 @@ struct SmartPostView: View {
                                     .foregroundStyle(.white)
                             }
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Đăng bài mới")
+                                Text("Đăng")
                                     .font(.subheadline.bold())
                                     .foregroundStyle(isPrivacyOnlyMode ? Color.primary : Color.orange)
                                 Text("Status, ảnh & video")
