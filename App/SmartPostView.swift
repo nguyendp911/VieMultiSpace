@@ -1,10 +1,11 @@
 import SwiftUI
 import Foundation
 import UIKit
+import PhotosUI
 
 // MARK: - Smart Post Models & Privacy Options
 
-enum SmartPostPrivacy: String, CaseIterable, Identifiable {
+enum SmartPostPrivacy: String, CaseIterable, Identifiable, Codable {
     case everyone = "Công khai (EVERYONE)"
     case friends = "Bạn bè (FRIENDS)"
     case onlyMe = "Chỉ mình tôi (ONLY_ME)"
@@ -36,8 +37,8 @@ enum SmartPostPrivacy: String, CaseIterable, Identifiable {
     }
 }
 
-struct SmartPostResult: Identifiable {
-    let id = UUID()
+struct SmartPostResult: Identifiable, Codable {
+    var id: UUID = UUID()
     let spaceName: String
     let isSuccess: Bool
     let postId: String?
@@ -45,7 +46,208 @@ struct SmartPostResult: Identifiable {
     let message: String
 }
 
-// MARK: - Smart Post Engine
+// MARK: - Scheduled Post Models
+
+enum ScheduledTaskStatus: String, Codable {
+    case pending = "Chờ đăng"
+    case running = "Đang chạy"
+    case completed = "Hoàn thành"
+    case failed = "Thất bại"
+
+    var badgeColor: Color {
+        switch self {
+        case .pending: return .blue
+        case .running: return .orange
+        case .completed: return .green
+        case .failed: return .red
+        }
+    }
+}
+
+struct ScheduledPostTask: Identifiable, Codable {
+    var id: UUID = UUID()
+    var title: String
+    var caption: String
+    var targetSpaceIds: [UUID]
+    var privacy: SmartPostPrivacy
+    var scheduledDate: Date
+    var status: ScheduledTaskStatus
+    var imageFileNames: [String]
+    var videoFileName: String?
+    var createdAt: Date = Date()
+    var executionLog: String?
+}
+
+// MARK: - Scheduled Post Storage Manager
+
+@MainActor
+final class ScheduledPostManager: ObservableObject {
+    static let shared = ScheduledPostManager()
+
+    @Published var tasks: [ScheduledPostTask] = []
+    private let storageKey = "vie.smartpost.scheduled_tasks.v1"
+    private var timer: Timer?
+
+    init() {
+        loadTasks()
+        startScheduler()
+    }
+
+    func loadTasks() {
+        if let data = UserDefaults.standard.data(forKey: storageKey),
+           let decoded = try? JSONDecoder().decode([ScheduledPostTask].self, from: data) {
+            self.tasks = decoded
+        }
+    }
+
+    func saveTasks() {
+        if let data = try? JSONEncoder().encode(tasks) {
+            UserDefaults.standard.set(data, forKey: storageKey)
+        }
+    }
+
+    func addTask(
+        caption: String,
+        spaceIds: [UUID],
+        privacy: SmartPostPrivacy,
+        scheduledDate: Date,
+        images: [UIImage],
+        videoData: Data?
+    ) {
+        var savedImageNames: [String] = []
+        let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+
+        for img in images {
+            let name = "sp_img_\(UUID().uuidString).jpg"
+            if let data = img.jpegData(compressionQuality: 0.85) {
+                let fileURL = documentsDir.appendingPathComponent(name)
+                try? data.write(to: fileURL)
+                savedImageNames.append(name)
+            }
+        }
+
+        var savedVideoName: String? = nil
+        if let vdata = videoData {
+            let name = "sp_vid_\(UUID().uuidString).mp4"
+            let fileURL = documentsDir.appendingPathComponent(name)
+            try? vdata.write(to: fileURL)
+            savedVideoName = name
+        }
+
+        let title = caption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? (savedVideoName != nil ? "Video bài đăng" : "\(savedImageNames.count) Ảnh bài đăng")
+            : String(caption.prefix(40))
+
+        let newTask = ScheduledPostTask(
+            title: title,
+            caption: caption,
+            targetSpaceIds: spaceIds,
+            privacy: privacy,
+            scheduledDate: scheduledDate,
+            status: .pending,
+            imageFileNames: savedImageNames,
+            videoFileName: savedVideoName
+        )
+
+        tasks.append(newTask)
+        saveTasks()
+    }
+
+    func deleteTask(_ task: ScheduledPostTask) {
+        let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        for name in task.imageFileNames {
+            try? FileManager.default.removeItem(at: documentsDir.appendingPathComponent(name))
+        }
+        if let vname = task.videoFileName {
+            try? FileManager.default.removeItem(at: documentsDir.appendingPathComponent(vname))
+        }
+        tasks.removeAll { $0.id == task.id }
+        saveTasks()
+    }
+
+    private func startScheduler() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.checkAndExecuteDueTasks()
+            }
+        }
+    }
+
+    func checkAndExecuteDueTasks() async {
+        let now = Date()
+        for idx in tasks.indices {
+            var task = tasks[idx]
+            if task.status == .pending && task.scheduledDate <= now {
+                tasks[idx].status = .running
+                saveTasks()
+
+                let resultLog = await executeTask(task)
+                tasks[idx].status = resultLog.allSuccess ? .completed : .failed
+                tasks[idx].executionLog = resultLog.summary
+                saveTasks()
+            }
+        }
+    }
+
+    private func executeTask(_ task: ScheduledPostTask) async -> (allSuccess: Bool, summary: String) {
+        let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        var loadedImages: [UIImage] = []
+        for name in task.imageFileNames {
+            let fileURL = documentsDir.appendingPathComponent(name)
+            if let data = try? Data(contentsOf: fileURL), let img = UIImage(data: data) {
+                loadedImages.append(img)
+            }
+        }
+
+        var loadedVideoData: Data? = nil
+        if let vname = task.videoFileName {
+            let fileURL = documentsDir.appendingPathComponent(vname)
+            loadedVideoData = try? Data(contentsOf: fileURL)
+        }
+
+        var successCount = 0
+        var totalCount = 0
+        var logs: [String] = []
+
+        for sid in task.targetSpaceIds {
+            totalCount += 1
+            guard let vault = try? SecureLoginStore.readTokenVault(sid), !vault.originalToken.isEmpty else {
+                logs.append("Không tìm thấy token cho không gian ID: \(sid)")
+                continue
+            }
+            let token = vault.originalToken
+            let uid = vault.uid.isEmpty ? "me" : vault.uid
+
+            do {
+                if let vdata = loadedVideoData {
+                    let vid = try await SmartPostAPIClient.uploadVideo(videoData: vdata, caption: task.caption, accessToken: token, userId: uid)
+                    successCount += 1
+                    logs.append("✅ Đăng video thành công ID: \(vid)")
+                } else {
+                    var pids: [String] = []
+                    for img in loadedImages {
+                        if let jdata = img.jpegData(compressionQuality: 0.85) {
+                            let pid = try await SmartPostAPIClient.uploadPhoto(imageData: jdata, accessToken: token)
+                            pids.append(pid)
+                        }
+                    }
+                    let res = try await SmartPostAPIClient.createPost(caption: task.caption, photoIds: pids, privacy: task.privacy, accessToken: token, userId: uid)
+                    successCount += 1
+                    logs.append("✅ Đăng bài thành công ID: \(res.postId)")
+                }
+            } catch {
+                logs.append("❌ Lỗi: \(error.localizedDescription)")
+            }
+        }
+
+        let allSuccess = successCount == totalCount && totalCount > 0
+        let summary = "Kết quả: \(successCount)/\(totalCount) thành công lúc \(Date().formatted(date: .numeric, time: .shortened))\n" + logs.joined(separator: "\n")
+        return (allSuccess, summary)
+    }
+}
+
+// MARK: - Smart Post API Engine
 
 enum SmartPostAPIClient {
     private static let fbHeaders: [String: String] = [
@@ -117,6 +319,57 @@ enum SmartPostAPIClient {
         } else {
             let errText = String(data: data, encoding: .utf8) ?? "HTTP \(statusCode)"
             throw NSError(domain: "SmartPost", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Lỗi tải ảnh: \(errText.prefix(120))"])
+        }
+    }
+
+    /// Đăng Video lên Facebook qua Graph API /me/videos (chuẩn Video Uploader)
+    static func uploadVideo(
+        videoData: Data,
+        caption: String,
+        accessToken: String,
+        userId: String
+    ) async throws -> String {
+        let url = URL(string: "https://graph-video.facebook.com/v19.0/\(userId)/videos")!
+        let boundary = "Boundary-\(UUID().uuidString)"
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        for (k, v) in fbHeaders {
+            request.setValue(v, forHTTPHeaderField: k)
+        }
+        request.setValue("OAuth \(accessToken)", forHTTPHeaderField: "authorization")
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "content-type")
+
+        var body = Data()
+        let fields: [String: String] = [
+            "description": caption,
+            "title": String(caption.prefix(30)),
+            "published": "true"
+        ]
+
+        for (k, v) in fields {
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"\(k)\"\r\n\r\n".data(using: .utf8)!)
+            body.append("\(v)\r\n".data(using: .utf8)!)
+        }
+
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"source\"; filename=\"video.mp4\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: video/mp4\r\n\r\n".data(using: .utf8)!)
+        body.append(videoData)
+        body.append("\r\n".data(using: .utf8)!)
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+
+        request.httpBody = body
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let videoId = json["id"] as? String {
+            return videoId
+        } else {
+            let errText = String(data: data, encoding: .utf8) ?? "HTTP \(statusCode)"
+            throw NSError(domain: "SmartPost", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Lỗi đăng video: \(errText.prefix(140))"])
         }
     }
 
@@ -251,7 +504,6 @@ enum SmartPostAPIClient {
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
         let respString = String(data: data, encoding: .utf8) ?? ""
 
-        // Parse story_create or post ID from response
         if let directJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let d = directJson["data"] as? [String: Any],
            let sc = d["story_create"] as? [String: Any],
@@ -261,7 +513,6 @@ enum SmartPostAPIClient {
             return (pid.isEmpty ? "Đã đăng thành công" : pid, purl)
         }
 
-        // Regex fallback to find post_id or legacy_api_story_id
         if let pidMatch = FacebookTargetPostResolver.firstMatch(pattern: "\"legacy_api_story_id\":\"([0-9]+)\"", in: respString)
             ?? FacebookTargetPostResolver.firstMatch(pattern: "\"id\":\"([0-9_]+)\"", in: respString) {
             return (pidMatch, "https://www.facebook.com/\(pidMatch)")
@@ -363,57 +614,99 @@ enum SmartPostAPIClient {
     }
 }
 
-// MARK: - Photo Picker Representable
+// MARK: - Multiple Photos & Video Picker (PHPickerViewController)
 
-struct SmartPostImagePicker: UIViewControllerRepresentable {
-    var onSelected: (UIImage) -> Void
+struct SmartPostMediaPicker: UIViewControllerRepresentable {
+    var onImagesPicked: ([UIImage]) -> Void
+    var onVideoPicked: (Data) -> Void
+    var filterType: PHPickerFilter
+
     @Environment(\.dismiss) private var dismiss
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    func makeUIViewController(context: Context) -> UIImagePickerController {
-        let picker = UIImagePickerController()
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var config = PHPickerConfiguration()
+        config.selectionLimit = 15 // Hỗ trợ chọn tối đa 15 ảnh
+        config.filter = filterType
+        let picker = PHPickerViewController(configuration: config)
         picker.delegate = context.coordinator
-        picker.sourceType = .photoLibrary
         return picker
     }
 
-    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
 
-    class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
-        let parent: SmartPostImagePicker
-        init(_ parent: SmartPostImagePicker) { self.parent = parent }
+    class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        let parent: SmartPostMediaPicker
+        init(_ parent: SmartPostMediaPicker) { self.parent = parent }
 
-        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
-            if let image = info[.originalImage] as? UIImage {
-                parent.onSelected(image)
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            parent.dismiss()
+            guard !results.isEmpty else { return }
+
+            var collectedImages: [UIImage] = []
+            let group = DispatchGroup()
+
+            for result in results {
+                let provider = result.itemProvider
+                if provider.canLoadObject(ofClass: UIImage.self) {
+                    group.enter()
+                    provider.loadObject(ofClass: UIImage.self) { image, _ in
+                        if let img = image as? UIImage {
+                            DispatchQueue.main.async { collectedImages.append(img) }
+                        }
+                        group.leave()
+                    }
+                } else if provider.hasItemConformingToTypeIdentifier("public.movie") {
+                    provider.loadFileRepresentation(forTypeIdentifier: "public.movie") { url, _ in
+                        if let fileURL = url, let videoData = try? Data(contentsOf: fileURL) {
+                            DispatchQueue.main.async {
+                                self.parent.onVideoPicked(videoData)
+                            }
+                        }
+                    }
+                }
             }
-            parent.dismiss()
-        }
 
-        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
-            parent.dismiss()
+            group.notify(queue: .main) {
+                if !collectedImages.isEmpty {
+                    self.parent.onImagesPicked(collectedImages)
+                }
+            }
         }
     }
 }
 
-// MARK: - Smart Post View
+// MARK: - Smart Post Main View
 
 struct SmartPostView: View {
     @EnvironmentObject private var library: SpaceLibrary
     @Environment(\.dismiss) private var dismiss
+    @StateObject private var scheduler = ScheduledPostManager.shared
 
+    // Navigation Tabs
+    @State private var selectedTab = 0 // 0: Đăng ngay / Lên lịch, 1: Quản lý lịch đăng
+
+    // Selection
     @State private var selectedSpaceIds: Set<UUID> = []
     @State private var postCaption = ""
     @State private var privacyOption: SmartPostPrivacy = .everyone
+
+    // Media
     @State private var selectedImages: [UIImage] = []
-    @State private var showImagePicker = false
+    @State private var selectedVideoData: Data? = nil
+    @State private var showPhotoPicker = false
+    @State private var showVideoPicker = false
+
+    // Scheduling
+    @State private var isScheduling = false
+    @State private var scheduledDate = Date().addingTimeInterval(3600)
 
     // Bulk Privacy Mode
-    @State private var targetPostIdToUpdatePrivacy = ""
     @State private var isPrivacyOnlyMode = false
+    @State private var targetPostIdToUpdatePrivacy = ""
 
-    // Running states
+    // Publishing states
     @State private var isPublishing = false
     @State private var progressMessage = ""
     @State private var results: [SmartPostResult] = []
@@ -429,218 +722,20 @@ struct SmartPostView: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                // Header Banner
-                Section {
-                    HStack(spacing: 12) {
-                        if let img = AppVisualAssets.smartPostImage {
-                            Image(uiImage: img)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 54, height: 54)
-                                .clipShape(Circle())
-                                .shadow(color: .orange.opacity(0.3), radius: 4)
-                        } else {
-                            Image(systemName: "paperplane.fill")
-                                .font(.title)
-                                .foregroundStyle(.orange)
-                        }
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("Smart Post • Quản lý & Đăng bài")
-                                .font(.headline)
-                            Text("Đăng bài viết kèm ảnh đa tài khoản, đồng bộ quyền riêng tư tự động qua Graph API.")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.vertical, 4)
+            VStack(spacing: 0) {
+                // Segment Switcher
+                Picker("Chế độ", selection: $selectedTab) {
+                    Text("📝 Soạn & Đăng bài").tag(0)
+                    Text("📅 Quản lý lịch (\(scheduler.tasks.count))").tag(1)
                 }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
 
-                // Chế độ thao tác
-                Section("Chế độ") {
-                    Picker("Hành động", selection: $isPrivacyOnlyMode) {
-                        Text("📝 Đăng bài mới").tag(false)
-                        Text("🔒 Đổi quyền riêng tư bài có sẵn").tag(true)
-                    }
-                    .pickerStyle(.segmented)
-                    .disabled(isPublishing)
-                }
-
-                // 1. Chọn không gian đăng
-                Section("1. Chọn tài khoản thực hiện (\(selectedSpaces.count)/\(availableSpaces.count))") {
-                    HStack {
-                        Button("Chọn tất cả") {
-                            selectedSpaceIds = Set(availableSpaces.map(\.id))
-                        }
-                        .disabled(isPublishing)
-                        Spacer()
-                        Button("Bỏ chọn") {
-                            selectedSpaceIds.removeAll()
-                        }
-                        .disabled(isPublishing)
-                    }
-                    .font(.caption.bold())
-
-                    ForEach(availableSpaces) { sp in
-                        let summary = VaultMetadataIndex.get(sp.id)
-                        let isSelected = selectedSpaceIds.contains(sp.id)
-                        Button {
-                            if isSelected { selectedSpaceIds.remove(sp.id) }
-                            else { selectedSpaceIds.insert(sp.id) }
-                        } label: {
-                            HStack {
-                                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(isSelected ? Color.blue : Color.secondary)
-                                Image(systemName: sp.platform.icon)
-                                    .foregroundStyle(sp.platform.color)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(sp.name).foregroundStyle(.primary)
-                                    if summary.hasToken {
-                                        Text("Sẵn sàng Token API (\(summary.tokenPrefix.isEmpty ? "App" : summary.tokenPrefix))")
-                                            .font(.caption2).foregroundStyle(.green)
-                                    } else {
-                                        Text("Chưa có Token API — Cần đăng nhập")
-                                            .font(.caption2).foregroundStyle(.red)
-                                    }
-                                }
-                                Spacer()
-                            }
-                        }
-                        .disabled(isPublishing)
-                    }
-                }
-
-                // 2. Nội dung bài viết hoặc đổi quyền riêng tư
-                if !isPrivacyOnlyMode {
-                    Section("2. Nội dung bài viết") {
-                        TextField("Bạn đang nghĩ gì? Nhập nội dung bài viết...", text: $postCaption, axis: .vertical)
-                            .lineLimit(3...7)
-                            .disabled(isPublishing)
-
-                        Picker("Quyền riêng tư", selection: $privacyOption) {
-                            ForEach(SmartPostPrivacy.allCases) { opt in
-                                Label(opt.rawValue, systemImage: opt.icon).tag(opt)
-                            }
-                        }
-                        .disabled(isPublishing)
-
-                        // Quản lý ảnh đính kèm
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text("Ảnh đính kèm (\(selectedImages.count)):")
-                                    .font(.caption.bold())
-                                Spacer()
-                                Button {
-                                    showImagePicker = true
-                                } label: {
-                                    Label("Thêm ảnh", systemImage: "photo.badge.plus")
-                                        .font(.caption.bold())
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.mini)
-                                .disabled(isPublishing)
-                            }
-
-                            if !selectedImages.isEmpty {
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    HStack(spacing: 8) {
-                                        ForEach(Array(selectedImages.enumerated()), id: \.offset) { idx, img in
-                                            ZStack(alignment: .topTrailing) {
-                                                Image(uiImage: img)
-                                                    .resizable()
-                                                    .scaledToFill()
-                                                    .frame(width: 64, height: 64)
-                                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-
-                                                Button {
-                                                    selectedImages.remove(at: idx)
-                                                } label: {
-                                                    Image(systemName: "xmark.circle.fill")
-                                                        .foregroundStyle(.red)
-                                                        .background(Circle().fill(.white))
-                                                }
-                                                .offset(x: 4, y: -4)
-                                                .disabled(isPublishing)
-                                            }
-                                        }
-                                    }
-                                    .padding(.top, 4)
-                                }
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
+                if selectedTab == 0 {
+                    composeForm
                 } else {
-                    Section("2. Đổi quyền riêng tư bài viết") {
-                        TextField("Nhập Post ID cần đổi quyền riêng tư...", text: $targetPostIdToUpdatePrivacy)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .disabled(isPublishing)
-
-                        Picker("Quyền mới", selection: $privacyOption) {
-                            ForEach(SmartPostPrivacy.allCases) { opt in
-                                Label(opt.rawValue, systemImage: opt.icon).tag(opt)
-                            }
-                        }
-                        .disabled(isPublishing)
-                    }
-                }
-
-                // 3. Tiến trình & Nút Thực Hiện
-                Section {
-                    if isPublishing {
-                        HStack(spacing: 12) {
-                            ProgressView()
-                            Text(progressMessage)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 4)
-                    }
-
-                    Button {
-                        Task { await executeSmartPost() }
-                    } label: {
-                        HStack {
-                            Spacer()
-                            Label(
-                                isPrivacyOnlyMode ? "Cập nhật quyền riêng tư bài viết" : "Đăng bài đồng loạt lên các tài khoản",
-                                systemImage: isPrivacyOnlyMode ? "lock.rotation" : "paperplane.fill"
-                            )
-                            .font(.headline)
-                            .foregroundStyle(.white)
-                            Spacer()
-                        }
-                        .padding(.vertical, 6)
-                    }
-                    .listRowBackground(canSubmit ? Color.orange : Color.gray.opacity(0.3))
-                    .disabled(!canSubmit)
-                }
-
-                // 4. Kết quả đăng tải
-                if !results.isEmpty {
-                    Section("Kết quả thực hiện (\(results.filter(\.isSuccess).count)/\(results.count) thành công)") {
-                        ForEach(results) { res in
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Image(systemName: res.isSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                        .foregroundStyle(res.isSuccess ? Color.green : Color.red)
-                                    Text(res.spaceName)
-                                        .font(.subheadline.bold())
-                                    Spacer()
-                                    if let pid = res.postId {
-                                        Text("ID: \(pid)")
-                                            .font(.caption2.monospaced())
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                                Text(res.message)
-                                    .font(.caption)
-                                    .foregroundStyle(res.isSuccess ? Color.secondary : Color.red)
-                            }
-                            .padding(.vertical, 2)
-                        }
-                    }
+                    scheduleManagerView
                 }
             }
             .navigationTitle("Smart Post")
@@ -651,10 +746,25 @@ struct SmartPostView: View {
                         .disabled(isPublishing)
                 }
             }
-            .sheet(isPresented: $showImagePicker) {
-                SmartPostImagePicker { img in
-                    selectedImages.append(img)
-                }
+            .sheet(isPresented: $showPhotoPicker) {
+                SmartPostMediaPicker(
+                    onImagesPicked: { imgs in
+                        selectedVideoData = nil // Nếu chọn ảnh thì xóa video
+                        selectedImages.append(contentsOf: imgs)
+                    },
+                    onVideoPicked: { _ in },
+                    filterType: .images
+                )
+            }
+            .sheet(isPresented: $showVideoPicker) {
+                SmartPostMediaPicker(
+                    onImagesPicked: { _ in },
+                    onVideoPicked: { vdata in
+                        selectedImages.removeAll() // Nếu chọn video thì bỏ ảnh
+                        selectedVideoData = vdata
+                    },
+                    filterType: .videos
+                )
             }
             .alert("Thông báo", isPresented: Binding(
                 get: { alertMessage != nil },
@@ -672,13 +782,383 @@ struct SmartPostView: View {
         }
     }
 
+    // MARK: - Compose Form View
+
+    @ViewBuilder
+    private var composeForm: some View {
+        Form {
+            // Header Info
+            Section {
+                HStack(spacing: 12) {
+                    if let img = AppVisualAssets.smartPostImage {
+                        Image(uiImage: img)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 52, height: 52)
+                            .clipShape(Circle())
+                            .shadow(color: .orange.opacity(0.3), radius: 4)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Smart Post • Đăng đa tài khoản & Lên lịch")
+                            .font(.headline)
+                        Text("Hỗ trợ đăng nhiều ảnh, video MP4, đặt lịch đăng tự động và đổi quyền riêng tư.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+
+            // Chế độ thao tác
+            Section("Loại thao tác") {
+                Picker("Hành động", selection: $isPrivacyOnlyMode) {
+                    Text("📝 Đăng bài mới").tag(false)
+                    Text("🔒 Đổi quyền riêng tư").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .disabled(isPublishing)
+            }
+
+            // Chọn tài khoản
+            Section("1. Chọn tài khoản thực hiện (\(selectedSpaces.count)/\(availableSpaces.count))") {
+                HStack {
+                    Button("Chọn tất cả") { selectedSpaceIds = Set(availableSpaces.map(\.id)) }
+                    Spacer()
+                    Button("Bỏ chọn") { selectedSpaceIds.removeAll() }
+                }
+                .font(.caption.bold())
+                .disabled(isPublishing)
+
+                ForEach(availableSpaces) { sp in
+                    let summary = VaultMetadataIndex.get(sp.id)
+                    let isSelected = selectedSpaceIds.contains(sp.id)
+                    Button {
+                        if isSelected { selectedSpaceIds.remove(sp.id) }
+                        else { selectedSpaceIds.insert(sp.id) }
+                    } label: {
+                        HStack {
+                            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(isSelected ? Color.blue : Color.secondary)
+                            Image(systemName: sp.platform.icon)
+                                .foregroundStyle(sp.platform.color)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(sp.name).foregroundStyle(.primary)
+                                if summary.hasToken {
+                                    Text("Sẵn sàng API (\(summary.tokenPrefix.isEmpty ? "App" : summary.tokenPrefix))")
+                                        .font(.caption2).foregroundStyle(.green)
+                                } else {
+                                    Text("Chưa có Token API")
+                                        .font(.caption2).foregroundStyle(.red)
+                                }
+                            }
+                            Spacer()
+                        }
+                    }
+                    .disabled(isPublishing)
+                }
+            }
+
+            // Nội dung
+            if !isPrivacyOnlyMode {
+                Section("2. Nội dung bài viết") {
+                    TextField("Nhập nội dung chia sẻ...", text: $postCaption, axis: .vertical)
+                        .lineLimit(3...7)
+                        .disabled(isPublishing)
+
+                    Picker("Quyền riêng tư", selection: $privacyOption) {
+                        ForEach(SmartPostPrivacy.allCases) { opt in
+                            Label(opt.rawValue, systemImage: opt.icon).tag(opt)
+                        }
+                    }
+                    .disabled(isPublishing)
+
+                    // Quản lý Media (Ảnh & Video)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Đính kèm Media:")
+                                .font(.caption.bold())
+                            Spacer()
+                            Button {
+                                showPhotoPicker = true
+                            } label: {
+                                Label("Thêm ảnh (\(selectedImages.count))", systemImage: "photo.stack")
+                                    .font(.caption.bold())
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .disabled(isPublishing)
+
+                            Button {
+                                showVideoPicker = true
+                            } label: {
+                                Label(selectedVideoData != nil ? "Đã chọn video" : "Chọn video", systemImage: "video.badge.plus")
+                                    .font(.caption.bold())
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .tint(selectedVideoData != nil ? .green : .blue)
+                            .disabled(isPublishing)
+                        }
+
+                        // Preview Video
+                        if selectedVideoData != nil {
+                            HStack {
+                                Image(systemName: "video.fill")
+                                    .font(.title2)
+                                    .foregroundStyle(.purple)
+                                VStack(alignment: .leading) {
+                                    Text("Đã đính kèm 1 Video MP4")
+                                        .font(.caption.bold())
+                                    Text("Dung lượng: ~\(Int((selectedVideoData?.count ?? 0) / 1024 / 1024)) MB")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button {
+                                    selectedVideoData = nil
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .foregroundStyle(.red)
+                                }
+                            }
+                            .padding(8)
+                            .background(Color.purple.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                        }
+
+                        // Preview Ảnh
+                        if !selectedImages.isEmpty {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 8) {
+                                    ForEach(Array(selectedImages.enumerated()), id: \.offset) { idx, img in
+                                        ZStack(alignment: .topTrailing) {
+                                            Image(uiImage: img)
+                                                .resizable()
+                                                .scaledToFill()
+                                                .frame(width: 60, height: 60)
+                                                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                                            Button {
+                                                selectedImages.remove(at: idx)
+                                            } label: {
+                                                Image(systemName: "xmark.circle.fill")
+                                                    .foregroundStyle(.red)
+                                                    .background(Circle().fill(.white))
+                                            }
+                                            .offset(x: 4, y: -4)
+                                            .disabled(isPublishing)
+                                        }
+                                    }
+                                }
+                                .padding(.top, 4)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                // Lên lịch đăng
+                Section("3. Hẹn giờ / Lên lịch đăng tự động") {
+                    Toggle("Bật lên lịch đăng", isOn: $isScheduling)
+                        .disabled(isPublishing)
+
+                    if isScheduling {
+                        DatePicker("Thời gian đăng", selection: $scheduledDate, in: Date()..., displayedComponents: [.date, .hourAndMinute])
+                            .datePickerStyle(.compact)
+                        Text("Hệ thống sẽ tự động đăng bài theo đúng giờ đã hẹn ngay cả khi không thao tác thủ công.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } else {
+                Section("2. Đổi quyền riêng tư bài viết") {
+                    TextField("Nhập Post ID cần đổi quyền...", text: $targetPostIdToUpdatePrivacy)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .disabled(isPublishing)
+
+                    Picker("Quyền mới", selection: $privacyOption) {
+                        ForEach(SmartPostPrivacy.allCases) { opt in
+                            Label(opt.rawValue, systemImage: opt.icon).tag(opt)
+                        }
+                    }
+                    .disabled(isPublishing)
+                }
+            }
+
+            // Nút thực hiện
+            Section {
+                if isPublishing {
+                    HStack(spacing: 12) {
+                        ProgressView()
+                        Text(progressMessage)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                Button {
+                    if isScheduling && !isPrivacyOnlyMode {
+                        schedulePost()
+                    } else {
+                        Task { await executeSmartPost() }
+                    }
+                } label: {
+                    HStack {
+                        Spacer()
+                        Label(
+                            isPrivacyOnlyMode ? "Cập nhật quyền riêng tư" :
+                                (isScheduling ? "Lưu vào Lịch Đăng Tự Động" : "Đăng ngay lên các tài khoản"),
+                            systemImage: isPrivacyOnlyMode ? "lock.rotation" :
+                                (isScheduling ? "calendar.badge.clock" : "paperplane.fill")
+                        )
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        Spacer()
+                    }
+                    .padding(.vertical, 6)
+                }
+                .listRowBackground(canSubmit ? (isScheduling ? Color.blue : Color.orange) : Color.gray.opacity(0.3))
+                .disabled(!canSubmit)
+            }
+
+            // Kết quả trực tiếp
+            if !results.isEmpty {
+                Section("Kết quả thực hiện (\(results.filter(\.isSuccess).count)/\(results.count) thành công)") {
+                    ForEach(results) { res in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Image(systemName: res.isSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                    .foregroundStyle(res.isSuccess ? Color.green : Color.red)
+                                Text(res.spaceName)
+                                    .font(.subheadline.bold())
+                                Spacer()
+                                if let pid = res.postId {
+                                    Text("ID: \(pid)")
+                                        .font(.caption2.monospaced())
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Text(res.message)
+                                .font(.caption)
+                                .foregroundStyle(res.isSuccess ? Color.secondary : Color.red)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Schedule Manager View
+
+    @ViewBuilder
+    private var scheduleManagerView: some View {
+        List {
+            Section {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Quản lý danh sách lịch đăng")
+                            .font(.headline)
+                        Text("Hệ thống tự động kiểm tra và đăng theo mốc thời gian.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Kiểm tra ngay") {
+                        Task { await scheduler.checkAndExecuteDueTasks() }
+                    }
+                    .font(.caption.bold())
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                }
+            }
+
+            if scheduler.tasks.isEmpty {
+                ContentUnavailableView(
+                    "Chưa có lịch đăng nào",
+                    systemImage: "calendar.badge.clock",
+                    description: Text("Hãy vào mục 'Soạn & Đăng bài' và bật 'Lên lịch đăng tự động' để tạo lịch.")
+                )
+            } else {
+                ForEach(scheduler.tasks) { task in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(task.title)
+                                .font(.subheadline.bold())
+                                .lineLimit(1)
+                            Spacer()
+                            Text(task.status.rawValue)
+                                .font(.caption2.bold())
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(task.status.badgeColor.opacity(0.15), in: Capsule())
+                                .foregroundStyle(task.status.badgeColor)
+                        }
+
+                        HStack(spacing: 8) {
+                            Label(task.scheduledDate.formatted(date: .numeric, time: .shortened), systemImage: "clock")
+                                .font(.caption)
+                                .foregroundStyle(.blue)
+                            Text("•")
+                            Text("\(task.targetSpaceIds.count) tài khoản")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if task.videoFileName != nil {
+                                Text("• Video MP4").font(.caption).foregroundStyle(.purple)
+                            } else if !task.imageFileNames.isEmpty {
+                                Text("• \(task.imageFileNames.count) ảnh").font(.caption).foregroundStyle(.orange)
+                            }
+                        }
+
+                        if !task.caption.isEmpty {
+                            Text(task.caption)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+
+                        if let log = task.executionLog {
+                            Text(log)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.gray)
+                                .padding(6)
+                                .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 6))
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    .swipeActions(edge: .trailing) {
+                        Button(role: .destructive) {
+                            scheduler.deleteTask(task)
+                        } label: {
+                            Label("Xóa", systemImage: "trash")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private var canSubmit: Bool {
         guard !isPublishing, !selectedSpaces.isEmpty else { return false }
         if isPrivacyOnlyMode {
             return !targetPostIdToUpdatePrivacy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         } else {
-            return !postCaption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !selectedImages.isEmpty
+            return !postCaption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !selectedImages.isEmpty || selectedVideoData != nil
         }
+    }
+
+    private func schedulePost() {
+        scheduler.addTask(
+            caption: postCaption,
+            spaceIds: selectedSpaces.map(\.id),
+            privacy: privacyOption,
+            scheduledDate: scheduledDate,
+            images: selectedImages,
+            videoData: selectedVideoData
+        )
+        alertMessage = "Đã lên lịch đăng thành công vào lúc \(scheduledDate.formatted(date: .numeric, time: .shortened))!"
+        selectedTab = 1 // Chuyển sang xem danh sách lịch
     }
 
     @MainActor
@@ -706,7 +1186,6 @@ struct SmartPostView: View {
             let uid = vault.uid.isEmpty ? "me" : vault.uid
 
             if isPrivacyOnlyMode {
-                // Update Privacy
                 do {
                     let ok = try await SmartPostAPIClient.updatePostPrivacy(
                         postId: targetPostIdToUpdatePrivacy.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -718,7 +1197,7 @@ struct SmartPostView: View {
                         isSuccess: ok,
                         postId: targetPostIdToUpdatePrivacy,
                         postUrl: nil,
-                        message: ok ? "Đã đổi sang \(privacyOption.rawValue)" : "Facebook từ chối cập nhật"
+                        message: ok ? "Đã đổi sang \(privacyOption.rawValue)" : "Facebook từ chối"
                     ))
                 } catch {
                     results.append(SmartPostResult(
@@ -729,8 +1208,34 @@ struct SmartPostView: View {
                         message: error.localizedDescription
                     ))
                 }
+            } else if let vdata = selectedVideoData {
+                // Đăng Video
+                do {
+                    progressMessage = "\(space.name): Đang đăng Video MP4 lên Facebook..."
+                    let videoId = try await SmartPostAPIClient.uploadVideo(
+                        videoData: vdata,
+                        caption: postCaption,
+                        accessToken: token,
+                        userId: uid
+                    )
+                    results.append(SmartPostResult(
+                        spaceName: space.name,
+                        isSuccess: true,
+                        postId: videoId,
+                        postUrl: "https://www.facebook.com/watch/?v=\(videoId)",
+                        message: "Đăng Video thành công!"
+                    ))
+                } catch {
+                    results.append(SmartPostResult(
+                        spaceName: space.name,
+                        isSuccess: false,
+                        postId: nil,
+                        postUrl: nil,
+                        message: error.localizedDescription
+                    ))
+                }
             } else {
-                // Create Post
+                // Đăng nhiều ảnh / status
                 do {
                     var uploadedPhotoIds: [String] = []
                     for (pIdx, uiImg) in selectedImages.enumerated() {
@@ -741,7 +1246,7 @@ struct SmartPostView: View {
                         }
                     }
 
-                    progressMessage = "\(space.name): Đang tạo bài viết trên Facebook..."
+                    progressMessage = "\(space.name): Đang xuất bản bài viết..."
                     let res = try await SmartPostAPIClient.createPost(
                         caption: postCaption,
                         photoIds: uploadedPhotoIds,
