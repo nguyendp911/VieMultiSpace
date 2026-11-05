@@ -20,6 +20,8 @@ struct SpaceDashboard: View {
     @State private var isLocked = false
     @State private var showLog = false
     @State private var editMode: EditMode = .inactive
+    @State private var navigateToAutoInteract = false
+    @State private var navigateToSync = false
     @State private var inlineRenameId: UUID? = nil
     @State private var inlineRenameText = ""
     @ObservedObject private var logger = AppLogger.shared
@@ -73,17 +75,19 @@ struct SpaceDashboard: View {
                         }
                     }
                     Section("Tự động hóa & Điều khiển nhóm") {
-                        HStack(spacing: 20) {
-                            NavigationLink(destination: AutoInteractView()) {
+                        HStack(spacing: 24) {
+                            Button {
+                                navigateToAutoInteract = true
+                            } label: {
                                 VStack(spacing: 6) {
                                     Group {
                                         if let img = AppVisualAssets.autoFeedImage {
                                             Image(uiImage: img)
                                                 .resizable()
                                                 .scaledToFit()
-                                                .frame(width: 72, height: 72)
+                                                .frame(width: 56, height: 56)
                                                 .clipShape(Circle())
-                                                .shadow(color: .black.opacity(0.2), radius: 4, x: 0, y: 2)
+                                                .shadow(color: .black.opacity(0.2), radius: 3, x: 0, y: 2)
                                         } else {
                                             ZStack {
                                                 Circle()
@@ -92,9 +96,9 @@ struct SpaceDashboard: View {
                                                         startPoint: .topLeading,
                                                         endPoint: .bottomTrailing
                                                     ))
-                                                    .frame(width: 72, height: 72)
+                                                    .frame(width: 56, height: 56)
                                                 Image(systemName: "sparkles")
-                                                    .font(.title)
+                                                    .font(.title2)
                                                     .foregroundStyle(.white)
                                             }
                                         }
@@ -112,16 +116,18 @@ struct SpaceDashboard: View {
                             }
                             .buttonStyle(.plain)
 
-                            NavigationLink(destination: MultiSpaceSyncView()) {
+                            Button {
+                                navigateToSync = true
+                            } label: {
                                 VStack(spacing: 6) {
                                     Group {
                                         if let img = AppVisualAssets.multiSpaceSyncImage {
                                             Image(uiImage: img)
                                                 .resizable()
                                                 .scaledToFit()
-                                                .frame(width: 72, height: 72)
+                                                .frame(width: 56, height: 56)
                                                 .clipShape(Circle())
-                                                .shadow(color: .black.opacity(0.2), radius: 4, x: 0, y: 2)
+                                                .shadow(color: .black.opacity(0.2), radius: 3, x: 0, y: 2)
                                         } else {
                                             ZStack {
                                                 Circle()
@@ -130,9 +136,9 @@ struct SpaceDashboard: View {
                                                         startPoint: .topLeading,
                                                         endPoint: .bottomTrailing
                                                     ))
-                                                    .frame(width: 72, height: 72)
+                                                    .frame(width: 56, height: 56)
                                                 Image(systemName: "square.stack.3d.up")
-                                                    .font(.title)
+                                                    .font(.title2)
                                                     .foregroundStyle(.white)
                                             }
                                         }
@@ -150,7 +156,7 @@ struct SpaceDashboard: View {
                             }
                             .buttonStyle(.plain)
                         }
-                        .padding(.vertical, 8)
+                        .padding(.vertical, 6)
                     }
                     Section("Không gian của tôi") {
                         ForEach(library.spaces) { space in
@@ -229,9 +235,7 @@ struct SpaceDashboard: View {
                                     .controlSize(.mini)
                                 }
 
-                                Image(systemName: "chevron.right")
-                                    .font(.caption)
-                                    .foregroundStyle(.tertiary)
+
                             }
                             .padding(.vertical, 3)
                             .contextMenu {
@@ -301,6 +305,12 @@ struct SpaceDashboard: View {
                         Image(systemName: "gearshape")
                     }
                 }
+            }
+            .navigationDestination(isPresented: $navigateToAutoInteract) {
+                AutoInteractView()
+            }
+            .navigationDestination(isPresented: $navigateToSync) {
+                MultiSpaceSyncView()
             }
             .sheet(isPresented: $showLog) {
                 LogConsoleView()
