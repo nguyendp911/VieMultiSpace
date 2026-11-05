@@ -73,18 +73,62 @@ struct SpaceDashboard: View {
                         }
                     }
                     Section("Tự động hóa & Điều khiển nhóm") {
-                        NavigationLink {
-                            AutoInteractView()
-                        } label: {
-                            Label("Auto News Feed — Reaction & Cmt AI", systemImage: "sparkles")
-                                .fontWeight(.semibold)
+                        HStack(spacing: 16) {
+                            NavigationLink(destination: AutoInteractView()) {
+                                VStack(spacing: 8) {
+                                    ZStack {
+                                        Circle()
+                                            .fill(LinearGradient(
+                                                colors: [Color.purple, Color.blue],
+                                                startPoint: .topLeading,
+                                                endPoint: .bottomTrailing
+                                            ))
+                                            .frame(width: 60, height: 60)
+                                        Image(systemName: "sparkles")
+                                            .font(.title2)
+                                            .foregroundStyle(.white)
+                                    }
+                                    Text("Auto Feed")
+                                        .font(.caption.bold())
+                                        .foregroundStyle(.primary)
+                                        .multilineTextAlignment(.center)
+                                    Text("Reaction & Cmt AI")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .multilineTextAlignment(.center)
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.plain)
+
+                            NavigationLink(destination: MultiSpaceSyncView()) {
+                                VStack(spacing: 8) {
+                                    ZStack {
+                                        Circle()
+                                            .fill(LinearGradient(
+                                                colors: [Color.orange, Color.pink],
+                                                startPoint: .topLeading,
+                                                endPoint: .bottomTrailing
+                                            ))
+                                            .frame(width: 60, height: 60)
+                                        Image(systemName: "square.stack.3d.up")
+                                            .font(.title2)
+                                            .foregroundStyle(.white)
+                                    }
+                                    Text("MultiSpace Sync")
+                                        .font(.caption.bold())
+                                        .foregroundStyle(.primary)
+                                        .multilineTextAlignment(.center)
+                                    Text("Tương tác bài chỉ định")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .multilineTextAlignment(.center)
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        NavigationLink {
-                            MultiSpaceSyncView()
-                        } label: {
-                            Label("MultiSpace Sync — Tương tác bài chỉ định", systemImage: "square.stack.3d.up")
-                                .fontWeight(.semibold)
-                        }
+                        .padding(.vertical, 6)
                     }
                     Section("Không gian của tôi") {
                         ForEach(library.spaces) { space in
