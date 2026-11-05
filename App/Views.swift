@@ -73,22 +73,33 @@ struct SpaceDashboard: View {
                         }
                     }
                     Section("Tự động hóa & Điều khiển nhóm") {
-                        HStack(spacing: 16) {
+                        HStack(spacing: 20) {
                             NavigationLink(destination: AutoInteractView()) {
-                                VStack(spacing: 8) {
-                                    ZStack {
-                                        Circle()
-                                            .fill(LinearGradient(
-                                                colors: [Color.purple, Color.blue],
-                                                startPoint: .topLeading,
-                                                endPoint: .bottomTrailing
-                                            ))
-                                            .frame(width: 60, height: 60)
-                                        Image(systemName: "sparkles")
-                                            .font(.title2)
-                                            .foregroundStyle(.white)
+                                VStack(spacing: 6) {
+                                    Group {
+                                        if let img = AppVisualAssets.autoFeedImage {
+                                            Image(uiImage: img)
+                                                .resizable()
+                                                .scaledToFit()
+                                                .frame(width: 72, height: 72)
+                                                .clipShape(Circle())
+                                                .shadow(color: .black.opacity(0.2), radius: 4, x: 0, y: 2)
+                                        } else {
+                                            ZStack {
+                                                Circle()
+                                                    .fill(LinearGradient(
+                                                        colors: [Color.purple, Color.blue],
+                                                        startPoint: .topLeading,
+                                                        endPoint: .bottomTrailing
+                                                    ))
+                                                    .frame(width: 72, height: 72)
+                                                Image(systemName: "sparkles")
+                                                    .font(.title)
+                                                    .foregroundStyle(.white)
+                                            }
+                                        }
                                     }
-                                    Text("Auto Feed")
+                                    Text("Auto Feeds")
                                         .font(.caption.bold())
                                         .foregroundStyle(.primary)
                                         .multilineTextAlignment(.center)
@@ -102,18 +113,29 @@ struct SpaceDashboard: View {
                             .buttonStyle(.plain)
 
                             NavigationLink(destination: MultiSpaceSyncView()) {
-                                VStack(spacing: 8) {
-                                    ZStack {
-                                        Circle()
-                                            .fill(LinearGradient(
-                                                colors: [Color.orange, Color.pink],
-                                                startPoint: .topLeading,
-                                                endPoint: .bottomTrailing
-                                            ))
-                                            .frame(width: 60, height: 60)
-                                        Image(systemName: "square.stack.3d.up")
-                                            .font(.title2)
-                                            .foregroundStyle(.white)
+                                VStack(spacing: 6) {
+                                    Group {
+                                        if let img = AppVisualAssets.multiSpaceSyncImage {
+                                            Image(uiImage: img)
+                                                .resizable()
+                                                .scaledToFit()
+                                                .frame(width: 72, height: 72)
+                                                .clipShape(Circle())
+                                                .shadow(color: .black.opacity(0.2), radius: 4, x: 0, y: 2)
+                                        } else {
+                                            ZStack {
+                                                Circle()
+                                                    .fill(LinearGradient(
+                                                        colors: [Color.orange, Color.pink],
+                                                        startPoint: .topLeading,
+                                                        endPoint: .bottomTrailing
+                                                    ))
+                                                    .frame(width: 72, height: 72)
+                                                Image(systemName: "square.stack.3d.up")
+                                                    .font(.title)
+                                                    .foregroundStyle(.white)
+                                            }
+                                        }
                                     }
                                     Text("MultiSpace Sync")
                                         .font(.caption.bold())
@@ -128,7 +150,7 @@ struct SpaceDashboard: View {
                             }
                             .buttonStyle(.plain)
                         }
-                        .padding(.vertical, 6)
+                        .padding(.vertical, 8)
                     }
                     Section("Không gian của tôi") {
                         ForEach(library.spaces) { space in
