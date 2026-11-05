@@ -723,12 +723,56 @@ struct SmartPostView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // Segment Switcher
-                Picker("Chế độ", selection: $selectedTab) {
-                    Text("📝 Soạn & Đăng bài").tag(0)
-                    Text("📅 Quản lý lịch (\(scheduler.tasks.count))").tag(1)
+                // Custom Modern Tab Switcher
+                HStack(spacing: 8) {
+                    Button {
+                        withAnimation(.spring(response: 0.3)) { selectedTab = 0 }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "square.and.pencil")
+                                .font(.subheadline.bold())
+                            Text("Soạn & Đăng bài")
+                                .font(.subheadline.bold())
+                        }
+                        .foregroundStyle(selectedTab == 0 ? Color.white : Color.primary)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(selectedTab == 0 ? Color.blue : Color(uiColor: .tertiarySystemGroupedBackground))
+                                .shadow(color: selectedTab == 0 ? Color.blue.opacity(0.3) : Color.clear, radius: 4, x: 0, y: 2)
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        withAnimation(.spring(response: 0.3)) { selectedTab = 1 }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "calendar.badge.clock")
+                                .font(.subheadline.bold())
+                            Text("Quản lý lịch")
+                                .font(.subheadline.bold())
+                            if !scheduler.tasks.isEmpty {
+                                Text("\(scheduler.tasks.count)")
+                                    .font(.caption2.bold())
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(selectedTab == 1 ? Color.white.opacity(0.3) : Color.blue, in: Capsule())
+                                    .foregroundStyle(.white)
+                            }
+                        }
+                        .foregroundStyle(selectedTab == 1 ? Color.white : Color.primary)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(selectedTab == 1 ? Color.blue : Color(uiColor: .tertiarySystemGroupedBackground))
+                                .shadow(color: selectedTab == 1 ? Color.blue.opacity(0.3) : Color.clear, radius: 4, x: 0, y: 2)
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
-                .pickerStyle(.segmented)
                 .padding(.horizontal)
                 .padding(.vertical, 8)
 
@@ -809,14 +853,96 @@ struct SmartPostView: View {
                 .padding(.vertical, 2)
             }
 
-            // Chế độ thao tác
+            // Chế độ thao tác với Icon & Card chuyên nghiệp
             Section("Loại thao tác") {
-                Picker("Hành động", selection: $isPrivacyOnlyMode) {
-                    Text("📝 Đăng bài mới").tag(false)
-                    Text("🔒 Đổi quyền riêng tư").tag(true)
+                HStack(spacing: 12) {
+                    Button {
+                        withAnimation(.spring(response: 0.3)) { isPrivacyOnlyMode = false }
+                    } label: {
+                        HStack(spacing: 10) {
+                            ZStack {
+                                Circle()
+                                    .fill(LinearGradient(
+                                        colors: isPrivacyOnlyMode ? [Color.gray.opacity(0.3), Color.gray.opacity(0.2)] : [Color.orange, Color.red],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ))
+                                    .frame(width: 38, height: 38)
+                                Image(systemName: "paperplane.fill")
+                                    .font(.subheadline.bold())
+                                    .foregroundStyle(.white)
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Đăng bài mới")
+                                    .font(.subheadline.bold())
+                                    .foregroundStyle(isPrivacyOnlyMode ? Color.primary : Color.orange)
+                                Text("Status, ảnh & video")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 0)
+                            if !isPrivacyOnlyMode {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                        .padding(10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(!isPrivacyOnlyMode ? Color.orange.opacity(0.12) : Color(uiColor: .secondarySystemGroupedBackground))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .stroke(!isPrivacyOnlyMode ? Color.orange : Color.gray.opacity(0.2), lineWidth: 1.2)
+                                )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isPublishing)
+
+                    Button {
+                        withAnimation(.spring(response: 0.3)) { isPrivacyOnlyMode = true }
+                    } label: {
+                        HStack(spacing: 10) {
+                            ZStack {
+                                Circle()
+                                    .fill(LinearGradient(
+                                        colors: !isPrivacyOnlyMode ? [Color.gray.opacity(0.3), Color.gray.opacity(0.2)] : [Color.indigo, Color.purple],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ))
+                                    .frame(width: 38, height: 38)
+                                Image(systemName: "lock.shield.fill")
+                                    .font(.subheadline.bold())
+                                    .foregroundStyle(.white)
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Đổi quyền")
+                                    .font(.subheadline.bold())
+                                    .foregroundStyle(!isPrivacyOnlyMode ? Color.primary : Color.purple)
+                                Text("Bài viết có sẵn")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 0)
+                            if isPrivacyOnlyMode {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.purple)
+                            }
+                        }
+                        .padding(10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(isPrivacyOnlyMode ? Color.purple.opacity(0.12) : Color(uiColor: .secondarySystemGroupedBackground))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .stroke(isPrivacyOnlyMode ? Color.purple : Color.gray.opacity(0.2), lineWidth: 1.2)
+                                )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isPublishing)
                 }
-                .pickerStyle(.segmented)
-                .disabled(isPublishing)
+                .padding(.vertical, 2)
             }
 
             // Chọn tài khoản
