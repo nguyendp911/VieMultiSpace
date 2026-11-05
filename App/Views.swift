@@ -22,6 +22,7 @@ struct SpaceDashboard: View {
     @State private var editMode: EditMode = .inactive
     @State private var navigateToAutoInteract = false
     @State private var navigateToSync = false
+    @State private var navigateToSmartPost = false
     @State private var inlineRenameId: UUID? = nil
     @State private var inlineRenameText = ""
     @ObservedObject private var logger = AppLogger.shared
@@ -74,18 +75,58 @@ struct SpaceDashboard: View {
                             Label("Trung tâm tài khoản & Kho Token", systemImage: "person.2.crop.square.stack")
                         }
                     }
-                    Section("Tự động hóa & Điều khiển nhóm") {
-                        HStack(spacing: 24) {
+                    Section("Tự động hóa & Quản lý bài viết") {
+                        HStack(spacing: 12) {
+                            Button {
+                                navigateToSmartPost = true
+                            } label: {
+                                VStack(spacing: 5) {
+                                    Group {
+                                        if let img = AppVisualAssets.smartPostImage {
+                                            Image(uiImage: img)
+                                                .resizable()
+                                                .scaledToFit()
+                                                .frame(width: 54, height: 54)
+                                                .clipShape(Circle())
+                                                .shadow(color: .orange.opacity(0.3), radius: 3, x: 0, y: 2)
+                                        } else {
+                                            ZStack {
+                                                Circle()
+                                                    .fill(LinearGradient(
+                                                        colors: [Color.yellow, Color.orange],
+                                                        startPoint: .topLeading,
+                                                        endPoint: .bottomTrailing
+                                                    ))
+                                                    .frame(width: 54, height: 54)
+                                                Image(systemName: "paperplane.fill")
+                                                    .font(.title2)
+                                                    .foregroundStyle(.white)
+                                            }
+                                        }
+                                    }
+                                    Text("Smart Post")
+                                        .font(.caption.bold())
+                                        .foregroundStyle(.primary)
+                                        .multilineTextAlignment(.center)
+                                    Text("Đăng & Quản lý")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .multilineTextAlignment(.center)
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.plain)
+
                             Button {
                                 navigateToAutoInteract = true
                             } label: {
-                                VStack(spacing: 6) {
+                                VStack(spacing: 5) {
                                     Group {
                                         if let img = AppVisualAssets.autoFeedImage {
                                             Image(uiImage: img)
                                                 .resizable()
                                                 .scaledToFit()
-                                                .frame(width: 56, height: 56)
+                                                .frame(width: 54, height: 54)
                                                 .clipShape(Circle())
                                                 .shadow(color: .black.opacity(0.2), radius: 3, x: 0, y: 2)
                                         } else {
@@ -96,7 +137,7 @@ struct SpaceDashboard: View {
                                                         startPoint: .topLeading,
                                                         endPoint: .bottomTrailing
                                                     ))
-                                                    .frame(width: 56, height: 56)
+                                                    .frame(width: 54, height: 54)
                                                 Image(systemName: "sparkles")
                                                     .font(.title2)
                                                     .foregroundStyle(.white)
@@ -107,7 +148,7 @@ struct SpaceDashboard: View {
                                         .font(.caption.bold())
                                         .foregroundStyle(.primary)
                                         .multilineTextAlignment(.center)
-                                    Text("Reaction & Cmt AI")
+                                    Text("Reaction & AI")
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
                                         .multilineTextAlignment(.center)
@@ -119,13 +160,13 @@ struct SpaceDashboard: View {
                             Button {
                                 navigateToSync = true
                             } label: {
-                                VStack(spacing: 6) {
+                                VStack(spacing: 5) {
                                     Group {
                                         if let img = AppVisualAssets.multiSpaceSyncImage {
                                             Image(uiImage: img)
                                                 .resizable()
                                                 .scaledToFit()
-                                                .frame(width: 56, height: 56)
+                                                .frame(width: 54, height: 54)
                                                 .clipShape(Circle())
                                                 .shadow(color: .black.opacity(0.2), radius: 3, x: 0, y: 2)
                                         } else {
@@ -136,18 +177,18 @@ struct SpaceDashboard: View {
                                                         startPoint: .topLeading,
                                                         endPoint: .bottomTrailing
                                                     ))
-                                                    .frame(width: 56, height: 56)
+                                                    .frame(width: 54, height: 54)
                                                 Image(systemName: "square.stack.3d.up")
                                                     .font(.title2)
                                                     .foregroundStyle(.white)
                                             }
                                         }
                                     }
-                                    Text("MultiSpace Sync")
+                                    Text("MultiSpace")
                                         .font(.caption.bold())
                                         .foregroundStyle(.primary)
                                         .multilineTextAlignment(.center)
-                                    Text("Tương tác bài chỉ định")
+                                    Text("Sync Tương tác")
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
                                         .multilineTextAlignment(.center)
@@ -311,6 +352,9 @@ struct SpaceDashboard: View {
             }
             .navigationDestination(isPresented: $navigateToSync) {
                 MultiSpaceSyncView()
+            }
+            .navigationDestination(isPresented: $navigateToSmartPost) {
+                SmartPostView()
             }
             .sheet(isPresented: $showLog) {
                 LogConsoleView()
