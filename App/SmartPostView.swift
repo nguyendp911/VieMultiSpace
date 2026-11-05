@@ -873,43 +873,108 @@ struct SmartPostView: View {
                     .disabled(isPublishing)
 
                     // Quản lý Media (Ảnh & Video)
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Đính kèm Media:")
-                                .font(.caption.bold())
-                            Spacer()
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Đính kèm hình ảnh hoặc Video:")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+
+                        HStack(spacing: 12) {
+                            // Nút Thêm ảnh thiết kế Card
                             Button {
                                 showPhotoPicker = true
                             } label: {
-                                Label("Thêm ảnh (\(selectedImages.count))", systemImage: "photo.stack")
-                                    .font(.caption.bold())
+                                HStack(spacing: 8) {
+                                    ZStack {
+                                        Circle()
+                                            .fill(LinearGradient(
+                                                colors: [Color.green, Color.teal],
+                                                startPoint: .topLeading,
+                                                endPoint: .bottomTrailing
+                                            ))
+                                            .frame(width: 36, height: 36)
+                                        Image(systemName: "photo.on.rectangle.angled")
+                                            .font(.subheadline.bold())
+                                            .foregroundStyle(.white)
+                                    }
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Thêm ảnh")
+                                            .font(.subheadline.bold())
+                                            .foregroundStyle(.primary)
+                                        Text(selectedImages.isEmpty ? "Tối đa 15 ảnh" : "\(selectedImages.count) ảnh đã chọn")
+                                            .font(.caption2)
+                                            .foregroundStyle(selectedImages.isEmpty ? Color.secondary : Color.green)
+                                    }
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(10)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .fill(selectedImages.isEmpty ? Color(uiColor: .secondarySystemGroupedBackground) : Color.green.opacity(0.12))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 12)
+                                                .stroke(selectedImages.isEmpty ? Color.gray.opacity(0.2) : Color.green, lineWidth: 1.2)
+                                        )
+                                )
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.mini)
+                            .buttonStyle(.plain)
                             .disabled(isPublishing)
 
+                            // Nút Chọn video thiết kế Card
                             Button {
                                 showVideoPicker = true
                             } label: {
-                                Label(selectedVideoData != nil ? "Đã chọn video" : "Chọn video", systemImage: "video.badge.plus")
-                                    .font(.caption.bold())
+                                HStack(spacing: 8) {
+                                    ZStack {
+                                        Circle()
+                                            .fill(LinearGradient(
+                                                colors: [Color.pink, Color.purple],
+                                                startPoint: .topLeading,
+                                                endPoint: .bottomTrailing
+                                            ))
+                                            .frame(width: 36, height: 36)
+                                        Image(systemName: "video.fill")
+                                            .font(.subheadline.bold())
+                                            .foregroundStyle(.white)
+                                    }
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Chọn video")
+                                            .font(.subheadline.bold())
+                                            .foregroundStyle(.primary)
+                                        Text(selectedVideoData != nil ? "Đã nạp MP4" : "Video MP4")
+                                            .font(.caption2)
+                                            .foregroundStyle(selectedVideoData != nil ? Color.purple : Color.secondary)
+                                    }
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(10)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .fill(selectedVideoData == nil ? Color(uiColor: .secondarySystemGroupedBackground) : Color.purple.opacity(0.12))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 12)
+                                                .stroke(selectedVideoData == nil ? Color.gray.opacity(0.2) : Color.purple, lineWidth: 1.2)
+                                        )
+                                )
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.mini)
-                            .tint(selectedVideoData != nil ? .green : .blue)
+                            .buttonStyle(.plain)
                             .disabled(isPublishing)
                         }
 
-                        // Preview Video
+                        // Preview Video đã chọn
                         if selectedVideoData != nil {
-                            HStack {
-                                Image(systemName: "video.fill")
-                                    .font(.title2)
-                                    .foregroundStyle(.purple)
-                                VStack(alignment: .leading) {
-                                    Text("Đã đính kèm 1 Video MP4")
-                                        .font(.caption.bold())
-                                    Text("Dung lượng: ~\(Int((selectedVideoData?.count ?? 0) / 1024 / 1024)) MB")
+                            HStack(spacing: 12) {
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .fill(LinearGradient(colors: [Color.purple.opacity(0.8), Color.pink.opacity(0.8)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                        .frame(width: 44, height: 44)
+                                    Image(systemName: "play.circle.fill")
+                                        .font(.title3)
+                                        .foregroundStyle(.white)
+                                }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Video bài đăng MP4")
+                                        .font(.subheadline.bold())
+                                    Text("Dung lượng nén: ~\(max(1, Int((selectedVideoData?.count ?? 0) / 1024 / 1024))) MB")
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
                                 }
@@ -917,39 +982,47 @@ struct SmartPostView: View {
                                 Button {
                                     selectedVideoData = nil
                                 } label: {
-                                    Image(systemName: "trash")
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.title3)
                                         .foregroundStyle(.red)
                                 }
                             }
-                            .padding(8)
-                            .background(Color.purple.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                            .padding(10)
+                            .background(Color.purple.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
                         }
 
-                        // Preview Ảnh
+                        // Preview Ảnh đã chọn
                         if !selectedImages.isEmpty {
                             ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 8) {
+                                HStack(spacing: 10) {
                                     ForEach(Array(selectedImages.enumerated()), id: \.offset) { idx, img in
                                         ZStack(alignment: .topTrailing) {
                                             Image(uiImage: img)
                                                 .resizable()
                                                 .scaledToFill()
-                                                .frame(width: 60, height: 60)
-                                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                                .frame(width: 68, height: 68)
+                                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 10)
+                                                        .stroke(Color.white.opacity(0.8), lineWidth: 1)
+                                                )
+                                                .shadow(color: .black.opacity(0.15), radius: 3, x: 0, y: 1)
 
                                             Button {
                                                 selectedImages.remove(at: idx)
                                             } label: {
                                                 Image(systemName: "xmark.circle.fill")
+                                                    .font(.system(size: 20))
                                                     .foregroundStyle(.red)
-                                                    .background(Circle().fill(.white))
+                                                    .background(Circle().fill(.white).padding(2))
                                             }
-                                            .offset(x: 4, y: -4)
+                                            .offset(x: 6, y: -6)
                                             .disabled(isPublishing)
                                         }
                                     }
                                 }
-                                .padding(.top, 4)
+                                .padding(.top, 6)
+                                .padding(.trailing, 8)
                             }
                         }
                     }

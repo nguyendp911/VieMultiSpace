@@ -76,42 +76,43 @@ struct SpaceDashboard: View {
                         }
                     }
                     Section("Tự động hóa & Quản lý bài viết") {
-                        HStack(spacing: 12) {
+                        HStack(spacing: 14) {
                             Button {
                                 navigateToSmartPost = true
                             } label: {
-                                VStack(spacing: 5) {
-                                    Group {
-                                        if let img = AppVisualAssets.smartPostImage {
-                                            Image(uiImage: img)
-                                                .resizable()
-                                                .scaledToFit()
-                                                .frame(width: 54, height: 54)
-                                                .clipShape(Circle())
-                                                .shadow(color: .orange.opacity(0.3), radius: 3, x: 0, y: 2)
-                                        } else {
-                                            ZStack {
-                                                Circle()
-                                                    .fill(LinearGradient(
-                                                        colors: [Color.yellow, Color.orange],
-                                                        startPoint: .topLeading,
-                                                        endPoint: .bottomTrailing
-                                                    ))
-                                                    .frame(width: 54, height: 54)
-                                                Image(systemName: "paperplane.fill")
-                                                    .font(.title2)
-                                                    .foregroundStyle(.white)
-                                            }
+                                VStack(spacing: 7) {
+                                    if let img = AppVisualAssets.smartPostImage {
+                                        Image(uiImage: img)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(width: 62, height: 62)
+                                            .clipShape(Circle())
+                                            .shadow(color: Color.orange.opacity(0.4), radius: 4, x: 0, y: 2)
+                                    } else {
+                                        ZStack {
+                                            Circle()
+                                                .fill(LinearGradient(
+                                                    colors: [Color(red: 1.0, green: 0.65, blue: 0.1), Color(red: 0.95, green: 0.35, blue: 0.1)],
+                                                    startPoint: .topLeading,
+                                                    endPoint: .bottomTrailing
+                                                ))
+                                                .frame(width: 62, height: 62)
+                                            Image(systemName: "paperplane.fill")
+                                                .font(.title3.bold())
+                                                .foregroundStyle(.white)
                                         }
+                                        .shadow(color: Color.orange.opacity(0.35), radius: 4, x: 0, y: 2)
                                     }
-                                    Text("Smart Post")
-                                        .font(.caption.bold())
-                                        .foregroundStyle(.primary)
-                                        .multilineTextAlignment(.center)
-                                    Text("Đăng & Quản lý")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .multilineTextAlignment(.center)
+                                    VStack(spacing: 2) {
+                                        Text("Smart Post")
+                                            .font(.caption.bold())
+                                            .foregroundStyle(.primary)
+                                            .multilineTextAlignment(.center)
+                                        Text("Đăng & Quản lý")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .multilineTextAlignment(.center)
+                                    }
                                 }
                                 .frame(maxWidth: .infinity)
                             }
@@ -120,38 +121,39 @@ struct SpaceDashboard: View {
                             Button {
                                 navigateToAutoInteract = true
                             } label: {
-                                VStack(spacing: 5) {
-                                    Group {
-                                        if let img = AppVisualAssets.autoFeedImage {
-                                            Image(uiImage: img)
-                                                .resizable()
-                                                .scaledToFit()
-                                                .frame(width: 54, height: 54)
-                                                .clipShape(Circle())
-                                                .shadow(color: .black.opacity(0.2), radius: 3, x: 0, y: 2)
-                                        } else {
-                                            ZStack {
-                                                Circle()
-                                                    .fill(LinearGradient(
-                                                        colors: [Color.purple, Color.blue],
-                                                        startPoint: .topLeading,
-                                                        endPoint: .bottomTrailing
-                                                    ))
-                                                    .frame(width: 54, height: 54)
-                                                Image(systemName: "sparkles")
-                                                    .font(.title2)
-                                                    .foregroundStyle(.white)
-                                            }
+                                VStack(spacing: 7) {
+                                    if let img = AppVisualAssets.autoFeedImage {
+                                        Image(uiImage: img)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(width: 62, height: 62)
+                                            .clipShape(Circle())
+                                            .shadow(color: Color.purple.opacity(0.35), radius: 4, x: 0, y: 2)
+                                    } else {
+                                        ZStack {
+                                            Circle()
+                                                .fill(LinearGradient(
+                                                    colors: [Color(red: 0.65, green: 0.25, blue: 0.9), Color(red: 0.25, green: 0.5, blue: 0.95)],
+                                                    startPoint: .topLeading,
+                                                    endPoint: .bottomTrailing
+                                                ))
+                                                .frame(width: 62, height: 62)
+                                            Image(systemName: "sparkles")
+                                                .font(.title3.bold())
+                                                .foregroundStyle(.white)
                                         }
+                                        .shadow(color: Color.purple.opacity(0.35), radius: 4, x: 0, y: 2)
                                     }
-                                    Text("Auto Feeds")
-                                        .font(.caption.bold())
-                                        .foregroundStyle(.primary)
-                                        .multilineTextAlignment(.center)
-                                    Text("Reaction & AI")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .multilineTextAlignment(.center)
+                                    VStack(spacing: 2) {
+                                        Text("Auto Feeds")
+                                            .font(.caption.bold())
+                                            .foregroundStyle(.primary)
+                                            .multilineTextAlignment(.center)
+                                        Text("Reaction & AI")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .multilineTextAlignment(.center)
+                                    }
                                 }
                                 .frame(maxWidth: .infinity)
                             }
@@ -160,44 +162,45 @@ struct SpaceDashboard: View {
                             Button {
                                 navigateToSync = true
                             } label: {
-                                VStack(spacing: 5) {
-                                    Group {
-                                        if let img = AppVisualAssets.multiSpaceSyncImage {
-                                            Image(uiImage: img)
-                                                .resizable()
-                                                .scaledToFit()
-                                                .frame(width: 54, height: 54)
-                                                .clipShape(Circle())
-                                                .shadow(color: .black.opacity(0.2), radius: 3, x: 0, y: 2)
-                                        } else {
-                                            ZStack {
-                                                Circle()
-                                                    .fill(LinearGradient(
-                                                        colors: [Color.orange, Color.pink],
-                                                        startPoint: .topLeading,
-                                                        endPoint: .bottomTrailing
-                                                    ))
-                                                    .frame(width: 54, height: 54)
-                                                Image(systemName: "square.stack.3d.up")
-                                                    .font(.title2)
-                                                    .foregroundStyle(.white)
-                                            }
+                                VStack(spacing: 7) {
+                                    if let img = AppVisualAssets.multiSpaceSyncImage {
+                                        Image(uiImage: img)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(width: 62, height: 62)
+                                            .clipShape(Circle())
+                                            .shadow(color: Color.blue.opacity(0.35), radius: 4, x: 0, y: 2)
+                                    } else {
+                                        ZStack {
+                                            Circle()
+                                                .fill(LinearGradient(
+                                                    colors: [Color(red: 0.15, green: 0.6, blue: 0.95), Color(red: 0.85, green: 0.2, blue: 0.6)],
+                                                    startPoint: .topLeading,
+                                                    endPoint: .bottomTrailing
+                                                ))
+                                                .frame(width: 62, height: 62)
+                                            Image(systemName: "square.stack.3d.up")
+                                                .font(.title3.bold())
+                                                .foregroundStyle(.white)
                                         }
+                                        .shadow(color: Color.blue.opacity(0.35), radius: 4, x: 0, y: 2)
                                     }
-                                    Text("MultiSpace")
-                                        .font(.caption.bold())
-                                        .foregroundStyle(.primary)
-                                        .multilineTextAlignment(.center)
-                                    Text("Sync Tương tác")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .multilineTextAlignment(.center)
+                                    VStack(spacing: 2) {
+                                        Text("MultiSpace")
+                                            .font(.caption.bold())
+                                            .foregroundStyle(.primary)
+                                            .multilineTextAlignment(.center)
+                                        Text("Sync Tương tác")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .multilineTextAlignment(.center)
+                                    }
                                 }
                                 .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.plain)
                         }
-                        .padding(.vertical, 6)
+                        .padding(.vertical, 8)
                     }
                     Section("Không gian của tôi") {
                         ForEach(library.spaces) { space in
