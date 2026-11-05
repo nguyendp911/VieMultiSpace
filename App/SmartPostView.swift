@@ -867,26 +867,22 @@ struct SmartPostView: View {
                                         startPoint: .topLeading,
                                         endPoint: .bottomTrailing
                                     ))
-                                    .frame(width: 38, height: 38)
+                                    .frame(width: 36, height: 36)
                                 Image(systemName: "paperplane.fill")
                                     .font(.subheadline.bold())
                                     .foregroundStyle(.white)
                             }
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Đăng")
-                                    .font(.subheadline.bold())
-                                    .foregroundStyle(isPrivacyOnlyMode ? Color.primary : Color.orange)
-                                Text("Status, ảnh & video")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
+                            Text("Đăng")
+                                .font(.subheadline.bold())
+                                .foregroundStyle(isPrivacyOnlyMode ? Color.primary : Color.orange)
                             Spacer(minLength: 0)
                             if !isPrivacyOnlyMode {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundStyle(.orange)
                             }
                         }
-                        .padding(10)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
                         .background(
                             RoundedRectangle(cornerRadius: 12)
                                 .fill(!isPrivacyOnlyMode ? Color.orange.opacity(0.12) : Color(uiColor: .secondarySystemGroupedBackground))
@@ -910,26 +906,22 @@ struct SmartPostView: View {
                                         startPoint: .topLeading,
                                         endPoint: .bottomTrailing
                                     ))
-                                    .frame(width: 38, height: 38)
+                                    .frame(width: 36, height: 36)
                                 Image(systemName: "lock.shield.fill")
                                     .font(.subheadline.bold())
                                     .foregroundStyle(.white)
                             }
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Đổi quyền")
-                                    .font(.subheadline.bold())
-                                    .foregroundStyle(!isPrivacyOnlyMode ? Color.primary : Color.purple)
-                                Text("Bài viết có sẵn")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
+                            Text("Đổi quyền")
+                                .font(.subheadline.bold())
+                                .foregroundStyle(!isPrivacyOnlyMode ? Color.primary : Color.purple)
                             Spacer(minLength: 0)
                             if isPrivacyOnlyMode {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundStyle(.purple)
                             }
                         }
-                        .padding(10)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
                         .background(
                             RoundedRectangle(cornerRadius: 12)
                                 .fill(isPrivacyOnlyMode ? Color.purple.opacity(0.12) : Color(uiColor: .secondarySystemGroupedBackground))
