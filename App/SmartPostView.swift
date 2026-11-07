@@ -1457,7 +1457,7 @@ struct SmartPostView: View {
                         title: "Theo dõi & AI",
                         icon: "chart.bar.doc.horizontal.fill",
                         badgeCount: tracker.posts.count,
-                        activeColors: [.purple, .pink]
+                        activeColors: [Color(red: 143/255, green: 188/255, blue: 143/255), Color(red: 118/255, green: 163/255, blue: 118/255)]
                     )
                 }
                 .padding(.horizontal, 12)
@@ -1997,7 +1997,7 @@ struct SmartPostView: View {
                             }
                             .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(GradientPillButtonStyle(colors: [.purple, .indigo], isCompact: true))
+                        .buttonStyle(GradientPillButtonStyle(colors: [Color(red: 143/255, green: 188/255, blue: 143/255), Color(red: 118/255, green: 163/255, blue: 118/255)], isCompact: true))
                     }
 
                     ForEach(results) { res in

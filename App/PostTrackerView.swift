@@ -1577,10 +1577,21 @@ enum PostTrackingAPIClient {
     }
 }
 
+// MARK: - Color Palette for Tracker & AI (#8FBC8F & Trắng làm chủ đạo)
+
+extension Color {
+    /// Màu chủ đạo: #8FBC8F (Dark Sea Green)
+    static let trackerPrimary = Color(red: 143/255, green: 188/255, blue: 143/255)
+    /// Đậm hơn một chút để tương phản cao trên nền trắng và chữ: #75A075
+    static let trackerPrimaryDark = Color(red: 117/255, green: 160/255, blue: 117/255)
+    /// Nền mềm dịu mắt: #8FBC8F với opacity 14%
+    static let trackerSoft = Color(red: 143/255, green: 188/255, blue: 143/255).opacity(0.14)
+}
+
 // MARK: - Decorated Button Styles & Reusable UI Components
 
 struct GradientPillButtonStyle: ButtonStyle {
-    var colors: [Color]
+    var colors: [Color] = [.trackerPrimary, .trackerPrimaryDark]
     var isCompact: Bool = false
 
     func makeBody(configuration: Configuration) -> some View {
@@ -1599,16 +1610,16 @@ struct GradientPillButtonStyle: ButtonStyle {
             )
             .overlay(
                 Capsule()
-                    .stroke(Color.white.opacity(0.25), lineWidth: 0.8)
+                    .stroke(Color.white.opacity(0.35), lineWidth: 0.8)
             )
-            .shadow(color: (colors.first ?? .blue).opacity(configuration.isPressed ? 0.12 : 0.28), radius: 4, x: 0, y: 2)
+            .shadow(color: Color.trackerPrimaryDark.opacity(configuration.isPressed ? 0.12 : 0.28), radius: 4, x: 0, y: 2)
             .scaleEffect(configuration.isPressed ? 0.96 : 1.0)
             .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
     }
 }
 
 struct SoftTintedButtonStyle: ButtonStyle {
-    var tint: Color
+    var tint: Color = .trackerPrimaryDark
     var isCompact: Bool = true
 
     func makeBody(configuration: Configuration) -> some View {
@@ -1618,12 +1629,12 @@ struct SoftTintedButtonStyle: ButtonStyle {
             .padding(.horizontal, isCompact ? 10 : 14)
             .padding(.vertical, isCompact ? 6 : 8)
             .background(
-                tint.opacity(configuration.isPressed ? 0.22 : 0.12),
+                Color.trackerSoft.opacity(configuration.isPressed ? 1.6 : 1.0),
                 in: RoundedRectangle(cornerRadius: isCompact ? 9 : 11)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: isCompact ? 9 : 11)
-                    .stroke(tint.opacity(0.35), lineWidth: 1)
+                    .stroke(Color.trackerPrimary.opacity(0.35), lineWidth: 1)
             )
             .scaleEffect(configuration.isPressed ? 0.96 : 1.0)
             .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
@@ -1704,7 +1715,7 @@ struct PostTrackerView: View {
                             ProgressView().controlSize(.small)
                         } else {
                             Image(systemName: "sparkles")
-                                .foregroundStyle(.purple)
+                                .foregroundStyle(Color.trackerPrimaryDark)
                         }
                         Text(tracker.statusBanner)
                             .font(.caption.bold())
@@ -1720,10 +1731,10 @@ struct PostTrackerView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(Color.purple.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+                    .background(Color.trackerSoft, in: RoundedRectangle(cornerRadius: 10))
                     .overlay(
                         RoundedRectangle(cornerRadius: 10)
-                            .stroke(Color.purple.opacity(0.25), lineWidth: 1)
+                            .stroke(Color.trackerPrimary.opacity(0.3), lineWidth: 1)
                     )
                 }
 
@@ -1775,36 +1786,32 @@ struct PostTrackerView: View {
             statBadge(
                 title: "Bài đăng",
                 value: "\(filteredPosts.count)",
-                icon: "doc.richtext.fill",
-                colors: [.blue, .cyan]
+                icon: "doc.richtext.fill"
             )
             statBadge(
                 title: "Cảm xúc",
                 value: "\(totalReactions)",
-                icon: "heart.fill",
-                colors: [.pink, .red]
+                icon: "heart.fill"
             )
             statBadge(
                 title: "Bình luận",
                 value: "\(totalComments)",
-                icon: "bubble.left.and.bubble.right.fill",
-                colors: [.orange, .yellow]
+                icon: "bubble.left.and.bubble.right.fill"
             )
             statBadge(
                 title: "Chia sẻ",
                 value: "\(totalShares)",
-                icon: "arrowshape.turn.up.right.fill",
-                colors: [.indigo, .purple]
+                icon: "arrowshape.turn.up.right.fill"
             )
         }
     }
 
-    private func statBadge(title: String, value: String, icon: String, colors: [Color]) -> some View {
+    private func statBadge(title: String, value: String, icon: String) -> some View {
         VStack(spacing: 5) {
             HStack(spacing: 4) {
                 ZStack {
                     Circle()
-                        .fill(LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .fill(LinearGradient(colors: [.trackerPrimary, .trackerPrimaryDark], startPoint: .topLeading, endPoint: .bottomTrailing))
                         .frame(width: 22, height: 22)
                     Image(systemName: icon)
                         .font(.system(size: 10, weight: .bold))
@@ -1826,7 +1833,7 @@ struct PostTrackerView: View {
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                .stroke(Color.trackerPrimary.opacity(0.18), lineWidth: 1)
         )
     }
 
@@ -1845,7 +1852,7 @@ struct PostTrackerView: View {
                     }
                     .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(GradientPillButtonStyle(colors: [.blue, .indigo], isCompact: true))
+                .buttonStyle(GradientPillButtonStyle(colors: [.trackerPrimary, .trackerPrimaryDark], isCompact: true))
 
                 // Nút Quét bài đã đăng của tài khoản
                 Button {
@@ -1862,7 +1869,7 @@ struct PostTrackerView: View {
                     }
                     .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(GradientPillButtonStyle(colors: [.teal, .green], isCompact: true))
+                .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
                 .disabled(tracker.isSyncingAll || facebookSpaces.isEmpty)
             }
 
@@ -1879,7 +1886,7 @@ struct PostTrackerView: View {
                     }
                     .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(SoftTintedButtonStyle(tint: .blue, isCompact: true))
+                .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
                 .disabled(tracker.isSyncingAll || tracker.posts.isEmpty)
 
                 // Nút Cấu hình Gemini AI
@@ -1892,11 +1899,15 @@ struct PostTrackerView: View {
                     }
                     .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(SoftTintedButtonStyle(tint: .purple, isCompact: true))
+                .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
             }
         }
         .padding(10)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(Color.trackerPrimary.opacity(0.18), lineWidth: 1)
+        )
     }
 
     // MARK: - 3. AI Batch Control Bar (Tick chọn AI trả lời)
@@ -1911,7 +1922,7 @@ struct PostTrackerView: View {
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: allTicked ? "checkmark.square.fill" : "square")
-                            .foregroundStyle(allTicked ? .purple : .secondary)
+                            .foregroundStyle(allTicked ? Color.trackerPrimaryDark : Color.secondary)
                         Text(allTicked ? "Bỏ tick AI (\(aiTickedPostsCount))" : "Tick hết AI (\(aiTickedPostsCount)/\(filteredPosts.count))")
                             .font(.caption.bold())
                             .foregroundStyle(.primary)
@@ -1919,6 +1930,9 @@ struct PostTrackerView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
                     .background(Color(uiColor: .tertiarySystemGroupedBackground), in: Capsule())
+                    .overlay(
+                        Capsule().stroke(Color.trackerPrimary.opacity(0.2), lineWidth: 1)
+                    )
                 }
                 .buttonStyle(.plain)
 
@@ -1931,14 +1945,17 @@ struct PostTrackerView: View {
                         Text(tracker.autoMonitorEnabled ? "Auto Canh: BẬT" : "Auto Canh: TẮT")
                     }
                     .font(.caption2.bold())
-                    .foregroundStyle(tracker.autoMonitorEnabled ? .white : .orange)
+                    .foregroundStyle(tracker.autoMonitorEnabled ? .white : Color.trackerPrimaryDark)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 7)
                     .background(
                         tracker.autoMonitorEnabled
-                            ? AnyShapeStyle(LinearGradient(colors: [.orange, .red], startPoint: .leading, endPoint: .trailing))
-                            : AnyShapeStyle(Color.orange.opacity(0.14)),
+                            ? AnyShapeStyle(LinearGradient(colors: [.trackerPrimary, .trackerPrimaryDark], startPoint: .leading, endPoint: .trailing))
+                            : AnyShapeStyle(Color.trackerSoft),
                         in: Capsule()
+                    )
+                    .overlay(
+                        Capsule().stroke(Color.trackerPrimary.opacity(0.3), lineWidth: 1)
                     )
                 }
                 .buttonStyle(.plain)
@@ -1972,13 +1989,17 @@ struct PostTrackerView: View {
                         Text("AI Trả lời (\(aiTickedPostsCount))")
                     }
                 }
-                .buttonStyle(GradientPillButtonStyle(colors: [.purple, .pink], isCompact: true))
+                .buttonStyle(GradientPillButtonStyle(colors: [.trackerPrimary, .trackerPrimaryDark], isCompact: true))
                 .disabled(tracker.isRunningAIReply || aiTickedPostsCount == 0)
             }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.trackerPrimary.opacity(0.18), lineWidth: 1)
+        )
     }
 
     // MARK: - 4. Account Filter Strip
@@ -2009,13 +2030,13 @@ struct PostTrackerView: View {
                 .padding(.vertical, 6)
                 .background(
                     isSelected
-                        ? AnyShapeStyle(LinearGradient(colors: [.blue, .cyan], startPoint: .leading, endPoint: .trailing))
+                        ? AnyShapeStyle(LinearGradient(colors: [.trackerPrimary, .trackerPrimaryDark], startPoint: .leading, endPoint: .trailing))
                         : AnyShapeStyle(Color(uiColor: .secondarySystemGroupedBackground)),
                     in: Capsule()
                 )
                 .overlay(
                     Capsule()
-                        .stroke(isSelected ? Color.clear : Color.primary.opacity(0.1), lineWidth: 1)
+                        .stroke(isSelected ? Color.clear : Color.trackerPrimary.opacity(0.25), lineWidth: 1)
                 )
         }
         .buttonStyle(.plain)
@@ -2027,11 +2048,11 @@ struct PostTrackerView: View {
         VStack(spacing: 12) {
             ZStack {
                 Circle()
-                    .fill(LinearGradient(colors: [.blue.opacity(0.15), .purple.opacity(0.15)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .fill(Color.trackerSoft)
                     .frame(width: 64, height: 64)
                 Image(systemName: "chart.bar.doc.horizontal.fill")
                     .font(.title.bold())
-                    .foregroundStyle(LinearGradient(colors: [.blue, .purple], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .foregroundStyle(Color.trackerPrimaryDark)
             }
             Text("Chưa có bài viết nào được theo dõi")
                 .font(.subheadline.bold())
@@ -2044,6 +2065,10 @@ struct PostTrackerView: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 28)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(Color.trackerPrimary.opacity(0.18), lineWidth: 1)
+        )
     }
 
     // MARK: - 6. Individual Tracked Post Card
@@ -2058,7 +2083,7 @@ struct PostTrackerView: View {
             HStack(spacing: 8) {
                 HStack(spacing: 6) {
                     Image(systemName: "person.crop.circle.fill")
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(Color.trackerPrimaryDark)
                         .font(.subheadline)
                     Text(post.spaceName)
                         .font(.caption.bold())
@@ -2067,7 +2092,10 @@ struct PostTrackerView: View {
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(Color.blue.opacity(0.1), in: Capsule())
+                .background(Color.trackerSoft, in: Capsule())
+                .overlay(
+                    Capsule().stroke(Color.trackerPrimary.opacity(0.2), lineWidth: 1)
+                )
 
                 Text("ID: \(post.postId.suffix(8))")
                     .font(.caption2.monospaced())
@@ -2085,18 +2113,18 @@ struct PostTrackerView: View {
                         Text("AI Tự trả lời")
                             .font(.caption2.bold())
                     }
-                    .foregroundStyle(post.isAIAutoReplySelected ? .white : .purple)
+                    .foregroundStyle(post.isAIAutoReplySelected ? .white : Color.trackerPrimaryDark)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
                     .background(
                         post.isAIAutoReplySelected
-                            ? AnyShapeStyle(LinearGradient(colors: [.purple, .indigo], startPoint: .leading, endPoint: .trailing))
-                            : AnyShapeStyle(Color.purple.opacity(0.1)),
+                            ? AnyShapeStyle(LinearGradient(colors: [.trackerPrimary, .trackerPrimaryDark], startPoint: .leading, endPoint: .trailing))
+                            : AnyShapeStyle(Color.trackerSoft),
                         in: Capsule()
                     )
                     .overlay(
                         Capsule()
-                            .stroke(Color.purple.opacity(0.35), lineWidth: 1)
+                            .stroke(Color.trackerPrimary.opacity(0.35), lineWidth: 1)
                     )
                 }
                 .buttonStyle(.plain)
@@ -2151,10 +2179,10 @@ struct PostTrackerView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "link")
                         .font(.caption2)
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(Color.trackerPrimaryDark)
                     Text(post.postUrl)
                         .font(.caption2)
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(Color.trackerPrimaryDark)
                         .lineLimit(1)
                     Button {
                         Task {
@@ -2163,7 +2191,7 @@ struct PostTrackerView: View {
                     } label: {
                         Image(systemName: "arrow.triangle.2.circlepath")
                             .font(.caption2.bold())
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(Color.trackerPrimaryDark)
                     }
                     .buttonStyle(.plain)
                     Spacer()
@@ -2175,11 +2203,11 @@ struct PostTrackerView: View {
                 }
             }
 
-            // Dòng 3: Thống kê tương tác dạng Pill gọn đẹp
+            // Dòng 3: Thống kê tương tác dạng Pill gọn đẹp (#8FBC8F và trắng)
             HStack(spacing: 8) {
-                engagementPill(icon: "hand.thumbsup.fill", color: .pink, text: "\(post.reactionCount) cảm xúc")
-                engagementPill(icon: "bubble.left.fill", color: .orange, text: "\(post.commentCount) bình luận")
-                engagementPill(icon: "arrowshape.turn.up.right.fill", color: .indigo, text: "\(post.shareCount) chia sẻ")
+                engagementPill(icon: "hand.thumbsup.fill", text: "\(post.reactionCount) cảm xúc")
+                engagementPill(icon: "bubble.left.fill", text: "\(post.commentCount) bình luận")
+                engagementPill(icon: "arrowshape.turn.up.right.fill", text: "\(post.shareCount) chia sẻ")
 
                 Spacer(minLength: 0)
 
@@ -2189,14 +2217,14 @@ struct PostTrackerView: View {
                         .foregroundStyle(.white)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
-                        .background(Color.red, in: Capsule())
+                        .background(Color.trackerPrimaryDark, in: Capsule())
                 } else if !post.comments.isEmpty {
                     Text("Đã trả lời hết")
                         .font(.caption2.bold())
-                        .foregroundStyle(.green)
+                        .foregroundStyle(Color.trackerPrimaryDark)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
-                        .background(Color.green.opacity(0.12), in: Capsule())
+                        .background(Color.trackerSoft, in: Capsule())
                 }
             }
 
@@ -2232,7 +2260,7 @@ struct PostTrackerView: View {
                     } label: {
                         Image(systemName: "wand.and.stars")
                     }
-                    .buttonStyle(SoftTintedButtonStyle(tint: .purple, isCompact: true))
+                    .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
 
                     // Nút Gửi trực tiếp
                     Button {
@@ -2265,7 +2293,7 @@ struct PostTrackerView: View {
                             Text("Gửi")
                         }
                     }
-                    .buttonStyle(GradientPillButtonStyle(colors: [.blue, .cyan], isCompact: true))
+                    .buttonStyle(GradientPillButtonStyle(colors: [.trackerPrimary, .trackerPrimaryDark], isCompact: true))
                     .disabled(isSendingQuickReply)
                 }
                 .padding(.top, 2)
@@ -2273,7 +2301,7 @@ struct PostTrackerView: View {
 
             Divider()
 
-            // Dòng 4: Các Button thao tác được trang trí gọn gàng
+            // Dòng 4: Các Button thao tác được trang trí gọn gàng (#8FBC8F và trắng)
             HStack(spacing: 8) {
                 // 1. Nút Làm mới thống kê
                 Button {
@@ -2290,7 +2318,7 @@ struct PostTrackerView: View {
                         Text("Thống kê")
                     }
                 }
-                .buttonStyle(SoftTintedButtonStyle(tint: .teal, isCompact: true))
+                .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
                 .disabled(isSyncing)
 
                 // 2. Nút Trả lời nhanh trực tiếp
@@ -2309,7 +2337,7 @@ struct PostTrackerView: View {
                         Text("Trả lời nhanh")
                     }
                 }
-                .buttonStyle(SoftTintedButtonStyle(tint: .blue, isCompact: true))
+                .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
 
                 // 3. Nút Xem DS Bình luận & Tick chọn trả lời chi tiết
                 Button {
@@ -2320,7 +2348,7 @@ struct PostTrackerView: View {
                         Text("DS Cmt (\(post.comments.count))")
                     }
                 }
-                .buttonStyle(SoftTintedButtonStyle(tint: .orange, isCompact: true))
+                .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
 
                 Spacer(minLength: 0)
 
@@ -2352,7 +2380,7 @@ struct PostTrackerView: View {
                         Text("AI Reply")
                     }
                 }
-                .buttonStyle(GradientPillButtonStyle(colors: [.purple, .pink], isCompact: true))
+                .buttonStyle(GradientPillButtonStyle(colors: [.trackerPrimary, .trackerPrimaryDark], isCompact: true))
                 .disabled(isAIRunning)
             }
         }
@@ -2361,25 +2389,28 @@ struct PostTrackerView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 14)
                 .stroke(
-                    post.isAIAutoReplySelected ? Color.purple.opacity(0.45) : Color.primary.opacity(0.06),
-                    lineWidth: post.isAIAutoReplySelected ? 1.3 : 1.0
+                    post.isAIAutoReplySelected ? Color.trackerPrimary.opacity(0.65) : Color.trackerPrimary.opacity(0.18),
+                    lineWidth: post.isAIAutoReplySelected ? 1.5 : 1.0
                 )
         )
         .shadow(color: Color.black.opacity(0.04), radius: 4, x: 0, y: 2)
     }
 
-    private func engagementPill(icon: String, color: Color, text: String) -> some View {
+    private func engagementPill(icon: String, text: String) -> some View {
         HStack(spacing: 4) {
             Image(systemName: icon)
                 .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(color)
+                .foregroundStyle(Color.trackerPrimaryDark)
             Text(text)
                 .font(.caption2.bold())
                 .foregroundStyle(.primary)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(color.opacity(0.1), in: Capsule())
+        .background(Color.trackerSoft, in: Capsule())
+        .overlay(
+            Capsule().stroke(Color.trackerPrimary.opacity(0.18), lineWidth: 0.8)
+        )
     }
 }
 
@@ -2429,7 +2460,7 @@ struct AddTrackedPostSheet: View {
                                     Task { await resolveShareLink() }
                                 }
                             }
-                            .buttonStyle(SoftTintedButtonStyle(tint: .blue, isCompact: true))
+                            .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
                             .disabled(isAdding || isResolvingLink)
 
                             Button {
@@ -2444,7 +2475,7 @@ struct AddTrackedPostSheet: View {
                                     Text("Mở rộng link")
                                 }
                             }
-                            .buttonStyle(SoftTintedButtonStyle(tint: .orange, isCompact: true))
+                            .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
                             .disabled(isAdding || isResolvingLink || urlOrIdInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
 
@@ -2470,7 +2501,7 @@ struct AddTrackedPostSheet: View {
                         if let msg = resolvedLinkMessage {
                             Text(msg)
                                 .font(.caption2)
-                                .foregroundStyle(msg.hasPrefix("✅") ? Color.green : Color.orange)
+                                .foregroundStyle(msg.hasPrefix("✅") ? Color.trackerPrimaryDark : Color.secondary)
                                 .lineLimit(2)
                         }
                     }
@@ -2497,11 +2528,11 @@ struct AddTrackedPostSheet: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("✅ Đã nhận diện: \(resolved.targetKind) • ID: \(resolved.postId)")
                                 .font(.caption.bold())
-                                .foregroundStyle(.green)
+                                .foregroundStyle(Color.trackerPrimaryDark)
                             if let canon = resolved.canonicalURL?.absoluteString {
                                 Text("🔗 URL chuẩn: \(canon)")
                                     .font(.caption2)
-                                    .foregroundStyle(.blue)
+                                    .foregroundStyle(Color.trackerPrimaryDark)
                                     .lineLimit(1)
                             }
                             Text("Đăng bởi: \(resolved.authorName)")
@@ -2510,7 +2541,7 @@ struct AddTrackedPostSheet: View {
                             if let st = previewStats {
                                 Text("📊 Thống kê: ❤️ \(st.reactionCount) cảm xúc • 💬 \(max(st.commentCount, st.comments.count)) bình luận • 🔄 \(st.shareCount) chia sẻ")
                                     .font(.caption2.bold())
-                                    .foregroundStyle(.purple)
+                                    .foregroundStyle(Color.trackerPrimaryDark)
                             }
                             if !resolved.postText.isEmpty {
                                 Text("Nội dung: \"\(resolved.postText.prefix(140))\"")
@@ -2542,8 +2573,9 @@ struct AddTrackedPostSheet: View {
                     Toggle(isOn: $enableAIAutoReply) {
                         Label("Tick bật AI tự động trả lời bình luận", systemImage: "sparkles")
                             .font(.subheadline.bold())
-                            .foregroundStyle(.purple)
+                            .foregroundStyle(Color.trackerPrimaryDark)
                     }
+                    .tint(.trackerPrimary)
                 }
 
                 if let err = errorMessage {
@@ -2588,7 +2620,7 @@ struct AddTrackedPostSheet: View {
                             Spacer()
                         }
                     }
-                    .buttonStyle(GradientPillButtonStyle(colors: [.blue, .indigo], isCompact: false))
+                    .buttonStyle(GradientPillButtonStyle(colors: [.trackerPrimary, .trackerPrimaryDark], isCompact: false))
                     .disabled(isAdding || urlOrIdInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || chosenSpace == nil)
                     .listRowBackground(Color.clear)
                 }
@@ -2718,7 +2750,7 @@ struct PostDetailAndReplySheet: View {
                         HStack {
                             Label(currentPost.spaceName, systemImage: "person.crop.circle.badge.checkmark")
                                 .font(.caption.bold())
-                                .foregroundStyle(.blue)
+                                .foregroundStyle(Color.trackerPrimaryDark)
                             Spacer()
                             Text("❤️ \(currentPost.reactionCount) • 💬 \(currentPost.commentCount) • 🔄 \(currentPost.shareCount)")
                                 .font(.caption.bold())
@@ -2747,7 +2779,7 @@ struct PostDetailAndReplySheet: View {
                                     Text("Chọn hết (\(tickedCommentIds.count))")
                                 }
                             }
-                            .buttonStyle(SoftTintedButtonStyle(tint: .purple, isCompact: true))
+                            .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
 
                             Button {
                                 let unreplied = currentPost.comments
@@ -2757,7 +2789,7 @@ struct PostDetailAndReplySheet: View {
                             } label: {
                                 Text("Tick chưa trả lời")
                             }
-                            .buttonStyle(SoftTintedButtonStyle(tint: .orange, isCompact: true))
+                            .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
 
                             Spacer()
 
@@ -2768,7 +2800,7 @@ struct PostDetailAndReplySheet: View {
                             } label: {
                                 Image(systemName: "arrow.clockwise")
                             }
-                            .buttonStyle(SoftTintedButtonStyle(tint: .teal, isCompact: true))
+                            .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
 
                             Button {
                                 let key = geminiApiKey.isEmpty ? SecureGeminiStore.readKey() : geminiApiKey
@@ -2797,7 +2829,7 @@ struct PostDetailAndReplySheet: View {
                                     Text(tickedCommentIds.isEmpty ? "AI Trả lời tự động" : "AI Trả lời (\(tickedCommentIds.count))")
                                 }
                             }
-                            .buttonStyle(GradientPillButtonStyle(colors: [.purple, .pink], isCompact: true))
+                            .buttonStyle(GradientPillButtonStyle(colors: [.trackerPrimary, .trackerPrimaryDark], isCompact: true))
                         }
                     }
                     .padding(12)
@@ -2806,11 +2838,11 @@ struct PostDetailAndReplySheet: View {
                     if !feedbackBanner.isEmpty {
                         Text(feedbackBanner)
                             .font(.caption.bold())
-                            .foregroundStyle(.purple)
+                            .foregroundStyle(Color.trackerPrimaryDark)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .background(Color.purple.opacity(0.1))
+                            .background(Color.trackerSoft)
                     }
 
                     Divider()
@@ -2846,7 +2878,7 @@ struct PostDetailAndReplySheet: View {
                                         } label: {
                                             Image(systemName: isTicked ? "checkmark.square.fill" : "square")
                                                 .font(.title3)
-                                                .foregroundStyle(isTicked ? .purple : .secondary)
+                                                .foregroundStyle(isTicked ? Color.trackerPrimaryDark : .secondary)
                                         }
                                         .buttonStyle(.plain)
 
@@ -2860,10 +2892,10 @@ struct PostDetailAndReplySheet: View {
                                                 if isHandled {
                                                     Text("Đã trả lời")
                                                         .font(.caption2.bold())
-                                                        .foregroundStyle(.green)
+                                                        .foregroundStyle(Color.trackerPrimaryDark)
                                                         .padding(.horizontal, 6)
                                                         .padding(.vertical, 2)
-                                                        .background(Color.green.opacity(0.14), in: Capsule())
+                                                        .background(Color.trackerSoft, in: Capsule())
                                                 }
                                             }
                                             Text(cmt.message)
@@ -2882,14 +2914,14 @@ struct PostDetailAndReplySheet: View {
                                                 Text("Trả lời")
                                             }
                                         }
-                                        .buttonStyle(SoftTintedButtonStyle(tint: .blue, isCompact: true))
+                                        .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
                                     }
 
                                     if let lastReply = cmt.lastReplyText, !lastReply.isEmpty {
                                         HStack(spacing: 6) {
                                             Image(systemName: "checkmark.bubble.fill")
                                                 .font(.caption2)
-                                                .foregroundStyle(.green)
+                                                .foregroundStyle(Color.trackerPrimaryDark)
                                             Text("Phản hồi: \"\(lastReply)\"")
                                                 .font(.caption)
                                                 .foregroundStyle(.secondary)
@@ -2913,7 +2945,7 @@ struct PostDetailAndReplySheet: View {
                                 HStack(spacing: 4) {
                                     Text("Đang trả lời: \(targetCmt.authorName)")
                                         .font(.caption.bold())
-                                        .foregroundStyle(.blue)
+                                        .foregroundStyle(Color.trackerPrimaryDark)
                                     Button {
                                         selectedReplyTargetComment = nil
                                     } label: {
@@ -2990,7 +3022,7 @@ struct PostDetailAndReplySheet: View {
                                     Text("AI Soạn")
                                 }
                             }
-                            .buttonStyle(SoftTintedButtonStyle(tint: .purple, isCompact: true))
+                            .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
                             .disabled(isGeneratingAI)
 
                             // Nút Gửi phản hồi
@@ -3024,7 +3056,7 @@ struct PostDetailAndReplySheet: View {
                                     Text("Gửi")
                                 }
                             }
-                            .buttonStyle(GradientPillButtonStyle(colors: [.blue, .indigo], isCompact: true))
+                            .buttonStyle(GradientPillButtonStyle(colors: [.trackerPrimary, .trackerPrimaryDark], isCompact: true))
                             .disabled(isSending || directReplyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
                     }
@@ -3096,7 +3128,7 @@ struct TrackerAISettingsSheet: View {
                             Spacer()
                         }
                     }
-                    .buttonStyle(GradientPillButtonStyle(colors: [.purple, .indigo], isCompact: false))
+                    .buttonStyle(GradientPillButtonStyle(colors: [.trackerPrimary, .trackerPrimaryDark], isCompact: false))
                     .listRowBackground(Color.clear)
                 }
             }

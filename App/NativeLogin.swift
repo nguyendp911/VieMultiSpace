@@ -573,7 +573,7 @@ enum FacebookAPILoginClient {
         return (items, FacebookAppTokens.formatCookieString(items))
     }
 
-    static func convertToken(_ accessToken: String, app: FacebookAppTokens.AppInfo) async -> ConvertedTokenRecord? {
+    static func convertToken(_ accessToken: String, app: FacebookAppTokens.AppInfo, session: URLSession = .shared) async -> ConvertedTokenRecord? {
         let endpoints = [
             "https://api.facebook.com/method/auth.getSessionforApp",
             "https://b-api.facebook.com/method/auth.getSessionforApp"
@@ -595,7 +595,7 @@ enum FacebookAPILoginClient {
             request.httpBody = bodyData
 
             do {
-                let (data, _) = try await URLSession.shared.data(for: request)
+                let (data, _) = try await session.data(for: request)
                 guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let token = json["access_token"] as? String, !token.isEmpty else {
                     continue
@@ -618,10 +618,10 @@ enum FacebookAPILoginClient {
         return nil
     }
 
-    static func convertAllTokens(from originalToken: String) async -> [String: ConvertedTokenRecord] {
+    static func convertAllTokens(from originalToken: String, session: URLSession = .shared) async -> [String: ConvertedTokenRecord] {
         var converted: [String: ConvertedTokenRecord] = [:]
         for app in FacebookAppTokens.allApps {
-            if let record = await convertToken(originalToken, app: app) {
+            if let record = await convertToken(originalToken, app: app, session: session) {
                 converted[app.key] = record
             }
         }
@@ -647,7 +647,10 @@ enum FacebookAPILoginClient {
 
         // 1. Kiểm tra trực tiếp xem trong chuỗi cookie có token EAA không
         if let directMatch = FacebookTargetPostResolver.firstMatch(pattern: #"(EAA[A-Za-z0-9_\-\|=]{20,500})"#, in: trimmed) {
-            return directMatch
+            let validation = await SmartPostAPIClient.validateAccessToken(directMatch)
+            if validation.isValid {
+                return directMatch
+            }
         }
 
         // 2. Thử OAuth Dialog với redirect fbconnect://success (Lấy token EAAB qua HTTP 302 Location)
@@ -671,52 +674,12 @@ enum FacebookAPILoginClient {
                let http = resp as? HTTPURLResponse {
                 if let loc = http.value(forHTTPHeaderField: "Location") {
                     if let tok = FacebookTargetPostResolver.firstMatch(pattern: #"access_token=([A-Za-z0-9_\-\|=]+)"#, in: loc) {
-                        return tok
+                        let validation = await SmartPostAPIClient.validateAccessToken(tok)
+                        if validation.isValid {
+                            return tok
+                        }
                     }
                 }
-            }
-        }
-
-        // 3. Quét các trang Ads Manager & Content Management có chứa EAAG / EAAB token
-        let tokenEndpoints: [(url: String, ua: String)] = [
-            (
-                "https://adsmanager.facebook.com/adsmanager/manage/campaigns",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-            ),
-            (
-                "https://business.facebook.com/content_management",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-            ),
-            (
-                "https://business.facebook.com/business_locations",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-            ),
-            (
-                "https://m.facebook.com/composer/ocelot/async_loader/?publisher=feed",
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
-            )
-        ]
-
-        for ep in tokenEndpoints {
-            guard let url = URL(string: ep.url) else { continue }
-            var req = URLRequest(url: url, timeoutInterval: 14)
-            req.httpMethod = "GET"
-            req.setValue(trimmed, forHTTPHeaderField: "Cookie")
-            req.setValue(ep.ua, forHTTPHeaderField: "User-Agent")
-            req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
-            req.setValue("https://www.facebook.com/", forHTTPHeaderField: "Referer")
-
-            guard let (data, _) = try? await URLSession.shared.data(for: req),
-                  let text = String(data: data, encoding: .utf8), !text.isEmpty else { continue }
-
-            if let match = FacebookTargetPostResolver.firstMatch(pattern: #"["']accessToken["']\s*:\s*["'](EAA[A-Za-z0-9]{25,350})["']"#, in: text) {
-                return match
-            }
-            if let match = FacebookTargetPostResolver.firstMatch(pattern: #"window\.__accessToken\s*=\s*["'](EAA[A-Za-z0-9]{25,350})["']"#, in: text) {
-                return match
-            }
-            if let match = FacebookTargetPostResolver.firstMatch(pattern: #"(EAA[A-Za-z0-9_\-\|=]{20,500})"#, in: text) {
-                return match
             }
         }
         return nil
@@ -725,11 +688,12 @@ enum FacebookAPILoginClient {
     private static func sendAuthRequest(
         url: URL,
         params: [String: String],
-        extraHeaders: [String: String] = [:]
+        extraHeaders: [String: String] = [:],
+        session: URLSession = .shared
     ) async throws -> [String: Any] {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 20
+        request.timeoutInterval = 25
         for (k, v) in baseHeaders {
             request.setValue(v, forHTTPHeaderField: k)
         }
@@ -737,7 +701,7 @@ enum FacebookAPILoginClient {
             request.setValue(v, forHTTPHeaderField: k)
         }
         request.httpBody = formEncode(params)
-        let (respData, _) = try await URLSession.shared.data(for: request)
+        let (respData, _) = try await session.data(for: request)
         guard let json = try JSONSerialization.jsonObject(with: respData) as? [String: Any] else {
             throw SpaceLoginError.apiError("Phản hồi từ máy chủ không phải JSON hợp lệ.")
         }
@@ -827,7 +791,15 @@ enum FacebookAPILoginClient {
             throw SpaceLoginError.invalid
         }
 
-        // 1. Chuẩn bị định danh thiết bị
+        // 1. Tạo session riêng biệt lưu cookie xuyên suốt các request (chuẩn requests.Session() của 1767528775-Login2FaConvertToken.py)
+        let sessionConfig = URLSessionConfiguration.default
+        let cookieJar = HTTPCookieStorage()
+        sessionConfig.httpCookieStorage = cookieJar
+        sessionConfig.httpCookieAcceptPolicy = .always
+        sessionConfig.httpShouldSetCookies = true
+        let authSession = URLSession(configuration: sessionConfig)
+
+        // 2. Chuẩn bị định danh thiết bị & Machine ID
         let savedRecord = spaceId.flatMap { try? SecureLoginStore.read($0) }
         let deviceId = (savedRecord?.deviceId?.isEmpty == false) ? savedRecord!.deviceId! : UUID().uuidString.lowercased()
         let adid = (savedRecord?.adid?.isEmpty == false) ? savedRecord!.adid! : UUID().uuidString.lowercased()
@@ -835,7 +807,6 @@ enum FacebookAPILoginClient {
         let simSerial = (savedRecord?.simSerial?.isEmpty == false) ? savedRecord!.simSerial! : generateSimSerial()
         let jazoest = randomDigits(5)
 
-        // 2. Xác định machine_id (bắt buộc >= 20 ký tự, nếu ngắn hơn sẽ sinh ngẫu nhiên 24 ký tự)
         let resolvedMachineId: String
         let trimmedInputMachine = machineId?.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedSavedMachine = savedRecord?.machineId.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -851,6 +822,19 @@ enum FacebookAPILoginClient {
             resolvedMachineId = datrCookie
         } else {
             resolvedMachineId = generateMachineId()
+        }
+
+        // Nếu có datr, pre-seed vào cookie jar để FB nhận diện trình duyệt
+        if resolvedMachineId.count >= 20 {
+            if let datrCookie = HTTPCookie(properties: [
+                .name: "datr",
+                .value: resolvedMachineId,
+                .domain: ".facebook.com",
+                .path: "/",
+                .secure: "TRUE"
+            ]) {
+                cookieJar.setCookie(datrCookie)
+            }
         }
 
         // 3. Mã hóa mật khẩu chuẩn #PWD_FB4A:2 theo 1767528775-Login2FaConvertToken.py
@@ -905,7 +889,7 @@ enum FacebookAPILoginClient {
         ]
 
         onStatusUpdate?("Đang gửi yêu cầu đăng nhập...")
-        let responseJson = try await sendAuthRequest(url: apiURL, params: loginParams)
+        let responseJson = try await sendAuthRequest(url: apiURL, params: loginParams, session: authSession)
 
         // 5. Nếu đăng nhập thành công ngay (không có 2FA)
         if let token = responseJson["access_token"] as? String, !token.isEmpty {
@@ -923,7 +907,7 @@ enum FacebookAPILoginClient {
                 pendingUid: cleanUser
             )
             onStatusUpdate?("Đăng nhập thành công! Đang convert sang 6 App Token...")
-            return await buildVault(uid: cleanUser, responseJson: responseJson, convertAll: convertAll)
+            return await buildVault(uid: cleanUser, responseJson: responseJson, convertAll: convertAll, session: authSession)
         }
 
         // 6. Xử lý phản hồi lỗi hoặc yêu cầu 2FA
@@ -967,7 +951,7 @@ enum FacebookAPILoginClient {
                 return cleanUser
             }()
 
-            // CHỈ gửi request 2FA khi firstFactor thực sự có giá trị từ Facebook
+            // CHỈ gửi request 2FA khi firstFactor thực sự có giá trị từ Facebook (chuẩn _handle_2fa trong Python)
             if !firstFactor.isEmpty {
                 guard !cleanTotp.isEmpty else {
                     throw SpaceLoginError.apiError("Facebook yêu cầu 2FA nhưng chưa nhập mã hoặc khóa 2FA.")
@@ -979,7 +963,7 @@ enum FacebookAPILoginClient {
 
                 onStatusUpdate?("Đang xác thực 2FA (\(otpCode))...")
 
-                // Payload 2FA CHUẨN DUY NHẤT theo 1767528775-Login2FaConvertToken.py (không lặp nhiều variant để tránh làm cháy ticket)
+                // Payload 2FA CHUẨN DUY NHẤT theo 1767528775-Login2FaConvertToken.py (dùng chung authSession để giữ datr/fr cookie)
                 let data2FA: [String: String] = [
                     "locale": "vi_VN",
                     "format": "json",
@@ -997,7 +981,7 @@ enum FacebookAPILoginClient {
                     "machine_id": firstFactor
                 ]
 
-                let response2FA = try await sendAuthRequest(url: apiURL, params: data2FA)
+                let response2FA = try await sendAuthRequest(url: apiURL, params: data2FA, session: authSession)
                 if let token2FA = response2FA["access_token"] as? String, !token2FA.isEmpty {
                     let finalMachine = (response2FA["machine_id"] as? String) ?? firstFactor
                     persistLoginDeviceState(
@@ -1013,7 +997,7 @@ enum FacebookAPILoginClient {
                         pendingUid: uidValue
                     )
                     onStatusUpdate?("Xác thực 2FA thành công! Đang convert sang 6 App Token...")
-                    return await buildVault(uid: uidValue, responseJson: response2FA, convertAll: convertAll)
+                    return await buildVault(uid: uidValue, responseJson: response2FA, convertAll: convertAll, session: authSession)
                 }
 
                 if let err2FA = extractErrorInfo(from: response2FA) {
@@ -1046,7 +1030,7 @@ enum FacebookAPILoginClient {
                     "fb_api_req_friendly_name": "authenticate",
                     "fb_api_caller_class": "com.facebook.account.login.protocol.Fb4aAuthHandler"
                 ]
-                if let jsonApp = try? await sendAuthRequest(url: apiURL, params: approvalParams),
+                if let jsonApp = try? await sendAuthRequest(url: apiURL, params: approvalParams, session: authSession),
                    let tok = jsonApp["access_token"] as? String, !tok.isEmpty {
                     persistLoginDeviceState(
                         spaceId: spaceId,
@@ -1060,32 +1044,10 @@ enum FacebookAPILoginClient {
                         pendingFirstFactor: "",
                         pendingUid: uidValue
                     )
-                    return await buildVault(uid: uidValue, responseJson: jsonApp, convertAll: convertAll)
+                    return await buildVault(uid: uidValue, responseJson: jsonApp, convertAll: convertAll, session: authSession)
                 }
 
-                throw SpaceLoginError.apiError("Facebook yêu cầu phê duyệt trên ứng dụng đã đăng nhập trước đó (Login Approvals).\n• Hãy mở app Facebook trên điện thoại hoặc trình duyệt để bấm 'Phê duyệt'.\n• Hoặc đăng nhập tài khoản vào WebView của Space rồi bấm 'Trích xuất Cookie & Lấy Token API' ngay bên dưới.")
-            }
-
-            // Fallback: nếu space đã có cookie WebView đăng nhập, trích xuất token trực tiếp
-            if let spaceId {
-                let webCookies = await WebCookieBridge.extractFacebookCookies(from: spaceId)
-                let cookieStr = FacebookAppTokens.formatCookieString(webCookies)
-                if cookieStr.contains("c_user="), cookieStr.contains("xs=") {
-                    onStatusUpdate?("Đang trích xuất Token từ Cookie trình duyệt đã đăng nhập...")
-                    if let webToken = await extractTokenFromCookieString(cookieStr), !webToken.isEmpty {
-                        let converted = convertAll ? await convertAllTokens(from: webToken) : [:]
-                        let cUser = webCookies.first(where: { $0.name == "c_user" })?.value ?? cleanUser
-                        return SpaceTokenVault(
-                            uid: cUser,
-                            originalPrefix: FacebookAppTokens.extractTokenPrefix(webToken),
-                            originalToken: webToken,
-                            cookieString: cookieStr,
-                            cookies: webCookies,
-                            convertedTokens: converted,
-                            updatedAt: Date()
-                        )
-                    }
-                }
+                throw SpaceLoginError.apiError("Facebook yêu cầu phê duyệt trên ứng dụng đã đăng nhập trước đó (Login Approvals).\n• Hãy mở app Facebook trên điện thoại hoặc trình duyệt để bấm 'Phê duyệt'.\n• Sau đó bấm 'Đăng nhập API' lại.")
             }
 
             var extraTip = ""
@@ -1102,11 +1064,16 @@ enum FacebookAPILoginClient {
         throw SpaceLoginError.apiError("Không nhận diện được phản hồi từ Facebook.")
     }
 
-    private static func buildVault(uid: String, responseJson: [String: Any], convertAll: Bool) async -> SpaceTokenVault {
+    private static func buildVault(
+        uid: String,
+        responseJson: [String: Any],
+        convertAll: Bool,
+        session: URLSession = .shared
+    ) async -> SpaceTokenVault {
         let originalToken = (responseJson["access_token"] as? String) ?? ""
         let originalPrefix = FacebookAppTokens.extractTokenPrefix(originalToken)
         let parsedCookies = extractCookies(from: responseJson)
-        let converted = convertAll ? await convertAllTokens(from: originalToken) : [:]
+        let converted = convertAll ? await convertAllTokens(from: originalToken, session: session) : [:]
 
         var resolvedUID = uid
         if let cUser = parsedCookies.items.first(where: { $0.name == "c_user" })?.value, !cUser.isEmpty {
@@ -1133,22 +1100,27 @@ enum WebCookieBridge {
         guard let webView else { return nil }
         let script = """
         (function() {
-            if (window.__accessToken && window.__accessToken.startsWith('EAA')) {
+            if (window.__accessToken && typeof window.__accessToken === 'string' && window.__accessToken.startsWith('EAA')) {
                 return window.__accessToken;
             }
             const scripts = document.querySelectorAll('script');
             for (let s of scripts) {
                 const text = s.textContent || '';
-                const m = text.match(/"accessToken"\\s*:\\s*"(EAA[^"]+)"/);
+                const m = text.match(/"accessToken"\\s*:\\s*"(EAA[A-Za-z0-9_=-]{20,500})"/);
                 if (m && m[1]) return m[1];
-                const m2 = text.match(/(EAA[A-Za-z0-9_=-]{20,500})/);
-                if (m2 && m2[1]) return m2[1];
             }
-            const pageHtml = document.documentElement.innerHTML;
-            const m = pageHtml.match(/(EAA[A-Za-z0-9_=-]{20,500})/);
-            return m ? m[1] : null;
+            return null;
         })();
         """
+        if let token = try? await webView.evaluateJavaScript(script) as? String,
+           token.hasPrefix("EAA"), token.count >= 25 {
+            let validation = await SmartPostAPIClient.validateAccessToken(token)
+            if validation.isValid {
+                return token
+            }
+        }
+        return nil
+    }
         if let token = try? await webView.evaluateJavaScript(script) as? String,
            token.hasPrefix("EAA") {
             return token
