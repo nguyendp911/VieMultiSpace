@@ -341,8 +341,8 @@ enum FacebookPasswordEncryptor {
 
     static func getPublicKey() async throws -> PublicKeyBundle {
         let tokens = [
-            "350685531728|62f8ce9f74b12f84c123cc23437a4a32",
-            "438142079694454|fc0a7caa49b192f64f6f5a6d9643bb28"
+            "438142079694454|fc0a7caa49b192f64f6f5a6d9643bb28",
+            "350685531728|62f8ce9f74b12f84c123cc23437a4a32"
         ]
         var lastError: Error?
 
@@ -474,6 +474,7 @@ enum FacebookAPILoginClient {
     private static let accessToken = "350685531728|62f8ce9f74b12f84c123cc23437a4a32"
     private static let apiKey = "882a8490361da98702bf97a021ddc14d"
     private static let apiSecret = "62f8ce9f74b12f84c123cc23437a4a32"
+    private static let sig = "214049b9f17c38bd767de53752b53946"
 
     private static let baseHeaders: [String: String] = [
         "content-type": "application/x-www-form-urlencoded",
@@ -484,7 +485,7 @@ enum FacebookAPILoginClient {
         "x-fb-friendly-name": "authenticate",
         "x-fb-connection-bandwidth": "78032897",
         "x-tigon-is-retry": "False",
-        "authorization": "OAuth 350685531728|62f8ce9f74b12f84c123cc23437a4a32",
+        "authorization": "OAuth null",
         "x-fb-connection-type": "WIFI",
         "x-fb-device-group": "3342",
         "priority": "u=3,i",
@@ -492,7 +493,7 @@ enum FacebookAPILoginClient {
         "x-fb-client-ip": "True",
         "x-fb-server-cluster": "True",
         "x-fb-request-analytics-tags": "{\"network_tags\":{\"product\":\"350685531728\",\"retry_attempt\":\"0\"},\"application_tags\":\"unknown\"}",
-        "user-agent": "Dalvik/2.1.0 (Linux; U; Android 11; RMX3261 Build/RP1A.201005.001) [FBAN/FB4A;FBAV/417.0.0.33.65;FBPN/com.facebook.katana;FBLC/vi_VN;FBBV/480086274;FBCR/Viettel;FBMF/realme;FBBD/realme;FBDV/RMX3261;FBSV/11;FBCA/arm64-v8a:armeabi-v7a;FBDM/{density=2.0,width=720,height=1600};FB_FW/1;FBRV/0;]"
+        "user-agent": "Dalvik/2.1.0 (Linux; U; Android 9; 23113RKC6C Build/PQ3A.190705.08211809) [FBAN/FB4A;FBAV/417.0.0.33.65;FBPN/com.facebook.katana;FBLC/vi_VN;FBBV/480086274;FBCR/MobiFone;FBMF/Redmi;FBBD/Redmi;FBDV/23113RKC6C;FBSV/9;FBCA/x86:armeabi-v7a;FBDM/{density=1.5,width=1280,height=720};FB_FW/1;FBRV/0;]"
     ]
 
     static func generateMachineId() -> String {
@@ -760,238 +761,134 @@ enum FacebookAPILoginClient {
             throw SpaceLoginError.invalid
         }
 
-        // Đọc thông tin thiết bị cố định của Space
+        // 1. Chuẩn bị định danh thiết bị
         let savedRecord = spaceId.flatMap { try? SecureLoginStore.read($0) }
         let deviceId = (savedRecord?.deviceId?.isEmpty == false) ? savedRecord!.deviceId! : UUID().uuidString.lowercased()
         let adid = (savedRecord?.adid?.isEmpty == false) ? savedRecord!.adid! : UUID().uuidString.lowercased()
-        let secureFamilyDeviceId = deviceId
+        let secureFamilyDeviceId = UUID().uuidString.lowercased()
+        let simSerial = (savedRecord?.simSerial?.isEmpty == false) ? savedRecord!.simSerial! : generateSimSerial()
+        let jazoest = randomDigits(5)
+
+        // 2. Xác định machine_id (ưu tiên input / datr cookie từ WebView / sinh ngẫu nhiên 24 ký tự)
         let resolvedMachineId: String
         if let m = machineId?.trimmingCharacters(in: .whitespacesAndNewlines), !m.isEmpty {
             resolvedMachineId = m
         } else if let sm = savedRecord?.machineId.trimmingCharacters(in: .whitespacesAndNewlines), !sm.isEmpty {
             resolvedMachineId = sm
+        } else if let spaceId,
+                  let webCookies = await WebCookieBridge.extractFacebookCookies(from: spaceId) as [FacebookCookieItem]?,
+                  let datrCookie = webCookies.first(where: { $0.name == "datr" })?.value,
+                  !datrCookie.isEmpty {
+            resolvedMachineId = datrCookie
         } else {
             resolvedMachineId = generateMachineId()
         }
-        let jazoest = "2" + randomDigits(4)
-        let simSerial = (savedRecord?.simSerial?.isEmpty == false) ? savedRecord!.simSerial! : generateSimSerial()
 
-        var serverTimestamp = Int(Date().timeIntervalSince1970)
-        var primaryEncryptedPassword = cleanPass
-        var passwordCandidates: [(label: String, value: String, useLegacyEndpoint: Bool)] = []
-
+        // 3. Mã hóa mật khẩu chuẩn #PWD_FB4A:2
+        let encryptedPassword: String
         if cleanPass.hasPrefix("#PWD_FB4A") {
-            primaryEncryptedPassword = cleanPass
-            passwordCandidates.append(("PWD_FB4A_RAW", cleanPass, false))
+            encryptedPassword = cleanPass
         } else {
-            if let encResult = try? await FacebookPasswordEncryptor.encrypt(password: cleanPass) {
-                serverTimestamp = encResult.serverTimestamp
-                primaryEncryptedPassword = encResult.encrypted
-                passwordCandidates.append(("PWD_FB4A_ENC", encResult.encrypted, false))
-            }
-            passwordCandidates.append(("PLAIN_GRAPH", cleanPass, false))
-            passwordCandidates.append(("PLAIN_BAPI_SIGNED", cleanPass, true))
+            onStatusUpdate?("Đang lấy public key & mã hóa mật khẩu...")
+            let enc = try await FacebookPasswordEncryptor.encrypt(password: cleanPass)
+            encryptedPassword = enc.encrypted
         }
 
-        var lastResponseJson: [String: Any] = [:]
+        // 4. Payload đăng nhập chuẩn Facebook App FB4A (350685531728) theo 1767528775-Login2FaConvertToken.py
+        let loginParams: [String: String] = [
+            "format": "json",
+            "email": cleanUser,
+            "password": encryptedPassword,
+            "credentials_type": "password",
+            "generate_session_cookies": "1",
+            "locale": "vi_VN",
+            "client_country_code": "VN",
+            "api_key": apiKey,
+            "access_token": accessToken,
+            "adid": adid,
+            "device_id": deviceId,
+            "generate_analytics_claim": "1",
+            "community_id": "",
+            "linked_guest_account_userid": "",
+            "cpl": "true",
+            "try_num": "1",
+            "family_device_id": deviceId,
+            "secure_family_device_id": secureFamilyDeviceId,
+            "sim_serials": "[\"\(simSerial)\"]",
+            "openid_flow": "android_login",
+            "openid_provider": "google",
+            "openid_tokens": "[]",
+            "account_switcher_uids": "[\"\(cleanUser)\"]",
+            "fb4a_shared_phone_cpl_experiment": "fb4a_shared_phone_nonce_cpl_at_risk_v3",
+            "fb4a_shared_phone_cpl_group": "enable_v3_at_risk",
+            "enroll_misauth": "false",
+            "error_detail_type": "button_with_disabled",
+            "source": "login",
+            "machine_id": resolvedMachineId,
+            "jazoest": jazoest,
+            "meta_inf_fbmeta": "V2_UNTAGGED",
+            "advertiser_id": adid,
+            "encrypted_msisdn": "",
+            "currently_logged_in_userid": "0",
+            "fb_api_req_friendly_name": "authenticate",
+            "fb_api_caller_class": "Fb4aAuthHandler",
+            "sig": sig
+        ]
 
-        for candidate in passwordCandidates {
-            let responseJson: [String: Any]
-            if candidate.useLegacyEndpoint {
-                let legacyParams: [String: String] = signedParams([
-                    "adid": adid,
-                    "format": "json",
-                    "device_id": deviceId,
-                    "email": cleanUser,
-                    "password": candidate.value,
-                    "generate_analytics_claim": "1",
-                    "community_id": "",
-                    "cpl": "true",
-                    "try_num": "1",
-                    "family_device_id": deviceId,
-                    "machine_id": resolvedMachineId,
-                    "sim_serials": "[\"\(simSerial)\"]",
-                    "credentials_type": "password",
-                    "source": "login",
-                    "error_detail_type": "button_with_disabled",
-                    "enroll_misauth": "false",
-                    "generate_session_cookies": "1",
-                    "generate_machine_id": "1",
-                    "meta_inf_fbmeta": "",
-                    "currently_logged_in_userid": "0",
-                    "locale": "vi_VN",
-                    "client_country_code": "VN",
-                    "fb_api_req_friendly_name": "authenticate",
-                    "fb_api_caller_class": "com.facebook.account.login.protocol.Fb4aAuthHandler",
-                    "api_key": apiKey,
-                    "access_token": accessToken
-                ])
-                responseJson = try await sendAuthRequest(url: legacyApiURL, params: legacyParams)
+        onStatusUpdate?("Đang gửi yêu cầu đăng nhập...")
+        let responseJson = try await sendAuthRequest(url: apiURL, params: loginParams)
+
+        // 5. Nếu đăng nhập thành công ngay (không có 2FA)
+        if let token = responseJson["access_token"] as? String, !token.isEmpty {
+            let returnedMachine = (responseJson["machine_id"] as? String) ?? resolvedMachineId
+            persistLoginDeviceState(
+                spaceId: spaceId,
+                cleanUser: cleanUser,
+                cleanPass: cleanPass,
+                cleanTotp: cleanTotp,
+                machineId: returnedMachine,
+                deviceId: deviceId,
+                adid: adid,
+                simSerial: simSerial,
+                pendingFirstFactor: "",
+                pendingUid: cleanUser
+            )
+            onStatusUpdate?("Đăng nhập thành công! Đang convert sang 6 App Token...")
+            return await buildVault(uid: cleanUser, responseJson: responseJson, convertAll: convertAll)
+        }
+
+        // 6. Xử lý phản hồi lỗi hoặc yêu cầu 2FA
+        if let errInfo = extractErrorInfo(from: responseJson) {
+            let errorData: [String: Any]
+            if let dict = errInfo.errorObj["error_data"] as? [String: Any] {
+                errorData = dict
+            } else if let rawStr = errInfo.errorObj["error_data"] as? String,
+                      let data = rawStr.data(using: .utf8),
+                      let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                errorData = parsed
             } else {
-                let graphParams: [String: String] = [
-                    "adid": adid,
-                    "format": "json",
-                    "device_id": deviceId,
-                    "email": cleanUser,
-                    "password": candidate.value,
-                    "credentials_type": "password",
-                    "generate_session_cookies": "1",
-                    "generate_analytics_claim": "1",
-                    "generate_machine_id": "1",
-                    "locale": "vi_VN",
-                    "client_country_code": "VN",
-                    "api_key": apiKey,
-                    "access_token": accessToken,
-                    "cpl": "true",
-                    "try_num": "1",
-                    "family_device_id": deviceId,
-                    "secure_family_device_id": secureFamilyDeviceId,
-                    "sim_serials": "[\"\(simSerial)\"]",
-                    "enroll_misauth": "false",
-                    "error_detail_type": "button_with_disabled",
-                    "source": "login",
-                    "machine_id": resolvedMachineId,
-                    "jazoest": jazoest,
-                    "meta_inf_fbmeta": "V2_UNTAGGED",
-                    "advertiser_id": adid,
-                    "currently_logged_in_userid": "0",
-                    "fb_api_req_friendly_name": "authenticate",
-                    "fb_api_caller_class": "Fb4aAuthHandler"
-                ]
-                responseJson = try await sendAuthRequest(url: apiURL, params: graphParams)
+                errorData = [:]
             }
 
-            lastResponseJson = responseJson
+            let firstFactor = (errorData["login_first_factor"] as? String) ?? (savedRecord?.pendingFirstFactor ?? "")
+            if !firstFactor.isEmpty || errInfo.code == 406 || errInfo.code == 405 {
+                let uidValue: String = {
+                    if let uidStr = errorData["uid"] as? String, !uidStr.isEmpty { return uidStr }
+                    if let uidNum = errorData["uid"] as? NSNumber { return uidNum.stringValue }
+                    return cleanUser
+                }()
 
-            if let token = responseJson["access_token"] as? String, !token.isEmpty {
-                let returnedMachine = (responseJson["machine_id"] as? String) ?? resolvedMachineId
-                persistLoginDeviceState(
-                    spaceId: spaceId,
-                    cleanUser: cleanUser,
-                    cleanPass: cleanPass,
-                    cleanTotp: cleanTotp,
-                    machineId: returnedMachine,
-                    deviceId: deviceId,
-                    adid: adid,
-                    simSerial: simSerial,
-                    pendingFirstFactor: "",
-                    pendingUid: cleanUser
-                )
-                await MainActor.run {
-                    AppLogger.shared.info("Auth", "Đăng nhập thành công (\(candidate.label)) cho \(cleanUser)")
-                }
-                return await buildVault(uid: cleanUser, responseJson: responseJson, convertAll: convertAll)
-            }
-
-            if let errInfo = extractErrorInfo(from: responseJson) {
-                let errorData: [String: Any]
-                if let dict = errInfo.errorObj["error_data"] as? [String: Any] {
-                    errorData = dict
-                } else if let rawStr = errInfo.errorObj["error_data"] as? String,
-                          let data = rawStr.data(using: .utf8),
-                          let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    errorData = parsed
-                } else {
-                    errorData = [:]
+                guard !cleanTotp.isEmpty else {
+                    throw SpaceLoginError.apiError("Tài khoản yêu cầu 2FA nhưng chưa nhập mã hoặc khóa 2FA.")
                 }
 
-                // Nếu yêu cầu 2FA hoặc Phê duyệt đăng nhập (mã lỗi 406 / 405 / có login_first_factor)
-                let firstFactor = (errorData["login_first_factor"] as? String) ?? (savedRecord?.pendingFirstFactor ?? "")
-                if !firstFactor.isEmpty || errInfo.code == 406 || errInfo.code == 405 {
-                    return try await performTwoFactorStep(
-                        spaceId: spaceId,
-                        cleanUser: cleanUser,
-                        cleanPass: cleanPass,
-                        encryptedPassword: primaryEncryptedPassword,
-                        cleanTotp: cleanTotp,
-                        firstFactor: firstFactor,
-                        errorData: errorData,
-                        deviceId: deviceId,
-                        adid: adid,
-                        simSerial: simSerial,
-                        resolvedMachineId: resolvedMachineId,
-                        serverTimestamp: serverTimestamp,
-                        convertAll: convertAll,
-                        initialErrorMessage: errInfo.message,
-                        onStatusUpdate: onStatusUpdate
-                    )
+                guard let otpCode = SwiftTOTP.code(cleanTotp) else {
+                    throw SpaceLoginError.apiError("Khóa 2FA Base32 hoặc mã 6 số không hợp lệ.")
                 }
 
-                // Nếu là lỗi sai mật khẩu (400/401 / subcode 1348092), thử tiếp phương thức dự phòng tiếp theo
-                let isInvalidCreds = (errInfo.code == 400 || errInfo.code == 401 || errInfo.subcode == 1348092)
-                await MainActor.run {
-                    AppLogger.shared.info("Auth", "Thử \(candidate.label) báo mã \(errInfo.code)/\(errInfo.subcode): \(errInfo.message)")
-                }
-                if !isInvalidCreds {
-                    break
-                }
-            }
-        }
+                onStatusUpdate?("Đang xác thực 2FA (\(otpCode))...")
 
-        if let errInfo = extractErrorInfo(from: lastResponseJson) {
-            throw SpaceLoginError.apiError("\(errInfo.message) (Mã: \(errInfo.code)\(errInfo.subcode > 0 ? "/\(errInfo.subcode)" : ""))")
-        }
-
-        throw SpaceLoginError.apiError("Không nhận diện được phản hồi đăng nhập.")
-    }
-
-    /// Thực hiện bước xác thực 2FA & vượt chốt chặn "Hoàn tất quá trình đăng nhập bảo mật" (1348162 / 406) ngay lập tức (KHÔNG lặp chờ 10 lần)
-    private static func performTwoFactorStep(
-        spaceId: UUID?,
-        cleanUser: String,
-        cleanPass: String,
-        encryptedPassword: String,
-        cleanTotp: String,
-        firstFactor: String,
-        errorData: [String: Any],
-        deviceId: String,
-        adid: String,
-        simSerial: String,
-        resolvedMachineId: String,
-        serverTimestamp: Int,
-        convertAll: Bool,
-        initialErrorMessage: String,
-        onStatusUpdate: (@Sendable (String) -> Void)?
-    ) async throws -> SpaceTokenVault {
-        let uidValue: String
-        if let uidStr = errorData["uid"] as? String, !uidStr.isEmpty {
-            uidValue = uidStr
-        } else if let uidNum = errorData["uid"] as? NSNumber {
-            uidValue = uidNum.stringValue
-        } else {
-            uidValue = cleanUser
-        }
-
-        let serverMachineId = (errorData["machine_id"] as? String) ?? resolvedMachineId
-
-        // Lưu cố định (deviceId, serverMachineId, firstFactor, uidValue) vào Keychain
-        persistLoginDeviceState(
-            spaceId: spaceId,
-            cleanUser: cleanUser,
-            cleanPass: cleanPass,
-            cleanTotp: cleanTotp,
-            machineId: serverMachineId,
-            deviceId: deviceId,
-            adid: adid,
-            simSerial: simSerial,
-            pendingFirstFactor: firstFactor,
-            pendingUid: uidValue
-        )
-
-        let serverDate = Date(timeIntervalSince1970: TimeInterval(serverTimestamp))
-        let otpCode: String = {
-            if !cleanTotp.isEmpty {
-                if let c = SwiftTOTP.code(cleanTotp, at: Date()) { return c }
-                if let c = SwiftTOTP.code(cleanTotp, at: serverDate) { return c }
-            }
-            return ""
-        }()
-
-        onStatusUpdate?("Đang gửi mã xác thực 2FA (\(otpCode.isEmpty ? "Thiết bị đã duyệt" : otpCode))...")
-
-        // 1. Gửi xác thực 2FA chuẩn b-graph.facebook.com/auth/login với "password": encryptedPassword (Quan trọng: b-graph bắt buộc password phải là chuỗi mã hoá #PWD_FB4A, KHÔNG phải otpCode!)
-        if !firstFactor.isEmpty && !otpCode.isEmpty {
-            for machineCandidate in [serverMachineId, firstFactor] {
+                // Cấu trúc 2FA chính xác từ script Python 1767528775-Login2FaConvertToken.py
                 let data2FA: [String: String] = [
                     "locale": "vi_VN",
                     "format": "json",
@@ -1000,339 +897,69 @@ enum FacebookAPILoginClient {
                     "access_token": accessToken,
                     "generate_session_cookies": "true",
                     "generate_machine_id": "1",
-                    "password": encryptedPassword,
                     "twofactor_code": otpCode,
                     "credentials_type": "two_factor",
                     "error_detail_type": "button_with_disabled",
-                    "source": "login",
                     "first_factor": firstFactor,
-                    "adid": adid,
+                    "password": encryptedPassword,
                     "userid": uidValue,
-                    "machine_id": machineCandidate,
-                    "client_country_code": "VN",
-                    "fb_api_req_friendly_name": "authenticate",
-                    "fb_api_caller_class": "com.facebook.account.login.protocol.Fb4aAuthHandler"
+                    "machine_id": firstFactor
                 ]
-                for authHeader in ["OAuth null", "OAuth \(accessToken)"] {
-                    if let json2FA = try? await sendAuthRequest(
-                        url: apiURL,
-                        params: data2FA,
-                        extraHeaders: ["authorization": authHeader]
-                    ), let tok = json2FA["access_token"] as? String, !tok.isEmpty {
-                        persistLoginDeviceState(
-                            spaceId: spaceId,
-                            cleanUser: cleanUser,
-                            cleanPass: cleanPass,
-                            cleanTotp: cleanTotp,
-                            machineId: (json2FA["machine_id"] as? String) ?? serverMachineId,
-                            deviceId: deviceId,
-                            adid: adid,
-                            simSerial: simSerial,
-                            pendingFirstFactor: "",
-                            pendingUid: uidValue
+
+                let response2FA = try await sendAuthRequest(url: apiURL, params: data2FA)
+                if let token2FA = response2FA["access_token"] as? String, !token2FA.isEmpty {
+                    let finalMachine = (response2FA["machine_id"] as? String) ?? firstFactor
+                    persistLoginDeviceState(
+                        spaceId: spaceId,
+                        cleanUser: cleanUser,
+                        cleanPass: cleanPass,
+                        cleanTotp: cleanTotp,
+                        machineId: finalMachine,
+                        deviceId: deviceId,
+                        adid: adid,
+                        simSerial: simSerial,
+                        pendingFirstFactor: "",
+                        pendingUid: uidValue
+                    )
+                    onStatusUpdate?("Xác thực 2FA thành công! Đang convert sang 6 App Token...")
+                    return await buildVault(uid: uidValue, responseJson: response2FA, convertAll: convertAll)
+                }
+
+                if let err2FA = extractErrorInfo(from: response2FA) {
+                    throw SpaceLoginError.apiError("Lỗi xác thực 2FA: \(err2FA.message)")
+                }
+            }
+
+            // Fallback: nếu space đã có cookie WebView đăng nhập, trích xuất token trực tiếp
+            if let spaceId {
+                let webCookies = await WebCookieBridge.extractFacebookCookies(from: spaceId)
+                let cookieStr = FacebookAppTokens.formatCookieString(webCookies)
+                if cookieStr.contains("c_user="), cookieStr.contains("xs=") {
+                    onStatusUpdate?("Đang trích xuất Token từ Cookie trình duyệt đã đăng nhập...")
+                    if let webToken = await extractTokenFromCookieString(cookieStr), !webToken.isEmpty {
+                        let converted = convertAll ? await convertAllTokens(from: webToken) : [:]
+                        let cUser = webCookies.first(where: { $0.name == "c_user" })?.value ?? cleanUser
+                        return SpaceTokenVault(
+                            uid: cUser,
+                            originalPrefix: FacebookAppTokens.extractTokenPrefix(webToken),
+                            originalToken: webToken,
+                            cookieString: cookieStr,
+                            cookies: webCookies,
+                            convertedTokens: converted,
+                            updatedAt: Date()
                         )
-                        return await buildVault(uid: uidValue, responseJson: json2FA, convertAll: convertAll)
                     }
                 }
             }
 
-            // 2. Thử qua endpoint b-api.facebook.com/method/auth.login (có chữ ký MD5 sig)
-            for passField in [encryptedPassword, otpCode, cleanPass] {
-                let bapi2FA = signedParams([
-                    "adid": adid,
-                    "format": "json",
-                    "device_id": deviceId,
-                    "email": cleanUser,
-                    "userid": uidValue,
-                    "password": passField,
-                    "twofactor_code": otpCode,
-                    "first_factor": firstFactor,
-                    "credentials_type": "two_factor",
-                    "source": "login",
-                    "error_detail_type": "button_with_disabled",
-                    "generate_session_cookies": "1",
-                    "generate_machine_id": "1",
-                    "machine_id": serverMachineId,
-                    "family_device_id": deviceId,
-                    "sim_serials": "[\"\(simSerial)\"]",
-                    "locale": "vi_VN",
-                    "client_country_code": "VN",
-                    "fb_api_req_friendly_name": "authenticate",
-                    "fb_api_caller_class": "com.facebook.account.login.protocol.Fb4aAuthHandler",
-                    "api_key": apiKey,
-                    "access_token": accessToken
-                ])
-                if let json2FA = try? await sendAuthRequest(url: legacyApiURL, params: bapi2FA),
-                   let tok = json2FA["access_token"] as? String, !tok.isEmpty {
-                    persistLoginDeviceState(
-                        spaceId: spaceId,
-                        cleanUser: cleanUser,
-                        cleanPass: cleanPass,
-                        cleanTotp: cleanTotp,
-                        machineId: (json2FA["machine_id"] as? String) ?? serverMachineId,
-                        deviceId: deviceId,
-                        adid: adid,
-                        simSerial: simSerial,
-                        pendingFirstFactor: "",
-                        pendingUid: uidValue
-                    )
-                    return await buildVault(uid: uidValue, responseJson: json2FA, convertAll: convertAll)
-                }
+            var extraTip = ""
+            if errInfo.code == 400 || errInfo.subcode == 1348092 {
+                extraTip = "\n• Mẹo: Nếu mật khẩu chính xác nhưng FB báo sai, hãy lấy giá trị cookie 'datr' của tài khoản dán vào ô 'Machine ID / datr' (như gợi ý trong file script Python)."
             }
+            throw SpaceLoginError.apiError("\(errInfo.message) (Mã: \(errInfo.code)\(errInfo.subcode > 0 ? "/\(errInfo.subcode)" : ""))\(extraTip)")
         }
 
-        // 3. Nếu người dùng đã bấm "Phê duyệt" trên thông báo Facebook (không cần hoặc kèm 2FA): kiểm tra check_approved_machine & xác thực lại với serverMachineId vừa được cấp
-        if !firstFactor.isEmpty {
-            for credType in ["check_approved_machine", "two_factor"] {
-                let approvalParams: [String: String] = [
-                    "locale": "vi_VN",
-                    "client_country_code": "VN",
-                    "format": "json",
-                    "email": cleanUser,
-                    "userid": uidValue,
-                    "password": encryptedPassword,
-                    "device_id": deviceId,
-                    "family_device_id": deviceId,
-                    "adid": adid,
-                    "access_token": accessToken,
-                    "api_key": apiKey,
-                    "generate_session_cookies": "1",
-                    "generate_machine_id": "1",
-                    "credentials_type": credType,
-                    "source": "login",
-                    "error_detail_type": "button_with_disabled",
-                    "first_factor": firstFactor,
-                    "machine_id": serverMachineId,
-                    "fb_api_req_friendly_name": "authenticate",
-                    "fb_api_caller_class": "com.facebook.account.login.protocol.Fb4aAuthHandler"
-                ]
-                if let jsonApp = try? await sendAuthRequest(
-                    url: apiURL,
-                    params: approvalParams,
-                    extraHeaders: ["authorization": "OAuth null"]
-                ), let tok = jsonApp["access_token"] as? String, !tok.isEmpty {
-                    persistLoginDeviceState(
-                        spaceId: spaceId,
-                        cleanUser: cleanUser,
-                        cleanPass: cleanPass,
-                        cleanTotp: cleanTotp,
-                        machineId: (jsonApp["machine_id"] as? String) ?? serverMachineId,
-                        deviceId: deviceId,
-                        adid: adid,
-                        simSerial: simSerial,
-                        pendingFirstFactor: "",
-                        pendingUid: uidValue
-                    )
-                    return await buildVault(uid: uidValue, responseJson: jsonApp, convertAll: convertAll)
-                }
-            }
-        }
-
-        // 4. VƯỢT CHỐT CHẶN BẢO MẬT CAA (1348162 - "Hoàn tất quá trình đăng nhập bảo mật"):
-        // Khi app FB4A (350685531728) bị kẹt thông báo bảo mật dù đã duyệt, tự động chuyển sang xác thực qua các cổng App Facebook chính chủ khác (Ads Manager, Messenger, FB Lite, FB iPhone) rồi quy đổi ra đủ bộ 6 Token!
-        onStatusUpdate?("Đang chuyển cổng xác thực dự phòng (Ads Manager / Messenger / iOS) để vượt khoá bảo mật...")
-        if let fallbackJson = await tryFallbackAppsAuthentication(
-            cleanUser: cleanUser,
-            uidValue: uidValue,
-            cleanPass: cleanPass,
-            encryptedPassword: encryptedPassword,
-            otpCode: otpCode,
-            deviceId: deviceId,
-            adid: adid,
-            serverMachineId: serverMachineId
-        ), let tok = fallbackJson["access_token"] as? String, !tok.isEmpty {
-            persistLoginDeviceState(
-                spaceId: spaceId,
-                cleanUser: cleanUser,
-                cleanPass: cleanPass,
-                cleanTotp: cleanTotp,
-                machineId: (fallbackJson["machine_id"] as? String) ?? serverMachineId,
-                deviceId: deviceId,
-                adid: adid,
-                simSerial: simSerial,
-                pendingFirstFactor: "",
-                pendingUid: uidValue
-            )
-            await MainActor.run {
-                AppLogger.shared.info("Auth", "Vượt chốt bảo mật thành công qua cổng App dự phòng cho UID \(uidValue)")
-            }
-            return await buildVault(uid: uidValue, responseJson: fallbackJson, convertAll: convertAll)
-        }
-
-        // 5. Dự phòng cuối: Nếu người dùng đã đăng nhập trong trình duyệt WebView của Space này, trích xuất Cookie + Token ngay
-        if let spaceId {
-            let webCookies = await WebCookieBridge.extractFacebookCookies(from: spaceId)
-            let cookieStr = FacebookAppTokens.formatCookieString(webCookies)
-            if cookieStr.contains("c_user="), cookieStr.contains("xs=") {
-                onStatusUpdate?("Đang trích xuất Access Token từ phiên WebView đã đăng nhập...")
-                if let webToken = await extractTokenFromCookieString(cookieStr), !webToken.isEmpty {
-                    let converted = convertAll ? await convertAllTokens(from: webToken) : [:]
-                    let cUser = webCookies.first(where: { $0.name == "c_user" })?.value ?? uidValue
-                    return SpaceTokenVault(
-                        uid: cUser,
-                        originalPrefix: FacebookAppTokens.extractTokenPrefix(webToken),
-                        originalToken: webToken,
-                        cookieString: cookieStr,
-                        cookies: webCookies,
-                        convertedTokens: converted,
-                        updatedAt: Date()
-                    )
-                }
-            }
-        }
-
-        throw SpaceLoginError.apiError(
-            "Facebook từ chối cấp Token trực tiếp: \(initialErrorMessage).\n• Hãy kiểm tra lại Mã 2FA (Base32 hoặc 6 số) và Mật khẩu.\n• Hoặc đăng nhập tài khoản vào trình duyệt của Space rồi dùng mục 'Nhập Cookie / Token thủ công' bên dưới."
-        )
-    }
-
-    /// Tự động thử đăng nhập + 2FA qua các cổng App chính chủ khác của Facebook (Ads Manager, Messenger, FB Lite, FB iPhone) khi cổng FB4A (350685531728) báo lỗi 406/1348162
-    private static func tryFallbackAppsAuthentication(
-        cleanUser: String,
-        uidValue: String,
-        cleanPass: String,
-        encryptedPassword: String,
-        otpCode: String,
-        deviceId: String,
-        adid: String,
-        serverMachineId: String
-    ) async -> [String: Any]? {
-        struct FallbackAppClient {
-            let name: String
-            let appId: String
-            let apiKey: String
-            let apiSecret: String
-            let userAgent: String
-            var appToken: String { "\(appId)|\(apiSecret)" }
-        }
-
-        let fallbackClients: [FallbackAppClient] = [
-            FallbackAppClient(
-                name: "Ads Manager Android",
-                appId: "438142079694454",
-                apiKey: "438142079694454",
-                apiSecret: "fc0a7caa49b192f64f6f5a6d9643bb28",
-                userAgent: "Dalvik/2.1.0 (Linux; U; Android 11; RMX3261 Build/RP1A.201005.001) [FBAN/AdsManagerAndroid;FBAV/125.0.0.28.116;FBPN/com.facebook.adsmanager;FBLC/vi_VN;FBBV/480086274;FBCR/Viettel;FBMF/realme;FBBD/realme;FBDV/RMX3261;FBSV/11;FBCA/arm64-v8a:armeabi-v7a;FBDM/{density=2.0,width=720,height=1600};FB_FW/1;]"
-            ),
-            FallbackAppClient(
-                name: "Messenger Android",
-                appId: "256002347743983",
-                apiKey: "256002347743983",
-                apiSecret: "374e60f8b9bb6b8cbb30f78030438895",
-                userAgent: "Dalvik/2.1.0 (Linux; U; Android 11; RMX3261 Build/RP1A.201005.001) [FBAN/Orca-Android;FBAV/410.0.0.26.115;FBPN/com.facebook.orca;FBLC/vi_VN;FBBV/480086274;FBCR/Viettel;FBMF/realme;FBBD/realme;FBDV/RMX3261;FBSV/11;FBCA/arm64-v8a:armeabi-v7a;FBDM/{density=2.0,width=720,height=1600};FB_FW/1;]"
-            ),
-            FallbackAppClient(
-                name: "Facebook Lite",
-                appId: "275254692598279",
-                apiKey: "275254692598279",
-                apiSecret: "370773e9a62829d290d9a3975779926b",
-                userAgent: "Dalvik/2.1.0 (Linux; U; Android 11; RMX3261 Build/RP1A.201005.001) [FBAN/Lite;FBAV/350.0.0.9.106;FBPN/com.facebook.lite;FBLC/vi_VN;FBBV/480086274;FBCR/Viettel;FBMF/realme;FBBD/realme;FBDV/RMX3261;FBSV/11;FBCA/arm64-v8a:armeabi-v7a;FBDM/{density=2.0,width=720,height=1600};]"
-            ),
-            FallbackAppClient(
-                name: "Facebook for iPhone",
-                appId: "6628568379",
-                apiKey: "3e7c78e35a76a9299309885393b02d97",
-                apiSecret: "c1e620fa708a1d5696fb991c1bde5662",
-                userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/21E219 [FBAN/FBIOS;FBAV/455.0.0.35.107;FBBV/577667262;FBDV/iPhone15,3;FBMD/iPhone;FBSN/iOS;FBSV/17.4;FBSS/3;FBID/phone;FBLC/vi_VN;FBOP/5;FBRV/0]"
-            )
-        ]
-
-        for client in fallbackClients {
-            let headers = [
-                "authorization": "OAuth \(client.appToken)",
-                "user-agent": client.userAgent
-            ]
-
-            // Bước 1 của cổng dự phòng
-            let step1Params: [String: String] = signedParams([
-                "adid": adid,
-                "format": "json",
-                "device_id": deviceId,
-                "email": cleanUser,
-                "password": encryptedPassword,
-                "credentials_type": "password",
-                "generate_session_cookies": "1",
-                "generate_analytics_claim": "1",
-                "generate_machine_id": "1",
-                "locale": "vi_VN",
-                "client_country_code": "VN",
-                "family_device_id": deviceId,
-                "machine_id": serverMachineId,
-                "source": "login",
-                "error_detail_type": "button_with_disabled",
-                "fb_api_req_friendly_name": "authenticate",
-                "api_key": client.apiKey,
-                "access_token": client.appToken
-            ], secret: client.apiSecret)
-
-            guard let step1Json = try? await sendAuthRequest(url: apiURL, params: step1Params, extraHeaders: headers) else {
-                continue
-            }
-
-            if let tok = step1Json["access_token"] as? String, !tok.isEmpty {
-                return step1Json
-            }
-
-            // Nếu cổng dự phòng yêu cầu 2FA, gửi ngay mã TOTP 6 số với encryptedPassword
-            if !otpCode.isEmpty, let errInfo = extractErrorInfo(from: step1Json) {
-                var errData: [String: Any] = [:]
-                if let dict = errInfo.errorObj["error_data"] as? [String: Any] {
-                    errData = dict
-                } else if let rawStr = errInfo.errorObj["error_data"] as? String,
-                          let data = rawStr.data(using: .utf8),
-                          let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    errData = parsed
-                }
-
-                let factor = (errData["login_first_factor"] as? String) ?? ""
-                let fUid: String = {
-                    if let s = errData["uid"] as? String, !s.isEmpty { return s }
-                    if let n = errData["uid"] as? NSNumber { return n.stringValue }
-                    return uidValue
-                }()
-                let fMachine = (errData["machine_id"] as? String) ?? serverMachineId
-
-                if !factor.isEmpty {
-                    let step2Params: [String: String] = [
-                        "locale": "vi_VN",
-                        "format": "json",
-                        "email": cleanUser,
-                        "device_id": deviceId,
-                        "access_token": client.appToken,
-                        "generate_session_cookies": "true",
-                        "generate_machine_id": "1",
-                        "password": encryptedPassword,
-                        "twofactor_code": otpCode,
-                        "credentials_type": "two_factor",
-                        "error_detail_type": "button_with_disabled",
-                        "source": "login",
-                        "first_factor": factor,
-                        "adid": adid,
-                        "userid": fUid,
-                        "machine_id": fMachine,
-                        "client_country_code": "VN",
-                        "fb_api_req_friendly_name": "authenticate"
-                    ]
-                    if let step2Json = try? await sendAuthRequest(
-                        url: apiURL,
-                        params: step2Params,
-                        extraHeaders: ["authorization": "OAuth null", "user-agent": client.userAgent]
-                    ), let tok = step2Json["access_token"] as? String, !tok.isEmpty {
-                        return step2Json
-                    }
-
-                    let step2Signed = signedParams(step2Params, secret: client.apiSecret)
-                    if let step2LegacyJson = try? await sendAuthRequest(
-                        url: legacyApiURL,
-                        params: step2Signed,
-                        extraHeaders: headers
-                    ), let tok = step2LegacyJson["access_token"] as? String, !tok.isEmpty {
-                        return step2LegacyJson
-                    }
-                }
-            }
-        }
-        return nil
+        throw SpaceLoginError.apiError("Không nhận diện được phản hồi từ Facebook.")
     }
 
     private static func buildVault(uid: String, responseJson: [String: Any], convertAll: Bool) async -> SpaceTokenVault {
