@@ -109,10 +109,13 @@ final class TrackedPostManager: ObservableObject {
         let cleanId = postId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanId.isEmpty, cleanId != "Thành công", cleanId != "Đã đăng thành công" else { return }
 
-        let resolvedUrl = postUrl ?? "https://www.facebook.com/\(cleanId)"
+        let rawUrl = postUrl ?? "https://www.facebook.com/posts/\(cleanId)"
+        let kind = FacebookTargetPostResolver.detectKind(from: rawUrl)
+        let resolvedUrl = FacebookTargetPostResolver.buildCanonicalURL(id: cleanId, kind: kind, originalURL: rawUrl)
         let feedbackId = Data("feedback:\(cleanId)".utf8).base64EncodedString()
 
         if let existingIdx = posts.firstIndex(where: { $0.postId == cleanId && $0.spaceId == spaceId }) {
+            posts[existingIdx].postUrl = resolvedUrl
             if !caption.isEmpty && posts[existingIdx].caption.isEmpty {
                 posts[existingIdx].caption = caption
             }
@@ -142,24 +145,49 @@ final class TrackedPostManager: ObservableObject {
     func addPostByURLOrID(
         rawInput: String,
         space: Space,
+        categoryHint: TargetCategoryHint = .auto,
         customCaption: String = "",
         enableAI: Bool = false
     ) async throws -> TrackedPostItem {
         let creds = await Self.resolveCookieAndToken(for: space)
-        let resolved = try await FacebookTargetPostResolver.resolve(
-            input: rawInput,
+
+        // Bước 1: Chuyển đổi URL chia sẻ / rút gọn giống hệt tính năng MultiSpace
+        var effectiveInput = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        var canonicalFromShare: String? = nil
+        if let converted = await FacebookTargetPostResolver.resolveShareURLToCanonical(
+            input: effectiveInput,
+            cookieString: creds.cookie,
+            proxy: space.proxy
+        ) {
+            effectiveInput = converted.canonicalURL
+            canonicalFromShare = converted.canonicalURL
+        }
+
+        // Bước 2: Giải mã chi tiết Post ID, Feedback ID, Tác giả & Nội dung
+        var resolved = try await FacebookTargetPostResolver.resolve(
+            input: effectiveInput,
             cookieString: creds.cookie,
             accessToken: creds.token,
             proxy: space.proxy,
             userAgent: space.fingerprint?.userAgent
         )
+        if categoryHint != .auto {
+            resolved.targetKind = categoryHint.rawValue
+        }
 
         let finalCaption = !customCaption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? customCaption
             : resolved.postText
-        let finalUrl = resolved.canonicalURL?.absoluteString ?? "https://www.facebook.com/\(resolved.postId)"
+        let finalUrl = canonicalFromShare
+            ?? resolved.canonicalURL?.absoluteString
+            ?? FacebookTargetPostResolver.buildCanonicalURL(
+                id: resolved.postId,
+                kind: resolved.targetKind,
+                originalURL: effectiveInput
+            )
 
         if let existingIdx = posts.firstIndex(where: { $0.postId == resolved.postId && $0.spaceId == space.id }) {
+            posts[existingIdx].postUrl = finalUrl
             if !finalCaption.isEmpty {
                 posts[existingIdx].caption = finalCaption
             }
@@ -252,22 +280,87 @@ final class TrackedPostManager: ObservableObject {
 
     // MARK: - Sync Engagement Stats & Comments
 
+    func convertPostURL(id: UUID, space: Space?) async {
+        guard let idx = posts.firstIndex(where: { $0.id == id }) else { return }
+        let post = posts[idx]
+        let creds = await Self.resolveCookieAndToken(forId: post.spaceId, fallbackSpace: space)
+        let inputToConvert = post.postUrl.isEmpty ? post.postId : post.postUrl
+        if let converted = await FacebookTargetPostResolver.resolveShareURLToCanonical(
+            input: inputToConvert,
+            cookieString: creds.cookie,
+            proxy: space?.proxy
+        ) {
+            if let currentIndex = posts.firstIndex(where: { $0.id == id }) {
+                posts[currentIndex].postUrl = converted.canonicalURL
+                if !converted.postId.isEmpty {
+                    posts[currentIndex].postId = converted.postId
+                    posts[currentIndex].feedbackId = Data("feedback:\(converted.postId)".utf8).base64EncodedString()
+                }
+                savePosts()
+                statusBanner = "✅ Đã chuyển đổi URL chuẩn: \(converted.canonicalURL)"
+            }
+        } else {
+            let kind = FacebookTargetPostResolver.detectKind(from: post.postUrl)
+            let fallbackCanonical = FacebookTargetPostResolver.buildCanonicalURL(
+                id: post.postId,
+                kind: kind,
+                originalURL: post.postUrl
+            )
+            if let currentIndex = posts.firstIndex(where: { $0.id == id }) {
+                posts[currentIndex].postUrl = fallbackCanonical
+                savePosts()
+                statusBanner = "✅ Đã chuẩn hóa URL: \(fallbackCanonical)"
+            }
+        }
+    }
+
     func syncSinglePost(id: UUID, space: Space?) async {
         guard let idx = posts.firstIndex(where: { $0.id == id }) else { return }
         syncingPostIds.insert(id)
         defer { syncingPostIds.remove(id) }
 
-        let post = posts[idx]
+        var post = posts[idx]
         let creds = await Self.resolveCookieAndToken(forId: post.spaceId, fallbackSpace: space)
         guard !creds.cookie.isEmpty || !creds.token.isEmpty else {
             statusBanner = "⚠️ \(post.spaceName) chưa có Token/Cookie để đồng bộ."
             return
         }
 
+        // Tự động chuyển đổi URL sang dạng chuẩn (giống MultiSpace) nếu URL là link rút gọn hoặc chưa chuẩn
+        let lowerUrl = post.postUrl.lowercased()
+        let needsCanonicalize = lowerUrl.contains("/share/") || lowerUrl.contains("pfbid") || lowerUrl.contains("fb.watch") || (!lowerUrl.contains("/posts/") && !lowerUrl.contains("/reel/") && !lowerUrl.contains("/videos/"))
+        if needsCanonicalize {
+            if let converted = await FacebookTargetPostResolver.resolveShareURLToCanonical(
+                input: post.postUrl.isEmpty ? post.postId : post.postUrl,
+                cookieString: creds.cookie,
+                proxy: space?.proxy
+            ) {
+                post.postUrl = converted.canonicalURL
+                if !converted.postId.isEmpty {
+                    post.postId = converted.postId
+                    post.feedbackId = Data("feedback:\(converted.postId)".utf8).base64EncodedString()
+                }
+            } else {
+                let kind = FacebookTargetPostResolver.detectKind(from: post.postUrl)
+                post.postUrl = FacebookTargetPostResolver.buildCanonicalURL(
+                    id: post.postId,
+                    kind: kind,
+                    originalURL: post.postUrl
+                )
+            }
+            if let cur = posts.firstIndex(where: { $0.id == id }) {
+                posts[cur].postUrl = post.postUrl
+                posts[cur].postId = post.postId
+                posts[cur].feedbackId = post.feedbackId
+            }
+        }
+
         let details = await PostTrackingAPIClient.fetchPostEngagementAndComments(
             postId: post.postId,
+            postUrl: post.postUrl,
             feedbackId: post.feedbackId,
             ownerUserId: creds.uid,
+            spaceId: post.spaceId,
             cookieString: creds.cookie,
             accessToken: creds.token,
             proxy: space?.proxy
@@ -300,7 +393,9 @@ final class TrackedPostManager: ObservableObject {
             mergedComments.append(c)
         }
 
-        posts[currentIndex].comments = mergedComments
+        if !mergedComments.isEmpty {
+            posts[currentIndex].comments = mergedComments
+        }
         posts[currentIndex].lastSyncedAt = Date()
         savePosts()
     }
@@ -608,82 +703,137 @@ enum PostTrackingAPIClient {
         limit: Int = 10
     ) async -> [TrackedPostItem] {
         var results: [TrackedPostItem] = []
-        guard !accessToken.isEmpty else { return results }
 
-        let targetUid = userId.isEmpty ? "me" : userId
-        var comps = URLComponents(string: "https://graph.facebook.com/v18.0/\(targetUid)/posts")
-        comps?.queryItems = [
-            URLQueryItem(name: "fields", value: "id,message,story,created_time,permalink_url,shares,reactions.summary(total_count),likes.summary(total_count),comments.limit(20).summary(total_count){id,message,created_time,from,like_count,comment_count}"),
-            URLQueryItem(name: "limit", value: "\(limit)"),
-            URLQueryItem(name: "access_token", value: accessToken)
-        ]
-
-        guard let url = comps?.url else { return results }
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let dataArr = json["data"] as? [[String: Any]] else {
-                return results
-            }
+        if !accessToken.isEmpty {
+            let targetUid = userId.isEmpty ? "me" : userId
+            let endpoints = [
+                ("https://graph.facebook.com/\(targetUid)/posts", "id,message,story,created_time,permalink_url,shares,reactions.summary(true),likes.summary(true),comments.limit(20).summary(true){id,message,created_time,from,like_count,comment_count}"),
+                ("https://graph.facebook.com/\(targetUid)/feed", "id,message,story,created_time,permalink_url,shares,likes.summary(true),comments.limit(20).summary(true){id,message,created_time,from,like_count,comment_count}"),
+                ("https://graph.facebook.com/me/posts", "id,message,story,created_time,permalink_url,likes.summary(true),comments.limit(20).summary(true){id,message,created_time,from,like_count,comment_count}")
+            ]
 
             let isoFormatter = ISO8601DateFormatter()
-            for item in dataArr {
-                let rawId = item["id"] as? String ?? ""
-                let cleanPostId = rawId.contains("_")
-                    ? String(rawId.split(separator: "_").last ?? Substring(rawId))
-                    : rawId
-                guard !cleanPostId.isEmpty else { continue }
 
-                let msg = (item["message"] as? String) ?? (item["story"] as? String) ?? ""
-                let permalink = (item["permalink_url"] as? String) ?? "https://www.facebook.com/\(rawId)"
-                let createdStr = item["created_time"] as? String ?? ""
-                let createdDate = isoFormatter.date(from: createdStr) ?? Date()
+            for (ep, fields) in endpoints {
+                guard var comps = URLComponents(string: ep) else { continue }
+                comps.queryItems = [
+                    URLQueryItem(name: "fields", value: fields),
+                    URLQueryItem(name: "limit", value: "\(limit)"),
+                    URLQueryItem(name: "access_token", value: accessToken)
+                ]
+                guard let url = comps.url else { continue }
+                do {
+                    let (data, _) = try await URLSession.shared.data(from: url)
+                    guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let dataArr = json["data"] as? [[String: Any]], !dataArr.isEmpty else {
+                        continue
+                    }
 
-                let reactCount = ((item["reactions"] as? [String: Any])?["summary"] as? [String: Any])?["total_count"] as? Int
-                    ?? ((item["likes"] as? [String: Any])?["summary"] as? [String: Any])?["total_count"] as? Int
-                    ?? 0
-                let shareCount = (item["shares"] as? [String: Any])?["count"] as? Int ?? 0
+                    for item in dataArr {
+                        let rawId = item["id"] as? String ?? ""
+                        let cleanPostId = rawId.contains("_")
+                            ? String(rawId.split(separator: "_").last ?? Substring(rawId))
+                            : rawId
+                        guard !cleanPostId.isEmpty else { continue }
 
-                let commentsRoot = item["comments"] as? [String: Any]
-                let parsedComments = parseGraphComments(from: commentsRoot, ownerUserId: userId)
-                let cmtCount = (commentsRoot?["summary"] as? [String: Any])?["total_count"] as? Int ?? parsedComments.count
+                        let msg = (item["message"] as? String) ?? (item["story"] as? String) ?? ""
+                        let rawPermalink = (item["permalink_url"] as? String) ?? "https://www.facebook.com/posts/\(cleanPostId)"
+                        let kind = FacebookTargetPostResolver.detectKind(from: rawPermalink)
+                        let canonicalPermalink = FacebookTargetPostResolver.buildCanonicalURL(
+                            id: cleanPostId,
+                            kind: kind,
+                            originalURL: rawPermalink
+                        )
+                        let createdStr = item["created_time"] as? String ?? ""
+                        let createdDate = isoFormatter.date(from: createdStr) ?? Date()
 
-                let tracked = TrackedPostItem(
-                    postId: cleanPostId,
-                    feedbackId: Data("feedback:\(cleanPostId)".utf8).base64EncodedString(),
-                    postUrl: permalink,
-                    spaceId: space.id,
-                    spaceName: space.name,
-                    authorName: space.name,
-                    caption: msg,
-                    createdAt: createdDate,
-                    lastSyncedAt: Date(),
-                    reactionCount: reactCount,
-                    commentCount: cmtCount,
-                    shareCount: shareCount,
-                    comments: parsedComments
-                )
-                results.append(tracked)
+                        let reactCount = ((item["reactions"] as? [String: Any])?["summary"] as? [String: Any])?["total_count"] as? Int
+                            ?? ((item["likes"] as? [String: Any])?["summary"] as? [String: Any])?["total_count"] as? Int
+                            ?? 0
+                        let shareCount = (item["shares"] as? [String: Any])?["count"] as? Int ?? 0
+
+                        let commentsRoot = item["comments"] as? [String: Any]
+                        let parsedComments = parseGraphComments(from: commentsRoot, ownerUserId: userId)
+                        let cmtCount = (commentsRoot?["summary"] as? [String: Any])?["total_count"] as? Int ?? parsedComments.count
+
+                        let tracked = TrackedPostItem(
+                            postId: cleanPostId,
+                            feedbackId: Data("feedback:\(cleanPostId)".utf8).base64EncodedString(),
+                            postUrl: canonicalPermalink,
+                            spaceId: space.id,
+                            spaceName: space.name,
+                            authorName: space.name,
+                            caption: msg,
+                            createdAt: createdDate,
+                            lastSyncedAt: Date(),
+                            reactionCount: reactCount,
+                            commentCount: cmtCount,
+                            shareCount: shareCount,
+                            comments: parsedComments
+                        )
+                        results.append(tracked)
+                    }
+                    if !results.isEmpty { break }
+                } catch {
+                    continue
+                }
             }
-        } catch {
-            AppLogger.shared.warning("PostTracker", "Lỗi quét bài đã đăng cho \(space.name): \(error.localizedDescription)")
+        }
+
+        // Fallback quét trang cá nhân bằng Cookie nếu Graph API không trả về bài viết
+        if results.isEmpty, !cookieString.isEmpty {
+            let targetUid = userId.isEmpty ? (FacebookTargetPostResolver.firstMatch(pattern: #"c_user=(\d+)"#, in: cookieString) ?? "") : userId
+            if !targetUid.isEmpty, let profileURL = URL(string: "https://www.facebook.com/profile.php?id=\(targetUid)") {
+                let session = makeCookieSession(cookieString: cookieString, proxy: space.proxy)
+                var req = URLRequest(url: profileURL)
+                req.httpMethod = "GET"
+                req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+                req.setValue(cookieString, forHTTPHeaderField: "Cookie")
+                if let (data, _) = try? await session.data(for: req),
+                   let html = String(data: data, encoding: .utf8), !html.isEmpty {
+                    var seen = Set<String>()
+                    let pat = #""(?:post_id|top_level_post_id|story_fbid)"\s*:\s*"?(\d{8,25})"?"#
+                    if let regex = try? NSRegularExpression(pattern: pat) {
+                        let ns = html as NSString
+                        for m in regex.matches(in: html, range: NSRange(location: 0, length: ns.length)) where m.numberOfRanges > 1 {
+                            let pid = ns.substring(with: m.range(at: 1))
+                            if !seen.contains(pid), results.count < limit {
+                                seen.insert(pid)
+                                results.append(
+                                    TrackedPostItem(
+                                        postId: pid,
+                                        feedbackId: Data("feedback:\(pid)".utf8).base64EncodedString(),
+                                        postUrl: "https://www.facebook.com/posts/\(pid)",
+                                        spaceId: space.id,
+                                        spaceName: space.name,
+                                        authorName: space.name,
+                                        caption: ""
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         return results
     }
 
-    /// Lấy thống kê tương tác (Reaction, Comment, Share) và danh sách bình luận chi tiết của 1 bài viết
+    /// Lấy thống kê tương tác (Reaction, Comment, Share) và danh sách bình luận chi tiết của 1 bài viết (Đa tầng: Graph API + Comet Relay JSON + GraphQL Feedback)
     static func fetchPostEngagementAndComments(
         postId: String,
+        postUrl: String = "",
         feedbackId: String,
         ownerUserId: String,
+        spaceId: UUID? = nil,
         cookieString: String,
         accessToken: String,
         proxy: SpaceProxy? = nil
     ) async -> PostEngagementSnapshot {
-        var snapshot = PostEngagementSnapshot()
+        var finalSnap = PostEngagementSnapshot()
 
-        // 1. Ưu tiên truy vấn qua Graph API (thử cả postId trực tiếp và ownerUserId_postId)
+        // Tầng 1: Truy vấn qua Graph API (thử cả ownerUserId_postId và postId trực tiếp + truy vấn nhánh con /comments & /reactions)
         if !accessToken.isEmpty {
             let candidateIds: [String] = {
                 if postId.contains("_") || ownerUserId.isEmpty {
@@ -694,19 +844,81 @@ enum PostTrackingAPIClient {
 
             for cid in candidateIds {
                 if let graphSnap = await fetchViaGraphAPI(queryPostId: cid, ownerUserId: ownerUserId, accessToken: accessToken) {
-                    return graphSnap
+                    mergeSnapshots(into: &finalSnap, from: graphSnap)
+                    if finalSnap.reactionCount > 0 || finalSnap.commentCount > 0 || !finalSnap.comments.isEmpty {
+                        break
+                    }
                 }
             }
         }
 
-        // 2. Fallback: Quét từ trang bài viết bằng Cookie nếu Graph API bị giới hạn quyền
+        // Tầng 2: Quét trực tiếp từ trang bài viết (Comet Relay JSON + HTML Regex) bằng Cookie phiên để lấy đủ Reaction, Comment, Share thực tế
         if !cookieString.isEmpty {
-            if let webSnap = await fetchViaWebScrape(postId: postId, cookieString: cookieString, proxy: proxy) {
-                snapshot = webSnap
+            if let webSnap = await fetchViaWebScrape(
+                postId: postId,
+                postUrl: postUrl,
+                feedbackId: feedbackId,
+                ownerUserId: ownerUserId,
+                cookieString: cookieString,
+                proxy: proxy
+            ) {
+                mergeSnapshots(into: &finalSnap, from: webSnap)
+            }
+
+            // Tầng 3: Nếu vẫn chưa lấy được số liệu hoặc danh sách comment, gọi trực tiếp Comet GraphQL Feedback API
+            if finalSnap.reactionCount == 0 && finalSnap.commentCount == 0 && finalSnap.comments.isEmpty {
+                let effectiveFbId = feedbackId.isEmpty
+                    ? Data("feedback:\(postId)".utf8).base64EncodedString()
+                    : feedbackId
+                if let gqlSnap = await fetchViaCometGraphQLFeedback(
+                    postId: postId,
+                    feedbackId: effectiveFbId,
+                    ownerUserId: ownerUserId,
+                    spaceId: spaceId ?? UUID(),
+                    cookieString: cookieString,
+                    proxy: proxy
+                ) {
+                    mergeSnapshots(into: &finalSnap, from: gqlSnap)
+                }
             }
         }
 
-        return snapshot
+        finalSnap.commentCount = max(finalSnap.commentCount, finalSnap.comments.count)
+        return finalSnap
+    }
+
+    private static func mergeSnapshots(into target: inout PostEngagementSnapshot, from source: PostEngagementSnapshot) {
+        target.reactionCount = max(target.reactionCount, source.reactionCount)
+        target.commentCount = max(target.commentCount, source.commentCount)
+        target.shareCount = max(target.shareCount, source.shareCount)
+        if target.caption.isEmpty && !source.caption.isEmpty {
+            target.caption = source.caption
+        }
+        if !source.comments.isEmpty {
+            var seen = Set(target.comments.map(\.id))
+            for c in source.comments where !seen.contains(c.id) {
+                seen.insert(c.id)
+                target.comments.append(c)
+            }
+        }
+    }
+
+    private static func makeCookieSession(cookieString: String, proxy: SpaceProxy?) -> URLSession {
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 18
+        if !cookieString.isEmpty {
+            let storage = HTTPCookieStorage()
+            for c in FacebookGraphQLAutoClient.parseCookies(from: cookieString) {
+                storage.setCookie(c)
+            }
+            cfg.httpCookieStorage = storage
+            cfg.httpCookieAcceptPolicy = .always
+            cfg.httpShouldSetCookies = true
+        }
+        if let proxy, proxy.isEnabled {
+            cfg.proxyConfigurations = [proxy.toNetworkProxyConfiguration()]
+        }
+        return URLSession(configuration: cfg)
     }
 
     private static func fetchViaGraphAPI(
@@ -714,37 +926,109 @@ enum PostTrackingAPIClient {
         ownerUserId: String,
         accessToken: String
     ) async -> PostEngagementSnapshot? {
-        var comps = URLComponents(string: "https://graph.facebook.com/v18.0/\(queryPostId)")
-        comps?.queryItems = [
-            URLQueryItem(name: "fields", value: "id,message,story,shares,reactions.summary(total_count),likes.summary(total_count),comments.limit(50).summary(total_count){id,message,created_time,from,like_count,comment_count,comments.limit(10){id,message,from,created_time}}"),
-            URLQueryItem(name: "access_token", value: accessToken)
+        // Thử lần lượt bộ fields đầy đủ và bộ fields an toàn (dành cho Reel/Photo/Video không hỗ trợ trường shares)
+        let fieldSets = [
+            "id,message,story,shares,reactions.summary(true),likes.summary(true),comments.limit(50).summary(true){id,message,created_time,from,like_count,comment_count,comments.limit(10){id,message,from,created_time}}",
+            "id,message,description,story,likes.summary(true),comments.limit(50).summary(true){id,message,created_time,from,like_count,comment_count,comments.limit(10){id,message,from,created_time}}",
+            "id,likes.summary(true),comments.summary(true)"
         ]
-        guard let url = comps?.url else { return nil }
 
-        do {
-            let (data, response) = try await URLSession.shared.data(from: url)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  json["error"] == nil else {
-                return nil
+        var snap = PostEngagementSnapshot()
+        var gotAnyResponse = false
+
+        for fields in fieldSets {
+            var comps = URLComponents(string: "https://graph.facebook.com/\(queryPostId)")
+            comps?.queryItems = [
+                URLQueryItem(name: "fields", value: fields),
+                URLQueryItem(name: "access_token", value: accessToken)
+            ]
+            guard let url = comps?.url else { continue }
+
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                      let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      json["error"] == nil else {
+                    continue
+                }
+                gotAnyResponse = true
+
+                let msg = (json["message"] as? String)
+                    ?? (json["description"] as? String)
+                    ?? (json["story"] as? String)
+                    ?? ""
+                if snap.caption.isEmpty && !msg.isEmpty {
+                    snap.caption = msg
+                }
+
+                let rCount = ((json["reactions"] as? [String: Any])?["summary"] as? [String: Any])?["total_count"] as? Int
+                    ?? ((json["likes"] as? [String: Any])?["summary"] as? [String: Any])?["total_count"] as? Int
+                    ?? 0
+                snap.reactionCount = max(snap.reactionCount, rCount)
+
+                let sCount = (json["shares"] as? [String: Any])?["count"] as? Int ?? 0
+                snap.shareCount = max(snap.shareCount, sCount)
+
+                if let commentsRoot = json["comments"] as? [String: Any] {
+                    let parsed = parseGraphComments(from: commentsRoot, ownerUserId: ownerUserId)
+                    if !parsed.isEmpty && snap.comments.isEmpty {
+                        snap.comments = parsed
+                    }
+                    let cCount = (commentsRoot["summary"] as? [String: Any])?["total_count"] as? Int ?? parsed.count
+                    snap.commentCount = max(snap.commentCount, cCount)
+                }
+
+                if snap.reactionCount > 0 || snap.commentCount > 0 || !snap.comments.isEmpty {
+                    break
+                }
+            } catch {
+                continue
             }
-
-            var snap = PostEngagementSnapshot()
-            snap.caption = (json["message"] as? String) ?? (json["story"] as? String) ?? ""
-            snap.reactionCount = ((json["reactions"] as? [String: Any])?["summary"] as? [String: Any])?["total_count"] as? Int
-                ?? ((json["likes"] as? [String: Any])?["summary"] as? [String: Any])?["total_count"] as? Int
-                ?? 0
-            snap.shareCount = (json["shares"] as? [String: Any])?["count"] as? Int ?? 0
-
-            let commentsRoot = json["comments"] as? [String: Any]
-            snap.comments = parseGraphComments(from: commentsRoot, ownerUserId: ownerUserId)
-            snap.commentCount = (commentsRoot?["summary"] as? [String: Any])?["total_count"] as? Int
-                ?? snap.comments.count
-
-            return snap
-        } catch {
-            return nil
         }
+
+        // Bổ sung: Truy vấn trực tiếp nhánh /{queryPostId}/comments và /{queryPostId}/reactions nếu chưa có
+        if snap.comments.isEmpty {
+            var cComps = URLComponents(string: "https://graph.facebook.com/\(queryPostId)/comments")
+            cComps?.queryItems = [
+                URLQueryItem(name: "summary", value: "true"),
+                URLQueryItem(name: "filter", value: "toplevel"),
+                URLQueryItem(name: "limit", value: "50"),
+                URLQueryItem(name: "fields", value: "id,message,created_time,from,like_count,comment_count,comments.limit(10){id,message,from,created_time}"),
+                URLQueryItem(name: "access_token", value: accessToken)
+            ]
+            if let cUrl = cComps?.url,
+               let (cData, cResp) = try? await URLSession.shared.data(from: cUrl),
+               (cResp as? HTTPURLResponse)?.statusCode == 200,
+               let cJson = try? JSONSerialization.jsonObject(with: cData) as? [String: Any],
+               cJson["error"] == nil {
+                gotAnyResponse = true
+                let parsed = parseGraphComments(from: cJson, ownerUserId: ownerUserId)
+                if !parsed.isEmpty {
+                    snap.comments = parsed
+                }
+                let total = (cJson["summary"] as? [String: Any])?["total_count"] as? Int ?? parsed.count
+                snap.commentCount = max(snap.commentCount, total)
+            }
+        }
+
+        if snap.reactionCount == 0 {
+            var rComps = URLComponents(string: "https://graph.facebook.com/\(queryPostId)/reactions")
+            rComps?.queryItems = [
+                URLQueryItem(name: "summary", value: "true"),
+                URLQueryItem(name: "limit", value: "1"),
+                URLQueryItem(name: "access_token", value: accessToken)
+            ]
+            if let rUrl = rComps?.url,
+               let (rData, rResp) = try? await URLSession.shared.data(from: rUrl),
+               (rResp as? HTTPURLResponse)?.statusCode == 200,
+               let rJson = try? JSONSerialization.jsonObject(with: rData) as? [String: Any],
+               let total = (rJson["summary"] as? [String: Any])?["total_count"] as? Int {
+                gotAnyResponse = true
+                snap.reactionCount = max(snap.reactionCount, total)
+            }
+        }
+
+        return gotAnyResponse ? snap : nil
     }
 
     private static func parseGraphComments(from commentsRoot: [String: Any]?, ownerUserId: String) -> [TrackedCommentItem] {
@@ -792,56 +1076,375 @@ enum PostTrackingAPIClient {
         return items
     }
 
+    private static func parseCompactCount(_ raw: String) -> Int? {
+        let cleaned = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+            .replacingOccurrences(of: " ", with: "")
+        guard !cleaned.isEmpty else { return nil }
+        if let direct = Int(cleaned.replacingOccurrences(of: ".", with: "").replacingOccurrences(of: ",", with: "")) {
+            return direct
+        }
+        let mult: Double
+        var numPart = cleaned
+        if cleaned.hasSuffix("K") || cleaned.hasSuffix("N") {
+            mult = 1_000
+            numPart = String(cleaned.dropLast())
+        } else if cleaned.hasSuffix("TR") {
+            mult = 1_000_000
+            numPart = String(cleaned.dropLast(2))
+        } else if cleaned.hasSuffix("M") {
+            mult = 1_000_000
+            numPart = String(cleaned.dropLast())
+        } else {
+            return nil
+        }
+        numPart = numPart.replacingOccurrences(of: ",", with: ".")
+        guard let val = Double(numPart) else { return nil }
+        return Int(val * mult)
+    }
+
+    private static func maxIntMatch(patterns: [String], in text: String) -> Int {
+        var best = 0
+        let ns = text as NSString
+        let fullRange = NSRange(location: 0, length: ns.length)
+        for pat in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pat, options: [.caseInsensitive]) else { continue }
+            for m in regex.matches(in: text, options: [], range: fullRange) where m.numberOfRanges > 1 {
+                let raw = ns.substring(with: m.range(at: 1))
+                if let val = Int(raw) ?? parseCompactCount(raw) {
+                    best = max(best, val)
+                }
+            }
+        }
+        return best
+    }
+
+    private static func extractFromRelayObject(
+        _ obj: Any,
+        ownerUserId: String,
+        into snap: inout PostEngagementSnapshot,
+        seenCommentIds: inout Set<String>,
+        depth: Int = 0
+    ) {
+        guard depth < 18 else { return }
+        if let dict = obj as? [String: Any] {
+            // 1. Reaction counts
+            if let rc = (dict["reaction_count"] as? [String: Any])?["count"] as? Int {
+                snap.reactionCount = max(snap.reactionCount, rc)
+            }
+            if let rc = (dict["reactors"] as? [String: Any])?["count"] as? Int {
+                snap.reactionCount = max(snap.reactionCount, rc)
+            }
+            if let rc = (dict["unified_reactors"] as? [String: Any])?["count"] as? Int {
+                snap.reactionCount = max(snap.reactionCount, rc)
+            }
+            if let rc = (dict["likers"] as? [String: Any])?["count"] as? Int {
+                snap.reactionCount = max(snap.reactionCount, rc)
+            }
+            if let i18nR = dict["i18n_reaction_count"] as? String, let parsed = parseCompactCount(i18nR) {
+                snap.reactionCount = max(snap.reactionCount, parsed)
+            }
+
+            // 2. Comment counts
+            if let cc = dict["total_comment_count"] as? Int {
+                snap.commentCount = max(snap.commentCount, cc)
+            }
+            if let cc = (dict["comment_count"] as? [String: Any])?["total_count"] as? Int {
+                snap.commentCount = max(snap.commentCount, cc)
+            }
+            if let cc = ((dict["comment_rendering_instance"] as? [String: Any])?["comments"] as? [String: Any])?["total_count"] as? Int {
+                snap.commentCount = max(snap.commentCount, cc)
+            }
+            if let cc = (dict["top_level_comments"] as? [String: Any])?["total_count"] as? Int
+                ?? (dict["top_level_comments"] as? [String: Any])?["count"] as? Int {
+                snap.commentCount = max(snap.commentCount, cc)
+            }
+            if let cc = (dict["comments"] as? [String: Any])?["total_count"] as? Int
+                ?? (dict["comments"] as? [String: Any])?["count"] as? Int {
+                snap.commentCount = max(snap.commentCount, cc)
+            }
+            if let i18nC = dict["i18n_comment_count"] as? String, let parsed = parseCompactCount(i18nC) {
+                snap.commentCount = max(snap.commentCount, parsed)
+            }
+
+            // 3. Share counts
+            if let sc = (dict["share_count"] as? [String: Any])?["count"] as? Int {
+                snap.shareCount = max(snap.shareCount, sc)
+            }
+            if let sc = (dict["reshares"] as? [String: Any])?["count"] as? Int {
+                snap.shareCount = max(snap.shareCount, sc)
+            }
+            if let i18nS = dict["i18n_share_count"] as? String, let parsed = parseCompactCount(i18nS) {
+                snap.shareCount = max(snap.shareCount, parsed)
+            }
+
+            // 4. Caption
+            if snap.caption.isEmpty,
+               let msgText = (dict["message"] as? [String: Any])?["text"] as? String,
+               !msgText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                snap.caption = msgText
+            }
+
+            // 5. Individual Comment Node
+            let typeName = (dict["__typename"] as? String) ?? ""
+            let bodyText = (dict["body"] as? [String: Any])?["text"] as? String
+            let authorDict = dict["author"] as? [String: Any]
+            if (typeName == "Comment" || bodyText != nil),
+               let text = bodyText?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !text.isEmpty,
+               let authorName = authorDict?["name"] as? String {
+                var commentId = (dict["legacy_fbid"] as? String)
+                    ?? (dict["legacy_token"] as? String)
+                    ?? (dict["id"] as? String)
+                    ?? ""
+                if let decodedData = Data(base64Encoded: commentId),
+                   let decodedStr = String(data: decodedData, encoding: .utf8),
+                   decodedStr.lowercased().contains("comment"),
+                   let numeric = FacebookTargetPostResolver.firstMatch(pattern: #"(\d{6,25})\s*$"#, in: decodedStr) {
+                    commentId = numeric
+                }
+                if !commentId.isEmpty, !seenCommentIds.contains(commentId) {
+                    seenCommentIds.insert(commentId)
+                    let authorId = (authorDict?["id"] as? String) ?? ""
+                    let createdTs = (dict["created_time"] as? Int) ?? 0
+                    let createdStr = createdTs > 0
+                        ? Date(timeIntervalSince1970: TimeInterval(createdTs)).formatted(date: .abbreviated, time: .shortened)
+                        : "Gần đây"
+                    let likes = ((dict["reactors"] as? [String: Any])?["count"] as? Int) ?? 0
+                    let replies = ((dict["comment_replies"] as? [String: Any])?["count"] as? Int) ?? 0
+                    snap.comments.append(
+                        TrackedCommentItem(
+                            id: commentId,
+                            authorName: authorName,
+                            authorId: authorId,
+                            message: text,
+                            createdTime: createdStr,
+                            likeCount: likes,
+                            replyCount: replies,
+                            isReplied: false,
+                            lastReplyText: nil,
+                            repliedAt: nil
+                        )
+                    )
+                }
+            }
+
+            for (_, v) in dict {
+                extractFromRelayObject(v, ownerUserId: ownerUserId, into: &snap, seenCommentIds: &seenCommentIds, depth: depth + 1)
+            }
+        } else if let arr = obj as? [Any] {
+            for item in arr {
+                extractFromRelayObject(item, ownerUserId: ownerUserId, into: &snap, seenCommentIds: &seenCommentIds, depth: depth + 1)
+            }
+        }
+    }
+
+    private static func parseHTMLAndRelayPayload(_ html: String, ownerUserId: String) -> PostEngagementSnapshot {
+        var snap = PostEngagementSnapshot()
+        var seenCommentIds = Set<String>()
+
+        // 1. Duyệt toàn bộ các khối <script type="application/json"> của Facebook Comet
+        let scriptPattern = #"<script[^>]*>([\s\S]*?)<\/script>"#
+        if let scriptRegex = try? NSRegularExpression(pattern: scriptPattern, options: []) {
+            let nsHtml = html as NSString
+            let matches = scriptRegex.matches(in: html, range: NSRange(location: 0, length: nsHtml.length))
+            for m in matches where m.numberOfRanges > 1 {
+                let content = nsHtml.substring(with: m.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard content.contains("reaction_count") || content.contains("total_comment_count") || content.contains("comment_rendering_instance") || content.contains("share_count") || content.contains("\"Comment\"") || content.contains("i18n_reaction_count") else {
+                    continue
+                }
+                var cleaned = content
+                if cleaned.hasPrefix("for (;;);") {
+                    cleaned = String(cleaned.dropFirst(9)).trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                if let d = cleaned.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: d) {
+                    extractFromRelayObject(json, ownerUserId: ownerUserId, into: &snap, seenCommentIds: &seenCommentIds)
+                }
+            }
+        }
+
+        // 2. Nếu dữ liệu là NDJSON (nhiều dòng JSON từ /api/graphql/)
+        for line in html.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("{"),
+                  let d = trimmed.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: d) else { continue }
+            extractFromRelayObject(json, ownerUserId: ownerUserId, into: &snap, seenCommentIds: &seenCommentIds)
+        }
+
+        // 3. Quét Regex trực tiếp trên toàn bộ HTML để đảm bảo không sót số liệu
+        let rMax = maxIntMatch(
+            patterns: [
+                #""reaction_count"\s*:\s*\{\s*"count"\s*:\s*(\d+)"#,
+                #""reactors"\s*:\s*\{\s*"count"\s*:\s*(\d+)"#,
+                #""unified_reactors"\s*:\s*\{\s*"count"\s*:\s*(\d+)"#,
+                #""likers"\s*:\s*\{\s*"count"\s*:\s*(\d+)"#,
+                #""i18n_reaction_count"\s*:\s*"([^"]+)""#
+            ],
+            in: html
+        )
+        snap.reactionCount = max(snap.reactionCount, rMax)
+
+        let cMax = maxIntMatch(
+            patterns: [
+                #""total_comment_count"\s*:\s*(\d+)"#,
+                #""comment_count"\s*:\s*\{\s*"total_count"\s*:\s*(\d+)"#,
+                #""comment_rendering_instance"\s*:\s*\{\s*"comments"\s*:\s*\{\s*"total_count"\s*:\s*(\d+)"#,
+                #""top_level_comments"\s*:\s*\{\s*"(?:total_count|count)"\s*:\s*(\d+)"#,
+                #""i18n_comment_count"\s*:\s*"([^"]+)""#
+            ],
+            in: html
+        )
+        snap.commentCount = max(snap.commentCount, max(cMax, snap.comments.count))
+
+        let sMax = maxIntMatch(
+            patterns: [
+                #""share_count"\s*:\s*\{\s*"count"\s*:\s*(\d+)"#,
+                #""reshares"\s*:\s*\{\s*"count"\s*:\s*(\d+)"#,
+                #""i18n_share_count"\s*:\s*"([^"]+)""#
+            ],
+            in: html
+        )
+        snap.shareCount = max(snap.shareCount, sMax)
+
+        if snap.caption.isEmpty,
+           let msg = FacebookTargetPostResolver.firstMatch(pattern: #""message":\{"text":"([^"]+)""#, in: html) {
+            snap.caption = FacebookTargetPostResolver.decodeJSONEscapes(msg)
+        }
+
+        return snap
+    }
+
     private static func fetchViaWebScrape(
         postId: String,
+        postUrl: String,
+        feedbackId: String,
+        ownerUserId: String,
         cookieString: String,
         proxy: SpaceProxy?
     ) async -> PostEngagementSnapshot? {
-        guard let url = URL(string: "https://www.facebook.com/\(postId)") else { return nil }
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-            forHTTPHeaderField: "User-Agent"
+        let session = makeCookieSession(cookieString: cookieString, proxy: proxy)
+        let kind = FacebookTargetPostResolver.detectKind(from: postUrl)
+        let canonical = FacebookTargetPostResolver.buildCanonicalURL(id: postId, kind: kind, originalURL: postUrl)
+
+        var candidateURLs: [String] = []
+        if !postUrl.isEmpty { candidateURLs.append(postUrl) }
+        if !candidateURLs.contains(canonical) { candidateURLs.append(canonical) }
+        let directUrl = "https://www.facebook.com/\(postId)"
+        if !candidateURLs.contains(directUrl) { candidateURLs.append(directUrl) }
+
+        var combinedSnap = PostEngagementSnapshot()
+        var anyLoaded = false
+
+        for urlStr in candidateURLs {
+            guard let url = URL(string: urlStr) else { continue }
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.setValue(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+                forHTTPHeaderField: "User-Agent"
+            )
+            request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+            request.setValue("vi,en-US;q=0.8,en;q=0.6", forHTTPHeaderField: "Accept-Language")
+            request.setValue("document", forHTTPHeaderField: "sec-fetch-dest")
+            request.setValue("navigate", forHTTPHeaderField: "sec-fetch-mode")
+            request.setValue("none", forHTTPHeaderField: "sec-fetch-site")
+            request.setValue("?1", forHTTPHeaderField: "sec-fetch-user")
+            request.setValue("1", forHTTPHeaderField: "upgrade-insecure-requests")
+            request.setValue(cookieString, forHTTPHeaderField: "Cookie")
+
+            do {
+                let (data, _) = try await session.data(for: request)
+                let html = String(data: data, encoding: .utf8) ?? ""
+                guard !html.isEmpty else { continue }
+                anyLoaded = true
+
+                let parsed = parseHTMLAndRelayPayload(html, ownerUserId: ownerUserId)
+                mergeSnapshots(into: &combinedSnap, from: parsed)
+
+                if combinedSnap.reactionCount > 0 || combinedSnap.commentCount > 0 || !combinedSnap.comments.isEmpty {
+                    break
+                }
+            } catch {
+                continue
+            }
+        }
+
+        return anyLoaded ? combinedSnap : nil
+    }
+
+    private static func fetchViaCometGraphQLFeedback(
+        postId: String,
+        feedbackId: String,
+        ownerUserId: String,
+        spaceId: UUID,
+        cookieString: String,
+        proxy: SpaceProxy?
+    ) async -> PostEngagementSnapshot? {
+        let client = FacebookGraphQLAutoClient(
+            spaceId: spaceId,
+            cookieString: cookieString,
+            accessToken: "",
+            proxy: proxy,
+            userAgent: nil
         )
-        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
-        request.setValue("vi,en-US;q=0.8,en;q=0.6", forHTTPHeaderField: "Accept-Language")
-        request.setValue(cookieString, forHTTPHeaderField: "Cookie")
+        guard let tok = try? await client.prepareTokens() else { return nil }
 
-        let session: URLSession
-        if let proxy, proxy.isEnabled {
-            let cfg = URLSessionConfiguration.default
-            cfg.proxyConfigurations = [proxy.toNetworkProxyConfiguration()]
-            session = URLSession(configuration: cfg)
-        } else {
-            session = URLSession.shared
+        let session = makeCookieSession(cookieString: cookieString, proxy: proxy)
+        let docIds = [
+            "9058824614191395",
+            "7259676384135483",
+            "8322650087796518"
+        ]
+
+        var snap = PostEngagementSnapshot()
+        for docId in docIds {
+            let variables: [String: Any] = [
+                "feedbackTargetID": feedbackId,
+                "scale": 1,
+                "feedLocation": "PERMALINK"
+            ]
+            guard let varData = try? JSONSerialization.data(withJSONObject: variables),
+                  let varStr = String(data: varData, encoding: .utf8),
+                  let gqlURL = URL(string: "https://www.facebook.com/api/graphql/") else { continue }
+
+            var req = URLRequest(url: gqlURL)
+            req.httpMethod = "POST"
+            req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+            req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+            req.setValue(cookieString, forHTTPHeaderField: "Cookie")
+            req.setValue(tok.lsdToken, forHTTPHeaderField: "x-fb-lsd")
+
+            let allowed = CharacterSet.alphanumerics
+            let bodyPairs: [(String, String)] = [
+                ("av", tok.userId),
+                ("__user", tok.userId),
+                ("__a", "1"),
+                ("fb_dtsg", tok.dtsgToken),
+                ("jazoest", tok.jazoest),
+                ("lsd", tok.lsdToken),
+                ("variables", varStr),
+                ("doc_id", docId)
+            ]
+            let bodyStr = bodyPairs.map { k, v in
+                let ek = k.addingPercentEncoding(withAllowedCharacters: allowed) ?? k
+                let ev = v.addingPercentEncoding(withAllowedCharacters: allowed) ?? v
+                return "\(ek)=\(ev)"
+            }.joined(separator: "&")
+            req.httpBody = Data(bodyStr.utf8)
+
+            if let (data, _) = try? await session.data(for: req),
+               let text = String(data: data, encoding: .utf8), !text.isEmpty {
+                let parsed = parseHTMLAndRelayPayload(text, ownerUserId: ownerUserId)
+                mergeSnapshots(into: &snap, from: parsed)
+                if snap.reactionCount > 0 || snap.commentCount > 0 || !snap.comments.isEmpty {
+                    return snap
+                }
+            }
         }
-
-        do {
-            let (data, _) = try await session.data(for: request)
-            let html = String(data: data, encoding: .utf8) ?? ""
-            guard !html.isEmpty else { return nil }
-
-            var snap = PostEngagementSnapshot()
-            if let rStr = FacebookTargetPostResolver.firstMatch(pattern: #""reaction_count":\{"count":(\d+)"#, in: html)
-                ?? FacebookTargetPostResolver.firstMatch(pattern: #""reactors":\{"count":(\d+)"#, in: html) {
-                snap.reactionCount = Int(rStr) ?? 0
-            }
-            if let cStr = FacebookTargetPostResolver.firstMatch(pattern: #""total_comment_count":(\d+)"#, in: html)
-                ?? FacebookTargetPostResolver.firstMatch(pattern: #""comment_rendering_instance":\{"comments":\{"total_count":(\d+)"#, in: html) {
-                snap.commentCount = Int(cStr) ?? 0
-            }
-            if let sStr = FacebookTargetPostResolver.firstMatch(pattern: #""share_count":\{"count":(\d+)"#, in: html)
-                ?? FacebookTargetPostResolver.firstMatch(pattern: #""reshares":\{"count":(\d+)"#, in: html) {
-                snap.shareCount = Int(sStr) ?? 0
-            }
-            if let msg = FacebookTargetPostResolver.firstMatch(pattern: #""message":\{"text":"([^"]+)""#, in: html) {
-                snap.caption = FacebookTargetPostResolver.decodeJSONEscapes(msg)
-            }
-            return snap
-        } catch {
-            return nil
-        }
+        return nil
     }
 
     /// Trả lời trực tiếp vào bài viết hoặc trả lời vào 1 bình luận cụ thể (Dual Engine: Graph API + Comet GraphQL)
@@ -1506,6 +2109,13 @@ struct PostTrackerView: View {
                         }
                     }
                     Button {
+                        Task {
+                            await tracker.convertPostURL(id: post.id, space: space)
+                        }
+                    } label: {
+                        Label("Chuyển đổi URL chuẩn (MultiSpace)", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    Button {
                         UIPasteboard.general.string = post.postUrl
                         tracker.statusBanner = "📋 Đã sao chép URL bài viết!"
                     } label: {
@@ -1546,6 +2156,16 @@ struct PostTrackerView: View {
                         .font(.caption2)
                         .foregroundStyle(.blue)
                         .lineLimit(1)
+                    Button {
+                        Task {
+                            await tracker.convertPostURL(id: post.id, space: space)
+                        }
+                    } label: {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.caption2.bold())
+                            .foregroundStyle(.orange)
+                    }
+                    .buttonStyle(.plain)
                     Spacer()
                     if let synced = post.lastSyncedAt {
                         Text("Cập nhật \(synced.formatted(date: .omitted, time: .shortened))")
@@ -1763,18 +2383,24 @@ struct PostTrackerView: View {
     }
 }
 
-// MARK: - Sheet 1: Thêm Bài Viết Theo Dõi Bằng URL hoặc ID
+// MARK: - Sheet 1: Thêm Bài Viết Theo Dõi Bằng URL hoặc ID (Chuyển đổi URL chuẩn giống MultiSpace)
 
 struct AddTrackedPostSheet: View {
     let spaces: [Space]
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var tracker = TrackedPostManager.shared
 
+    @State private var targetCategory: TargetCategoryHint = .auto
     @State private var urlOrIdInput: String = ""
     @State private var customCaption: String = ""
     @State private var selectedSpaceId: UUID? = nil
     @State private var enableAIAutoReply: Bool = true
     @State private var isAdding: Bool = false
+    @State private var isResolvingLink: Bool = false
+    @State private var isPreviewingTarget: Bool = false
+    @State private var resolvedLinkMessage: String? = nil
+    @State private var resolvedPreview: ResolvedTargetPost? = nil
+    @State private var previewStats: PostTrackingAPIClient.PostEngagementSnapshot? = nil
     @State private var errorMessage: String? = nil
 
     private var chosenSpace: Space? {
@@ -1784,29 +2410,121 @@ struct AddTrackedPostSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("1. Đường dẫn (URL) hoặc ID bài viết đã đăng") {
-                    HStack {
-                        TextField("Dán link bài viết, Reel, Video hoặc Post ID...", text: $urlOrIdInput)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                        if !urlOrIdInput.isEmpty {
+                Section {
+                    Picker("Loại mục tiêu", selection: $targetCategory) {
+                        ForEach(TargetCategoryHint.allCases) { item in
+                            Text(item.rawValue).tag(item)
+                        }
+                    }
+                    .disabled(isAdding)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Link hoặc ID Bài viết / Reel / Nhóm / Fanpage:")
+                                .font(.caption.bold())
+                            Spacer()
+                            Button("Dán") {
+                                if let clip = UIPasteboard.general.string {
+                                    urlOrIdInput = clip
+                                    Task { await resolveShareLink() }
+                                }
+                            }
+                            .buttonStyle(SoftTintedButtonStyle(tint: .blue, isCompact: true))
+                            .disabled(isAdding || isResolvingLink)
+
                             Button {
-                                urlOrIdInput = ""
+                                Task { await resolveShareLink() }
                             } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundStyle(.secondary)
+                                HStack(spacing: 4) {
+                                    if isResolvingLink {
+                                        ProgressView().controlSize(.mini)
+                                    } else {
+                                        Image(systemName: "arrow.triangle.2.circlepath")
+                                    }
+                                    Text("Mở rộng link")
+                                }
+                            }
+                            .buttonStyle(SoftTintedButtonStyle(tint: .orange, isCompact: true))
+                            .disabled(isAdding || isResolvingLink || urlOrIdInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+
+                        HStack {
+                            TextField("Dán link bài viết, Reel, share/p, share/r hoặc ID...", text: $urlOrIdInput)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .textFieldStyle(.roundedBorder)
+                            if !urlOrIdInput.isEmpty {
+                                Button {
+                                    urlOrIdInput = ""
+                                    resolvedLinkMessage = nil
+                                    resolvedPreview = nil
+                                    previewStats = nil
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
                             }
                         }
-                        Button("Dán") {
-                            if let clip = UIPasteboard.general.string {
-                                urlOrIdInput = clip
-                            }
+
+                        if let msg = resolvedLinkMessage {
+                            Text(msg)
+                                .font(.caption2)
+                                .foregroundStyle(msg.hasPrefix("✅") ? Color.green : Color.orange)
+                                .lineLimit(2)
                         }
-                        .buttonStyle(SoftTintedButtonStyle(tint: .blue, isCompact: true))
                     }
 
-                    TextField("Ghi chú / Nội dung bài viết (tùy chọn cho AI đọc)", text: $customCaption, axis: .vertical)
+                    TextField("Ghi chú / Nội dung bài viết bổ sung (tùy chọn cho AI đọc)", text: $customCaption, axis: .vertical)
                         .lineLimit(2...4)
+
+                    Button {
+                        Task { await previewTargetPostAndStats() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            if isPreviewingTarget {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: "magnifyingglass.circle.fill")
+                            }
+                            Text("Kiểm tra Link, Chuyển đổi URL & Đọc thống kê mục tiêu")
+                                .font(.caption.bold())
+                        }
+                    }
+                    .disabled(isAdding || isPreviewingTarget || urlOrIdInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                    if let resolved = resolvedPreview {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("✅ Đã nhận diện: \(resolved.targetKind) • ID: \(resolved.postId)")
+                                .font(.caption.bold())
+                                .foregroundStyle(.green)
+                            if let canon = resolved.canonicalURL?.absoluteString {
+                                Text("🔗 URL chuẩn: \(canon)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.blue)
+                                    .lineLimit(1)
+                            }
+                            Text("Đăng bởi: \(resolved.authorName)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            if let st = previewStats {
+                                Text("📊 Thống kê: ❤️ \(st.reactionCount) cảm xúc • 💬 \(max(st.commentCount, st.comments.count)) bình luận • 🔄 \(st.shareCount) chia sẻ")
+                                    .font(.caption2.bold())
+                                    .foregroundStyle(.purple)
+                            }
+                            if !resolved.postText.isEmpty {
+                                Text("Nội dung: \"\(resolved.postText.prefix(140))\"")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(3)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                } header: {
+                    Text("1. Đường dẫn (URL) hoặc ID bài viết đã đăng")
+                } footer: {
+                    Text("Hỗ trợ chuyển đổi mọi định dạng link giống MultiSpace: share/p/..., share/r/..., pfbid..., fb.watch, Reel, bài Nhóm, Fanpage hoặc Post ID.")
                 }
 
                 Section("2. Tài khoản quản lý & trả lời") {
@@ -1846,6 +2564,7 @@ struct AddTrackedPostSheet: View {
                                 _ = try await tracker.addPostByURLOrID(
                                     rawInput: urlOrIdInput,
                                     space: space,
+                                    categoryHint: targetCategory,
                                     customCaption: customCaption,
                                     enableAI: enableAIAutoReply
                                 )
@@ -1861,7 +2580,7 @@ struct AddTrackedPostSheet: View {
                             Spacer()
                             if isAdding {
                                 ProgressView().tint(.white)
-                                Text("Đang phân tích & lấy thống kê...")
+                                Text("Đang chuyển đổi URL & lấy thống kê...")
                             } else {
                                 Image(systemName: "plus.circle.fill")
                                 Text("Thêm vào danh sách theo dõi")
@@ -1888,6 +2607,75 @@ struct AddTrackedPostSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
+    }
+
+    @MainActor
+    private func resolveShareLink() async {
+        let raw = urlOrIdInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return }
+        isResolvingLink = true
+        resolvedLinkMessage = nil
+        defer { isResolvingLink = false }
+
+        var sampleCookie = ""
+        if let sp = chosenSpace {
+            let creds = await TrackedPostManager.resolveCookieAndToken(for: sp)
+            sampleCookie = creds.cookie
+        }
+
+        if let result = await FacebookTargetPostResolver.resolveShareURLToCanonical(
+            input: raw,
+            cookieString: sampleCookie,
+            proxy: chosenSpace?.proxy
+        ) {
+            urlOrIdInput = result.canonicalURL
+            resolvedLinkMessage = "✅ Đã chuyển thành: \(result.canonicalURL)"
+        } else {
+            resolvedLinkMessage = "⚠️ Không thể giải mã link rút gọn. Hãy dán trực tiếp link bài viết."
+        }
+    }
+
+    @MainActor
+    private func previewTargetPostAndStats() async {
+        guard let space = chosenSpace else { return }
+        isPreviewingTarget = true
+        errorMessage = nil
+        defer { isPreviewingTarget = false }
+
+        await resolveShareLink()
+
+        do {
+            let creds = await TrackedPostManager.resolveCookieAndToken(for: space)
+            var resolved = try await FacebookTargetPostResolver.resolve(
+                input: urlOrIdInput,
+                cookieString: creds.cookie,
+                accessToken: creds.token,
+                proxy: space.proxy,
+                userAgent: space.fingerprint?.userAgent
+            )
+            if targetCategory != .auto {
+                resolved.targetKind = targetCategory.rawValue
+            }
+            if let canon = resolved.canonicalURL?.absoluteString {
+                urlOrIdInput = canon
+                resolvedLinkMessage = "✅ Đã chuyển thành: \(canon)"
+            }
+            resolvedPreview = resolved
+
+            let stats = await PostTrackingAPIClient.fetchPostEngagementAndComments(
+                postId: resolved.postId,
+                postUrl: resolved.canonicalURL?.absoluteString ?? urlOrIdInput,
+                feedbackId: resolved.feedbackId,
+                ownerUserId: creds.uid,
+                spaceId: space.id,
+                cookieString: creds.cookie,
+                accessToken: creds.token,
+                proxy: space.proxy
+            )
+            previewStats = stats
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }
 

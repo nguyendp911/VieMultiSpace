@@ -787,9 +787,17 @@ enum FacebookTargetPostResolver {
 
     /// Giải mã link chia sẻ rút gọn Facebook thành URL chính xác (theo redirect, lấy canonical ID).
     /// Trả về (canonicalURL, postId, kind) hoặc nil nếu thất bại.
-    static func resolveShareURLToCanonical(input: String) async -> (canonicalURL: String, postId: String, kind: String)? {
+    static func resolveShareURLToCanonical(
+        input: String,
+        cookieString: String = "",
+        proxy: SpaceProxy? = nil
+    ) async -> (canonicalURL: String, postId: String, kind: String)? {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
+        if trimmed.allSatisfy(\.isNumber) {
+            return ("https://www.facebook.com/posts/\(trimmed)", trimmed, "Bài viết (Post)")
+        }
+
         var urlStr = trimmed
         if !urlStr.lowercased().hasPrefix("http://") && !urlStr.lowercased().hasPrefix("https://") {
             urlStr = "https://" + urlStr
@@ -803,62 +811,101 @@ enum FacebookTargetPostResolver {
             return (canonical, directId, kind)
         }
 
-        // Follow redirects để lấy final URL
+        // Follow redirects để lấy final URL (kèm Cookie nếu có để giải mã share/p, share/r, pfbid...)
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForRequest = 16
+        if !cookieString.isEmpty {
+            let cookieStorage = HTTPCookieStorage()
+            for c in FacebookGraphQLAutoClient.parseCookies(from: cookieString) {
+                cookieStorage.setCookie(c)
+            }
+            config.httpCookieStorage = cookieStorage
+            config.httpCookieAcceptPolicy = .always
+            config.httpShouldSetCookies = true
+        }
+        if let proxy, proxy.isEnabled {
+            config.proxyConfigurations = [proxy.toNetworkProxyConfiguration()]
+        }
         let session = URLSession(configuration: config)
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue(
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
-            forHTTPHeaderField: "User-Agent"
-        )
-        request.setValue("text/html,*/*;q=0.8", forHTTPHeaderField: "Accept")
-        request.setValue("vi,en-US;q=0.8,en;q=0.6", forHTTPHeaderField: "Accept-Language")
+        let uas = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+        ]
 
-        do {
-            let (data, response) = try await session.data(for: request)
-            var finalURLStr = urlStr
-            if let httpResp = response as? HTTPURLResponse, let respURL = httpResp.url {
-                finalURLStr = respURL.absoluteString
+        for ua in uas {
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.setValue(ua, forHTTPHeaderField: "User-Agent")
+            request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+            request.setValue("vi,en-US;q=0.8,en;q=0.6", forHTTPHeaderField: "Accept-Language")
+            if !cookieString.isEmpty {
+                request.setValue(cookieString, forHTTPHeaderField: "Cookie")
             }
 
-            // Thử lấy ID từ final URL sau redirect
-            var extractedId = extractNumericIdFromURL(finalURLStr)
-            var kind = detectKind(from: finalURLStr)
+            do {
+                let (data, response) = try await session.data(for: request)
+                var finalURLStr = urlStr
+                if let httpResp = response as? HTTPURLResponse, let respURL = httpResp.url {
+                    finalURLStr = respURL.absoluteString
+                }
 
-            // Nếu chưa có ID, parse HTML
-            if extractedId == nil {
-                let html = String(data: data, encoding: .utf8) ?? ""
-                let idPatterns = [
-                    #"\"post_id\":\"(\d+)\""#,
-                    #"\"top_level_post_id\":\"(\d+)\""#,
-                    #"\"story_fbid\":\"(\d+)\""#,
-                    #"\"video_id\":\"(\d+)\""#,
-                    #"story_fbid=(\d+)"#,
-                    #"fbid=(\d+)"#,
-                    #"/reel/(\d+)"#,
-                    #"/posts/(\d+)"#,
-                    #"/videos/(\d+)"#
-                ]
-                for pat in idPatterns {
-                    if let m = firstMatch(pattern: pat, in: html) {
-                        extractedId = m
-                        break
+                // Thử lấy ID từ final URL sau redirect
+                var extractedId = extractNumericIdFromURL(finalURLStr)
+                let kind = detectKind(from: finalURLStr)
+
+                // Nếu chưa có ID, parse HTML
+                if extractedId == nil {
+                    let html = String(data: data, encoding: .utf8) ?? ""
+                    let idPatterns = [
+                        #""post_id"\s*:\s*"?(\d{8,25})"?"#,
+                        #""top_level_post_id"\s*:\s*"?(\d{8,25})"?"#,
+                        #""story_fbid"\s*:\s*"?(\d{8,25})"?"#,
+                        #""video_id"\s*:\s*"?(\d{8,25})"?"#,
+                        #"story_fbid=(\d{8,25})"#,
+                        #"fbid=(\d{8,25})"#,
+                        #"/reel/(\d{8,25})"#,
+                        #"/posts/(\d{8,25})"#,
+                        #"/videos/(\d{8,25})"#,
+                        #"content="fb://post/(\d{8,25})""#,
+                        #"content="fb://photo/(\d{8,25})""#
+                    ]
+                    for pat in idPatterns {
+                        if let m = firstMatch(pattern: pat, in: html) {
+                            extractedId = m
+                            break
+                        }
+                    }
+
+                    if extractedId == nil {
+                        let fbPatterns = [
+                            #""feedback":\{"id":"([A-Za-z0-9+/=]+)""#,
+                            #""feedback_id":"([A-Za-z0-9+/=]+)""#
+                        ]
+                        for pat in fbPatterns {
+                            if let fb = firstMatch(pattern: pat, in: html),
+                               let decodedData = Data(base64Encoded: fb),
+                               let decodedStr = String(data: decodedData, encoding: .utf8),
+                               let idPart = firstMatch(pattern: #"(\d{8,25})"#, in: decodedStr) {
+                                extractedId = idPart
+                                break
+                            }
+                        }
                     }
                 }
-            }
 
-            guard let postId = extractedId, !postId.isEmpty else { return nil }
-            let canonical = buildCanonicalURL(id: postId, kind: kind, originalURL: finalURLStr)
-            return (canonical, postId, kind)
-        } catch {
-            return nil
+                if let postId = extractedId, !postId.isEmpty {
+                    let canonical = buildCanonicalURL(id: postId, kind: kind, originalURL: finalURLStr)
+                    return (canonical, postId, kind)
+                }
+            } catch {
+                continue
+            }
         }
+        return nil
     }
 
-    private static func buildCanonicalURL(id: String, kind: String, originalURL: String) -> String {
+    static func buildCanonicalURL(id: String, kind: String, originalURL: String) -> String {
         let lower = originalURL.lowercased()
         if lower.contains("/reel/") || lower.contains("/reels/") || lower.contains("/share/r/") || lower.contains("fb.watch") || lower.contains("/watch") {
             return "https://www.facebook.com/reel/\(id)"
@@ -1900,7 +1947,7 @@ final class FacebookGraphQLAutoClient {
         return str
     }
 
-    private static func parseCookies(from cookieString: String) -> [HTTPCookie] {
+    static func parseCookies(from cookieString: String) -> [HTTPCookie] {
         var cookies: [HTTPCookie] = []
         let pairs = cookieString.components(separatedBy: ";")
         for pair in pairs {

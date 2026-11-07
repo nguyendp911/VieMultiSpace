@@ -1164,7 +1164,16 @@ struct MultiSpaceSyncView: View {
         resolvedLinkMessage = nil
         defer { isResolvingLink = false }
 
-        if let result = await FacebookTargetPostResolver.resolveShareURLToCanonical(input: raw) {
+        var sampleCookie = ""
+        let candidateSpaces = selectedSpaces.isEmpty ? library.spaces : selectedSpaces
+        for sp in candidateSpaces {
+            if let vault = try? SecureLoginStore.readTokenVault(sp.id), !vault.cookieString.isEmpty {
+                sampleCookie = vault.cookieString
+                break
+            }
+        }
+
+        if let result = await FacebookTargetPostResolver.resolveShareURLToCanonical(input: raw, cookieString: sampleCookie) {
             targetPostInput = result.canonicalURL
             resolvedLinkMessage = "✅ Đã chuyển thành: \(result.canonicalURL)"
         } else {
