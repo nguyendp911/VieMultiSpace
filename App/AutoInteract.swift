@@ -747,6 +747,8 @@ enum FacebookTargetPostResolver {
 
     static func extractNumericIdFromURL(_ urlStr: String) -> String? {
         let patterns = [
+            #"/groups/(\d{5,25})"#,
+            #"/share/g/(\d{5,25})"#,
             #"/reel/(\d+)"#,
             #"/reels/(\d+)"#,
             #"/videos/(\d+)"#,

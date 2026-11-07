@@ -646,7 +646,7 @@ enum FacebookAPILoginClient {
         guard trimmed.contains("c_user="), trimmed.contains("xs=") else { return nil }
 
         // 1. Kiểm tra trực tiếp xem trong chuỗi cookie có token EAA không
-        if let directMatch = FacebookTargetPostResolver.firstMatch(pattern: #"(EAA[A-Za-z0-9]{25,350})"#, in: trimmed) {
+        if let directMatch = FacebookTargetPostResolver.firstMatch(pattern: #"(EAA[A-Za-z0-9_\-\|=]{20,500})"#, in: trimmed) {
             return directMatch
         }
 
@@ -670,7 +670,7 @@ enum FacebookAPILoginClient {
             if let (_, resp) = try? await noRedirectSession.data(for: req),
                let http = resp as? HTTPURLResponse {
                 if let loc = http.value(forHTTPHeaderField: "Location") {
-                    if let tok = FacebookTargetPostResolver.firstMatch(pattern: #"access_token=([A-Za-z0-9]+)"#, in: loc) {
+                    if let tok = FacebookTargetPostResolver.firstMatch(pattern: #"access_token=([A-Za-z0-9_\-\|=]+)"#, in: loc) {
                         return tok
                     }
                 }
@@ -715,7 +715,7 @@ enum FacebookAPILoginClient {
             if let match = FacebookTargetPostResolver.firstMatch(pattern: #"window\.__accessToken\s*=\s*["'](EAA[A-Za-z0-9]{25,350})["']"#, in: text) {
                 return match
             }
-            if let match = FacebookTargetPostResolver.firstMatch(pattern: #"(EAA[A-Za-z0-9]{25,350})"#, in: text) {
+            if let match = FacebookTargetPostResolver.firstMatch(pattern: #"(EAA[A-Za-z0-9_\-\|=]{20,500})"#, in: text) {
                 return match
             }
         }
@@ -1141,11 +1141,11 @@ enum WebCookieBridge {
                 const text = s.textContent || '';
                 const m = text.match(/"accessToken"\\s*:\\s*"(EAA[^"]+)"/);
                 if (m && m[1]) return m[1];
-                const m2 = text.match(/(EAA[A-Za-z0-9]{25,350})/);
+                const m2 = text.match(/(EAA[A-Za-z0-9_\-\|=]{20,500})/);
                 if (m2 && m2[1]) return m2[1];
             }
             const pageHtml = document.documentElement.innerHTML;
-            const m = pageHtml.match(/(EAA[A-Za-z0-9]{25,350})/);
+            const m = pageHtml.match(/(EAA[A-Za-z0-9_\-\|=]{20,500})/);
             return m ? m[1] : null;
         })();
         """

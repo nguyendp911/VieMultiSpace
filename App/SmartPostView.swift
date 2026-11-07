@@ -206,6 +206,17 @@ final class ScheduledPostManager: ObservableObject {
         saveTasks()
     }
 
+    func retryTask(_ task: ScheduledPostTask) {
+        guard let idx = tasks.firstIndex(where: { $0.id == task.id }) else { return }
+        tasks[idx].status = .pending
+        tasks[idx].scheduledDate = Date()
+        tasks[idx].executionLog = "Đang chuẩn bị thử lại bài đăng..."
+        saveTasks()
+        Task {
+            await checkAndExecuteDueTasks()
+        }
+    }
+
     func deleteTask(_ task: ScheduledPostTask) {
         let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         for name in task.imageFileNames {
@@ -266,14 +277,28 @@ final class ScheduledPostManager: ObservableObject {
         let destinations = task.targetDestinations ?? []
 
         for sid in task.targetSpaceIds {
-            guard let vault = try? SecureLoginStore.readTokenVault(sid), !vault.originalToken.isEmpty else {
+            guard let vault = try? SecureLoginStore.readTokenVault(sid) else {
                 totalCount += 1
-                logs.append("Không tìm thấy token cho không gian ID: \(sid)")
+                logs.append("Chưa có thông tin đăng nhập cho không gian ID: \(sid)")
                 continue
             }
-            let token = vault.originalToken
+            guard let token = SmartPostAPIClient.resolveBestAccessToken(from: vault), !token.isEmpty else {
+                totalCount += 1
+                logs.append("Không tìm thấy Access Token hợp lệ cho không gian \(vault.uid.isEmpty ? sid.uuidString : vault.uid). Vui lòng vào 'Kho Token' kết nối lại tài khoản.")
+                continue
+            }
+
             let uid = vault.uid.isEmpty ? "me" : vault.uid
             let accountDisplayName = vault.uid.isEmpty ? "Tài khoản FB" : "FB • \(vault.uid)"
+
+            // Kiểm tra tính hợp lệ của Token trước khi thực hiện tải ảnh
+            let tokenValidation = await SmartPostAPIClient.validateAccessToken(token)
+            if !tokenValidation.isValid {
+                totalCount += 1
+                let cleanErr = SmartPostAPIClient.formatFacebookAPIError(tokenValidation.message)
+                logs.append("❌ [\(accountDisplayName)] Access Token không hợp lệ (\(cleanErr)). Vui lòng vào 'Kho Token' kiểm tra hoặc kết nối lại.")
+                continue
+            }
 
             if destType == .personalProfile || destinations.isEmpty {
                 totalCount += 1
@@ -294,7 +319,7 @@ final class ScheduledPostManager: ObservableObject {
                         var pids: [String] = []
                         for img in loadedImages {
                             if let jdata = img.jpegData(compressionQuality: 0.85) {
-                                let pid = try await SmartPostAPIClient.uploadPhoto(imageData: jdata, accessToken: token)
+                                let pid = try await SmartPostAPIClient.uploadPhoto(imageData: jdata, accessToken: token, targetId: "me")
                                 pids.append(pid)
                             }
                         }
@@ -311,7 +336,8 @@ final class ScheduledPostManager: ObservableObject {
                         )
                     }
                 } catch {
-                    logs.append("❌ Lỗi: \(error.localizedDescription)")
+                    let cleanErr = SmartPostAPIClient.formatFacebookAPIError(error.localizedDescription)
+                    logs.append("❌ Lỗi: \(cleanErr)")
                 }
             } else {
                 let matchingDests = destinations.filter { $0.ownerSpaceId == nil || $0.ownerSpaceId == sid }
@@ -364,17 +390,21 @@ final class ScheduledPostManager: ObservableObject {
                             )
                         }
                     } catch {
-                        logs.append("❌ [\(dest.name)] Lỗi: \(error.localizedDescription)")
+                        let cleanErr = SmartPostAPIClient.formatFacebookAPIError(error.localizedDescription)
+                        logs.append("❌ [\(dest.name)] Lỗi: \(cleanErr)")
                     }
                 }
             }
         }
 
-        let allSuccess = successCount == totalCount && totalCount > 0
-        let summary = "Kết quả: \(successCount)/\(totalCount) thành công lúc \(Date().formatted(date: .numeric, time: .shortened))\n" + logs.joined(separator: "\n")
-        return (allSuccess, summary)
+        let df = DateFormatter()
+        df.dateFormat = "dd/MM/yyyy, HH:mm"
+        let timestamp = df.string(from: Date())
+        let summary = "Kết quả: \(successCount)/\(totalCount) thành công lúc \(timestamp)\n" + logs.joined(separator: "\n")
+        return (allSuccess: successCount > 0 && successCount == totalCount, summary: summary)
     }
 }
+
 
 // MARK: - Smart Post API Engine
 
@@ -542,6 +572,106 @@ enum SmartPostAPIClient {
     }
 
     /// Chuyển đổi URL Nhóm / URL Fanpage (kể cả link rút gọn share/g/..., share/..., username) sang ID chuẩn & lấy tên
+    // MARK: - Token Helpers & Error Formatter
+
+    static func cleanAccessToken(_ raw: String) -> String {
+        var cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.lowercased().hasPrefix("bearer ") {
+            cleaned = String(cleaned.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if cleaned.lowercased().hasPrefix("oauth ") {
+            cleaned = String(cleaned.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if cleaned.hasPrefix("\"") && cleaned.hasSuffix("\"") && cleaned.count > 2 {
+            cleaned = String(cleaned.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return cleaned
+    }
+
+    static func resolveBestAccessToken(from vault: SpaceTokenVault) -> String? {
+        let orig = cleanAccessToken(vault.originalToken)
+        if (orig.hasPrefix("EAA") || orig.contains("|")) && orig.count >= 20 {
+            return orig
+        }
+        if let fb = vault.convertedTokens["FB_ANDROID"]?.accessToken {
+            let clean = cleanAccessToken(fb)
+            if clean.hasPrefix("EAA") && clean.count >= 20 {
+                return clean
+            }
+        }
+        for key in ["PAGES_MANAGER_ANDROID", "ADS_MANAGER_ANDROID", "FB_LITE"] {
+            if let rec = vault.convertedTokens[key]?.accessToken {
+                let clean = cleanAccessToken(rec)
+                if clean.hasPrefix("EAA") && clean.count >= 20 {
+                    return clean
+                }
+            }
+        }
+        if !orig.isEmpty && orig.count >= 20 {
+            return orig
+        }
+        return nil
+    }
+
+    static func formatFacebookAPIError(_ errorText: String) -> String {
+        if let data = errorText.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let errObj = json["error"] as? [String: Any] {
+            let code = (errObj["code"] as? Int) ?? 0
+            let msg = (errObj["message"] as? String) ?? ""
+            let userMsg = (errObj["error_user_msg"] as? String)
+
+            if let userMsg, !userMsg.isEmpty {
+                return userMsg
+            }
+            if code == 190 {
+                if msg.lowercased().contains("malformed") {
+                    return "Access Token bị lỗi định dạng (Malformed). Vui lòng vào 'Kho Token' kiểm tra hoặc kết nối lại tài khoản."
+                }
+                return "Phiên đăng nhập hoặc Access Token đã hết hạn (Mã 190). Hãy vào 'Kho Token' để lấy lại token mới."
+            }
+            if code == 200 || code == 10 {
+                return "Tài khoản không có quyền đăng bài lên đích này (Nhóm hoặc Trang yêu cầu quyền thành viên/quản trị)."
+            }
+            if code == 368 {
+                return "Tài khoản đang bị Facebook tạm hạn chế tính năng đăng bài (Spam/Checkpoint - Mã 368)."
+            }
+            if !msg.isEmpty {
+                return "\(msg) (Mã \(code))"
+            }
+        }
+        if errorText.contains("Malformed access token") {
+            return "Access Token bị lỗi định dạng (Malformed). Hãy vào 'Kho Token' để lấy hoặc lưu lại token chuẩn."
+        }
+        return errorText
+    }
+
+    static func validateAccessToken(_ token: String) async -> (isValid: Bool, message: String) {
+        let clean = cleanAccessToken(token)
+        guard !clean.isEmpty, clean.count >= 20 else {
+            return (false, "Token rỗng hoặc quá ngắn.")
+        }
+        guard let url = URL(string: "https://graph.facebook.com/me?fields=id,name") else {
+            return (false, "URL Graph API không hợp lệ.")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 8)
+        req.setValue("OAuth \(clean)", forHTTPHeaderField: "authorization")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if status == 200 {
+                return (true, "Token hợp lệ.")
+            }
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let err = json["error"] as? [String: Any],
+               let msg = err["message"] as? String {
+                return (false, msg)
+            }
+            return (false, "HTTP \(status)")
+        } catch {
+            return (false, error.localizedDescription)
+        }
+    }
+
     static func resolveDestinationFromInput(
         rawInput: String,
         kind: SmartPostDestinationType,
@@ -558,60 +688,61 @@ enum SmartPostAPIClient {
         var resolvedPageToken: String? = nil
 
         // 1. Nếu người dùng nhập trực tiếp dãy số ID
-        if trimmed.allSatisfy(\.isNumber), trimmed.count >= 5 {
+        if trimmed.allSatisfy(\ .isNumber), trimmed.count >= 5 {
             resolvedId = trimmed
         } else {
-            // 2. Mở rộng link nếu là link share/g/..., share/...
-            var workingURL = trimmed
-            if !workingURL.lowercased().hasPrefix("http") {
-                workingURL = "https://www.facebook.com/\(workingURL)"
-            }
+            // Trích xuất số ID nếu có sẵn trên URL (vd: /groups/123456789 hoặc /share/g/123456789)
+            resolvedId = FacebookTargetPostResolver.firstMatch(pattern: #"(?:groups/|share/g/|fb://group/)(\d{5,25})"#, in: trimmed)
+                ?? FacebookTargetPostResolver.firstMatch(pattern: #"profile\.php\?id=(\d{5,25})"#, in: trimmed)
+                ?? FacebookTargetPostResolver.firstMatch(pattern: #"facebook\.com/(?:pages/[^/]+/|people/[^/]+/)(\d{5,25})"#, in: trimmed)
+                ?? FacebookTargetPostResolver.firstMatch(pattern: #"^(\d{5,25})$"#, in: trimmed)
 
-            if let expanded = await FacebookTargetPostResolver.resolveShareURLToCanonical(input: workingURL, cookieString: cookieString ?? "") {
-                if !expanded.canonicalURL.isEmpty {
-                    workingURL = expanded.canonicalURL
-                }
-                if expanded.postId.allSatisfy(\.isNumber) {
-                    resolvedId = expanded.postId
-                }
-            }
-
-            // Trích xuất từ mẫu URL chuẩn: /groups/123456789 hoặc profile.php?id=123456789
+            // 2. Mở rộng link nếu là link rút gọn share/g/..., share/... hoặc slug
             if resolvedId == nil {
-                resolvedId = FacebookTargetPostResolver.firstMatch(pattern: #"facebook\.com/groups/(\d{5,25})"#, in: workingURL)
-                    ?? FacebookTargetPostResolver.firstMatch(pattern: #"profile\.php\?id=(\d{5,25})"#, in: workingURL)
-                    ?? FacebookTargetPostResolver.firstMatch(pattern: #"facebook\.com/(?:pages/[^/]+/|people/[^/]+/)(\d{5,25})"#, in: workingURL)
-                    ?? FacebookTargetPostResolver.firstMatch(pattern: #"^(\d{5,25})$"#, in: workingURL)
-            }
-
-            // Nếu URL dạng slug (vd: facebook.com/groups/tennhom hoặc facebook.com/tenfanpage), tải HTML để bóc tách groupID / pageID
-            if resolvedId == nil, let fetchUrl = URL(string: workingURL) {
-                var req = URLRequest(url: fetchUrl, timeoutInterval: 15)
-                if let cookie = cookieString, !cookie.isEmpty {
-                    req.setValue(cookie, forHTTPHeaderField: "Cookie")
+                var workingURL = trimmed
+                if !workingURL.lowercased().hasPrefix("http") {
+                    workingURL = "https://www.facebook.com/\(workingURL)"
                 }
-                req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
-                if let (data, resp) = try? await URLSession.shared.data(for: req) {
-                    if let finalUrl = resp.url?.absoluteString {
-                        resolvedId = FacebookTargetPostResolver.firstMatch(pattern: #"facebook\.com/groups/(\d{5,25})"#, in: finalUrl)
-                            ?? FacebookTargetPostResolver.firstMatch(pattern: #"profile\.php\?id=(\d{5,25})"#, in: finalUrl)
-                    }
-                    if resolvedId == nil, let html = String(data: data, encoding: .utf8) {
-                        resolvedId = FacebookTargetPostResolver.firstMatch(pattern: #""groupID"\s*:\s*"(\d{5,25})""#, in: html)
-                            ?? FacebookTargetPostResolver.firstMatch(pattern: #""pageID"\s*:\s*"(\d{5,25})""#, in: html)
-                            ?? FacebookTargetPostResolver.firstMatch(pattern: #"fb://group/(\d{5,25})"#, in: html)
-                            ?? FacebookTargetPostResolver.firstMatch(pattern: #"fb://page/(\d{5,25})"#, in: html)
-                            ?? FacebookTargetPostResolver.firstMatch(pattern: #"fb://profile/(\d{5,25})"#, in: html)
-                            ?? FacebookTargetPostResolver.firstMatch(pattern: #""owning_profile"\s*:\s*\{\s*"__typename"\s*:\s*"(?:Page|Group|User)"\s*,\s*"id"\s*:\s*"(\d{5,25})""#, in: html)
-                            ?? FacebookTargetPostResolver.firstMatch(pattern: #""entity_id"\s*:\s*"(\d{5,25})""#, in: html)
 
-                        if let titleMatch = FacebookTargetPostResolver.firstMatch(pattern: #"<title[^>]*>([^<]+)</title>"#, in: html) {
-                            let cleanTitle = titleMatch
-                                .replacingOccurrences(of: " | Facebook", with: "")
-                                .replacingOccurrences(of: " - Facebook", with: "")
-                                .trimmingCharacters(in: .whitespacesAndNewlines)
-                            if !cleanTitle.isEmpty && !cleanTitle.lowercased().contains("facebook") {
-                                resolvedName = cleanTitle
+                if let expanded = await FacebookTargetPostResolver.resolveShareURLToCanonical(input: workingURL, cookieString: cookieString ?? "") {
+                    if expanded.postId.allSatisfy(\ .isNumber), expanded.postId.count >= 5 {
+                        resolvedId = expanded.postId
+                    } else if let num = FacebookTargetPostResolver.firstMatch(pattern: #"(\d{5,25})"#, in: expanded.canonicalURL) {
+                        resolvedId = num
+                    }
+                }
+
+                // Nếu vẫn chưa có ID (dạng slug facebook.com/groups/ten_nhom), tải HTML để bóc tách ID
+                if resolvedId == nil, let fetchUrl = URL(string: workingURL) {
+                    var req = URLRequest(url: fetchUrl, timeoutInterval: 15)
+                    if let cookie = cookieString, !cookie.isEmpty {
+                        req.setValue(cookie, forHTTPHeaderField: "Cookie")
+                    }
+                    req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
+                    if let (data, resp) = try? await URLSession.shared.data(for: req) {
+                        if let finalUrl = resp.url?.absoluteString {
+                            resolvedId = FacebookTargetPostResolver.firstMatch(pattern: #"(?:groups/|share/g/)(\d{5,25})"#, in: finalUrl)
+                                ?? FacebookTargetPostResolver.firstMatch(pattern: #"profile\.php\?id=(\d{5,25})"#, in: finalUrl)
+                        }
+                        if resolvedId == nil, let html = String(data: data, encoding: .utf8) {
+                            resolvedId = FacebookTargetPostResolver.firstMatch(pattern: #"al:(?:android|ios):url"\s+content="fb://group/(\d{5,25})"#, in: html)
+                                ?? FacebookTargetPostResolver.firstMatch(pattern: #"al:(?:android|ios):url"\s+content="fb://page/(\d{5,25})"#, in: html)
+                                ?? FacebookTargetPostResolver.firstMatch(pattern: #"fb://group/(\d{5,25})"#, in: html)
+                                ?? FacebookTargetPostResolver.firstMatch(pattern: #"fb://page/(\d{5,25})"#, in: html)
+                                ?? FacebookTargetPostResolver.firstMatch(pattern: #""groupID"\s*:\s*"?(\d{5,25})"?"#, in: html)
+                                ?? FacebookTargetPostResolver.firstMatch(pattern: #""group_id"\s*:\s*"?(\d{5,25})"?"#, in: html)
+                                ?? FacebookTargetPostResolver.firstMatch(pattern: #""pageID"\s*:\s*"?(\d{5,25})"?"#, in: html)
+                                ?? FacebookTargetPostResolver.firstMatch(pattern: #""entity_id"\s*:\s*"?(\d{5,25})"?"#, in: html)
+                                ?? FacebookTargetPostResolver.firstMatch(pattern: #""owning_profile"\s*:\s*\{\s*"__typename"\s*:\s*"(?:Page|Group|User)"\s*,\s*"id"\s*:\s*"(\d{5,25})""#, in: html)
+
+                            if let titleMatch = FacebookTargetPostResolver.firstMatch(pattern: #"<title[^>]*>([^<]+)</title>"#, in: html) {
+                                let cleanTitle = titleMatch
+                                    .replacingOccurrences(of: " | Facebook", with: "")
+                                    .replacingOccurrences(of: " - Facebook", with: "")
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !cleanTitle.isEmpty && !cleanTitle.lowercased().contains("facebook") {
+                                    resolvedName = cleanTitle
+                                }
                             }
                         }
                     }
@@ -622,12 +753,13 @@ enum SmartPostAPIClient {
         guard let finalId = resolvedId, !finalId.isEmpty else { return nil }
 
         // 3. Tra cứu thêm thông tin tên & Page Access Token qua Graph API nếu có token
-        if let token = accessToken, !token.isEmpty {
+        let cleanTok = accessToken != nil ? cleanAccessToken(accessToken!) : ""
+        if !cleanTok.isEmpty {
             let fields = kind == .fanpage ? "id,name,access_token,category" : "id,name,privacy"
             if let infoUrl = URL(string: "https://graph.facebook.com/\(finalId)?fields=\(fields)") {
                 var req = URLRequest(url: infoUrl, timeoutInterval: 12)
                 for (k, v) in fbHeaders { req.setValue(v, forHTTPHeaderField: k) }
-                req.setValue("OAuth \(token)", forHTTPHeaderField: "authorization")
+                req.setValue("OAuth \(cleanTok)", forHTTPHeaderField: "authorization")
                 if let (data, _) = try? await URLSession.shared.data(for: req),
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     if let n = json["name"] as? String, !n.isEmpty {
@@ -654,7 +786,9 @@ enum SmartPostAPIClient {
     }
 
     /// Tải ảnh lên Graph API /\(targetId)/photos để lấy Photo ID (hỗ trợ me, Group hoặc Fanpage)
+
     static func uploadPhoto(imageData: Data, accessToken: String, targetId: String = "me") async throws -> String {
+        let cleanToken = cleanAccessToken(accessToken)
         let cleanTarget = targetId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "me" : targetId
         let url = URL(string: "https://graph.facebook.com/\(cleanTarget)/photos")!
         let sessionId = UUID().uuidString
@@ -665,12 +799,13 @@ enum SmartPostAPIClient {
         for (k, v) in fbHeaders {
             request.setValue(v, forHTTPHeaderField: k)
         }
-        request.setValue("OAuth \(accessToken)", forHTTPHeaderField: "authorization")
+        request.setValue("OAuth \(cleanToken)", forHTTPHeaderField: "authorization")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "content-type")
         request.setValue("upload-photo", forHTTPHeaderField: "x-fb-friendly-name")
 
         var body = Data()
         let fields: [String: String] = [
+            "access_token": cleanToken,
             "published": "false",
             "audience_exp": "true",
             "qn": sessionId,
@@ -705,14 +840,16 @@ enum SmartPostAPIClient {
             return photoId
         } else if cleanTarget != "me" {
             // Fallback về /me/photos nếu endpoint đích từ chối unpublished photo
-            return try await uploadPhoto(imageData: imageData, accessToken: accessToken, targetId: "me")
+            return try await uploadPhoto(imageData: imageData, accessToken: cleanToken, targetId: "me")
         } else {
             let errText = String(data: data, encoding: .utf8) ?? "HTTP \(statusCode)"
-            throw NSError(domain: "SmartPost", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Lỗi tải ảnh: \(errText.prefix(120))"])
+            let cleanErr = formatFacebookAPIError(errText)
+            throw NSError(domain: "SmartPost", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Lỗi tải ảnh: \(cleanErr)"])
         }
     }
 
     /// Đăng Video lên Facebook qua Graph API /\(userId)/videos (hỗ trợ Trang cá nhân, Group ID, hoặc Page ID)
+
     static func uploadVideo(
         videoData: Data,
         caption: String,
@@ -811,7 +948,8 @@ enum SmartPostAPIClient {
             return (id, canonicalUrl)
         }
         let errText = String(data: data, encoding: .utf8) ?? "HTTP \(statusCode)"
-        throw NSError(domain: "SmartPost", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Graph feed lỗi: \(errText.prefix(120))"])
+        let cleanErr = formatFacebookAPIError(errText)
+        throw NSError(domain: "SmartPost", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Graph feed lỗi: \(cleanErr)"])
     }
 
     /// Đăng bài viết (status hoặc ảnh) hỗ trợ Trang cá nhân, Nhóm (Group) và Trang (Fanpage)
@@ -2197,6 +2335,23 @@ struct SmartPostView: View {
                                 .padding(6)
                                 .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 6))
                         }
+
+                        if task.status == .failed {
+                            HStack {
+                                Button {
+                                    scheduler.retryTask(task)
+                                } label: {
+                                    Label("Thử lại bài đăng này", systemImage: "arrow.clockwise")
+                                        .font(.caption.bold())
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.mini)
+                                .tint(.blue)
+
+                                Spacer()
+                            }
+                            .padding(.top, 2)
+                        }
                     }
                     .padding(.vertical, 4)
                     .swipeActions(edge: .trailing) {
@@ -2204,6 +2359,16 @@ struct SmartPostView: View {
                             scheduler.deleteTask(task)
                         } label: {
                             Label("Xóa", systemImage: "trash")
+                        }
+                    }
+                    .swipeActions(edge: .leading) {
+                        if task.status == .failed {
+                            Button {
+                                scheduler.retryTask(task)
+                            } label: {
+                                Label("Thử lại", systemImage: "arrow.clockwise")
+                            }
+                            .tint(.blue)
                         }
                     }
                 }
@@ -2256,18 +2421,31 @@ struct SmartPostView: View {
             progressMessage = "Đang xử lý (\(idx + 1)/\(selectedSpaces.count)): \(space.name)..."
 
             guard let vault = try? SecureLoginStore.readTokenVault(space.id),
-                  !vault.originalToken.isEmpty else {
+                  let token = SmartPostAPIClient.resolveBestAccessToken(from: vault),
+                  !token.isEmpty else {
                 results.append(SmartPostResult(
                     spaceName: space.name,
                     isSuccess: false,
                     postId: nil,
                     postUrl: nil,
-                    message: "Chưa có Access Token API."
+                    message: "Chưa có Access Token API hợp lệ. Vui lòng vào 'Kho Token' kiểm tra hoặc kết nối lại."
                 ))
                 continue
             }
 
-            let token = vault.originalToken
+            // Kiểm tra token trước khi đăng
+            let tokenValidation = await SmartPostAPIClient.validateAccessToken(token)
+            if !tokenValidation.isValid {
+                let cleanErr = SmartPostAPIClient.formatFacebookAPIError(tokenValidation.message)
+                results.append(SmartPostResult(
+                    spaceName: space.name,
+                    isSuccess: false,
+                    postId: nil,
+                    postUrl: nil,
+                    message: "Token không hợp lệ (\(cleanErr)). Hãy vào 'Kho Token' lấy lại token."
+                ))
+                continue
+            }
             let uid = vault.uid.isEmpty ? "me" : vault.uid
 
             if isPrivacyOnlyMode {
