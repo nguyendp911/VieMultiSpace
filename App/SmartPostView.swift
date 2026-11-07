@@ -219,6 +219,8 @@ final class ScheduledPostManager: ObservableObject {
             let token = vault.originalToken
             let uid = vault.uid.isEmpty ? "me" : vault.uid
 
+            let accountDisplayName = vault.uid.isEmpty ? "Tài khoản FB" : "FB • \(vault.uid)"
+
             do {
                 if let vdata = loadedVideoData {
                     let vid = try await SmartPostAPIClient.uploadVideo(videoData: vdata, caption: task.caption, accessToken: token, userId: uid)
@@ -226,7 +228,7 @@ final class ScheduledPostManager: ObservableObject {
                     logs.append("✅ Đăng video thành công ID: \(vid)")
                     TrackedPostManager.shared.registerPublishedPost(
                         spaceId: sid,
-                        spaceName: vault.accountName.isEmpty ? "Tài khoản FB" : vault.accountName,
+                        spaceName: accountDisplayName,
                         postId: vid,
                         postUrl: "https://www.facebook.com/watch/?v=\(vid)",
                         caption: task.caption,
@@ -245,7 +247,7 @@ final class ScheduledPostManager: ObservableObject {
                     logs.append("✅ Đăng bài thành công ID: \(res.postId)")
                     TrackedPostManager.shared.registerPublishedPost(
                         spaceId: sid,
-                        spaceName: vault.accountName.isEmpty ? "Tài khoản FB" : vault.accountName,
+                        spaceName: accountDisplayName,
                         postId: res.postId,
                         postUrl: res.postUrl,
                         caption: task.caption,
