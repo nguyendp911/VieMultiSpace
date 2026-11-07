@@ -1141,11 +1141,11 @@ enum WebCookieBridge {
                 const text = s.textContent || '';
                 const m = text.match(/"accessToken"\\s*:\\s*"(EAA[^"]+)"/);
                 if (m && m[1]) return m[1];
-                const m2 = text.match(/(EAA[A-Za-z0-9_\-\|=]{20,500})/);
+                const m2 = text.match(/(EAA[A-Za-z0-9_=-]{20,500})/);
                 if (m2 && m2[1]) return m2[1];
             }
             const pageHtml = document.documentElement.innerHTML;
-            const m = pageHtml.match(/(EAA[A-Za-z0-9_\-\|=]{20,500})/);
+            const m = pageHtml.match(/(EAA[A-Za-z0-9_=-]{20,500})/);
             return m ? m[1] : null;
         })();
         """

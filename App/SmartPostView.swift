@@ -692,10 +692,18 @@ enum SmartPostAPIClient {
             resolvedId = trimmed
         } else {
             // Trích xuất số ID nếu có sẵn trên URL (vd: /groups/123456789 hoặc /share/g/123456789)
-            resolvedId = FacebookTargetPostResolver.firstMatch(pattern: #"(?:groups/|share/g/|fb://group/)(\d{5,25})"#, in: trimmed)
-                ?? FacebookTargetPostResolver.firstMatch(pattern: #"profile\.php\?id=(\d{5,25})"#, in: trimmed)
-                ?? FacebookTargetPostResolver.firstMatch(pattern: #"facebook\.com/(?:pages/[^/]+/|people/[^/]+/)(\d{5,25})"#, in: trimmed)
-                ?? FacebookTargetPostResolver.firstMatch(pattern: #"^(\d{5,25})$"#, in: trimmed)
+            let directPatterns = [
+                #"(?:groups/|share/g/|fb://group/)(\d{5,25})"#,
+                #"profile\.php\?id=(\d{5,25})"#,
+                #"facebook\.com/(?:pages/[^/]+/|people/[^/]+/)(\d{5,25})"#,
+                #"^(\d{5,25})$"#
+            ]
+            for pat in directPatterns {
+                if let m = FacebookTargetPostResolver.firstMatch(pattern: pat, in: trimmed) {
+                    resolvedId = m
+                    break
+                }
+            }
 
             // 2. Mở rộng link nếu là link rút gọn share/g/..., share/... hoặc slug
             if resolvedId == nil {
@@ -721,19 +729,31 @@ enum SmartPostAPIClient {
                     req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
                     if let (data, resp) = try? await URLSession.shared.data(for: req) {
                         if let finalUrl = resp.url?.absoluteString {
-                            resolvedId = FacebookTargetPostResolver.firstMatch(pattern: #"(?:groups/|share/g/)(\d{5,25})"#, in: finalUrl)
-                                ?? FacebookTargetPostResolver.firstMatch(pattern: #"profile\.php\?id=(\d{5,25})"#, in: finalUrl)
+                            if let m = FacebookTargetPostResolver.firstMatch(pattern: #"(?:groups/|share/g/)(\d{5,25})"#, in: finalUrl) {
+                                resolvedId = m
+                            } else if let m = FacebookTargetPostResolver.firstMatch(pattern: #"profile\.php\?id=(\d{5,25})"#, in: finalUrl) {
+                                resolvedId = m
+                            }
                         }
                         if resolvedId == nil, let html = String(data: data, encoding: .utf8) {
-                            resolvedId = FacebookTargetPostResolver.firstMatch(pattern: #"al:(?:android|ios):url"\s+content="fb://group/(\d{5,25})"#, in: html)
-                                ?? FacebookTargetPostResolver.firstMatch(pattern: #"al:(?:android|ios):url"\s+content="fb://page/(\d{5,25})"#, in: html)
-                                ?? FacebookTargetPostResolver.firstMatch(pattern: #"fb://group/(\d{5,25})"#, in: html)
-                                ?? FacebookTargetPostResolver.firstMatch(pattern: #"fb://page/(\d{5,25})"#, in: html)
-                                ?? FacebookTargetPostResolver.firstMatch(pattern: #""groupID"\s*:\s*"?(\d{5,25})"?"#, in: html)
-                                ?? FacebookTargetPostResolver.firstMatch(pattern: #""group_id"\s*:\s*"?(\d{5,25})"?"#, in: html)
-                                ?? FacebookTargetPostResolver.firstMatch(pattern: #""pageID"\s*:\s*"?(\d{5,25})"?"#, in: html)
-                                ?? FacebookTargetPostResolver.firstMatch(pattern: #""entity_id"\s*:\s*"?(\d{5,25})"?"#, in: html)
-                                ?? FacebookTargetPostResolver.firstMatch(pattern: #""owning_profile"\s*:\s*\{\s*"__typename"\s*:\s*"(?:Page|Group|User)"\s*,\s*"id"\s*:\s*"(\d{5,25})""#, in: html)
+                            let groupHtmlPatterns = [
+                                #"al:(?:android|ios):url"\s+content="fb://group/(\d{5,25})"#,
+                                #"al:(?:android|ios):url"\s+content="fb://page/(\d{5,25})"#,
+                                #"fb://group/(\d{5,25})"#,
+                                #"fb://page/(\d{5,25})"#,
+                                #""groupID"\s*:\s*"?(\d{5,25})"?"#,
+                                #""group_id"\s*:\s*"?(\d{5,25})"?"#,
+                                #""pageID"\s*:\s*"?(\d{5,25})"?"#,
+                                #""entity_id"\s*:\s*"?(\d{5,25})"?"#,
+                                #""owning_profile"\s*:\s*\{\s*"__typename"\s*:\s*"(?:Page|Group|User)"\s*,\s*"id"\s*:\s*"(\d{5,25})""#
+                            ]
+                            for pat in groupHtmlPatterns {
+                                if let m = FacebookTargetPostResolver.firstMatch(pattern: pat, in: html) {
+                                    resolvedId = m
+                                    break
+                                }
+                            }
+
 
                             if let titleMatch = FacebookTargetPostResolver.firstMatch(pattern: #"<title[^>]*>([^<]+)</title>"#, in: html) {
                                 let cleanTitle = titleMatch
