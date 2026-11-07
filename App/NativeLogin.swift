@@ -750,7 +750,9 @@ enum FacebookAPILoginClient {
             lastResponseJson = responseJson
 
             if let token = responseJson["access_token"] as? String, !token.isEmpty {
-                AppLogger.shared.info("Đăng nhập thành công (\(candidate.label)) cho \(cleanUser)", category: "Auth")
+                await MainActor.run {
+                    AppLogger.shared.info("Auth", "Đăng nhập thành công (\(candidate.label)) cho \(cleanUser)")
+                }
                 return await buildVault(uid: cleanUser, responseJson: responseJson, convertAll: convertAll)
             }
 
@@ -784,7 +786,9 @@ enum FacebookAPILoginClient {
 
                 // Nếu là lỗi sai mật khẩu (400/401 / subcode 1348092), thử tiếp phương thức dự phòng tiếp theo
                 let isInvalidCreds = (errInfo.code == 400 || errInfo.code == 401 || errInfo.subcode == 1348092)
-                AppLogger.shared.info("Thử \(candidate.label) báo mã \(errInfo.code)/\(errInfo.subcode): \(errInfo.message)", category: "Auth")
+                await MainActor.run {
+                    AppLogger.shared.info("Auth", "Thử \(candidate.label) báo mã \(errInfo.code)/\(errInfo.subcode): \(errInfo.message)")
+                }
                 if !isInvalidCreds {
                     break
                 }
@@ -877,7 +881,9 @@ enum FacebookAPILoginClient {
             last2FAJson = json2FA
 
             if let token2FA = json2FA["access_token"] as? String, !token2FA.isEmpty {
-                AppLogger.shared.info("Xác thực 2FA thành công cho UID \(uidValue)", category: "Auth")
+                await MainActor.run {
+                    AppLogger.shared.info("Auth", "Xác thực 2FA thành công cho UID \(uidValue)")
+                }
                 return await buildVault(uid: uidValue, responseJson: json2FA, convertAll: convertAll)
             }
         }
