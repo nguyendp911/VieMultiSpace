@@ -688,7 +688,7 @@ enum SmartPostAPIClient {
         var resolvedPageToken: String? = nil
 
         // 1. Nếu người dùng nhập trực tiếp dãy số ID
-        if trimmed.allSatisfy(\ .isNumber), trimmed.count >= 5 {
+        if trimmed.allSatisfy(\.isNumber), trimmed.count >= 5 {
             resolvedId = trimmed
         } else {
             // Trích xuất số ID nếu có sẵn trên URL (vd: /groups/123456789 hoặc /share/g/123456789)
@@ -705,7 +705,7 @@ enum SmartPostAPIClient {
                 }
 
                 if let expanded = await FacebookTargetPostResolver.resolveShareURLToCanonical(input: workingURL, cookieString: cookieString ?? "") {
-                    if expanded.postId.allSatisfy(\ .isNumber), expanded.postId.count >= 5 {
+                    if expanded.postId.allSatisfy(\.isNumber), expanded.postId.count >= 5 {
                         resolvedId = expanded.postId
                     } else if let num = FacebookTargetPostResolver.firstMatch(pattern: #"(\d{5,25})"#, in: expanded.canonicalURL) {
                         resolvedId = num
