@@ -5,6 +5,52 @@ import PhotosUI
 
 // MARK: - Smart Post Models & Privacy Options
 
+enum SmartPostDestinationType: String, CaseIterable, Identifiable, Codable {
+    case personalProfile = "Trang cá nhân"
+    case group = "Nhóm (Group)"
+    case fanpage = "Trang (Fanpage)"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .personalProfile: return "person.crop.circle.fill"
+        case .group: return "person.3.fill"
+        case .fanpage: return "flag.fill"
+        }
+    }
+
+    var shortLabel: String {
+        switch self {
+        case .personalProfile: return "Cá nhân"
+        case .group: return "Nhóm"
+        case .fanpage: return "Fanpage"
+        }
+    }
+
+    var gradientColors: [Color] {
+        switch self {
+        case .personalProfile: return [.blue, .indigo]
+        case .group: return [.teal, .green]
+        case .fanpage: return [.orange, .pink]
+        }
+    }
+}
+
+struct FacebookDestinationItem: Identifiable, Codable, Hashable {
+    var id: String // Group ID hoặc Page ID
+    var name: String
+    var kind: SmartPostDestinationType
+    var pageAccessToken: String?
+    var subtitle: String
+    var ownerSpaceId: UUID?
+    var ownerSpaceName: String
+
+    var uniqueSelectionKey: String {
+        "\(kind.rawValue)_\(id)_\(ownerSpaceId?.uuidString ?? "manual")"
+    }
+}
+
 enum SmartPostPrivacy: String, CaseIterable, Identifiable, Codable {
     case everyone = "Công khai (EVERYONE)"
     case friends = "Bạn bè (FRIENDS)"
@@ -70,6 +116,8 @@ struct ScheduledPostTask: Identifiable, Codable {
     var caption: String
     var targetSpaceIds: [UUID]
     var privacy: SmartPostPrivacy
+    var destinationType: SmartPostDestinationType? = .personalProfile
+    var targetDestinations: [FacebookDestinationItem]? = []
     var scheduledDate: Date
     var status: ScheduledTaskStatus
     var imageFileNames: [String]
@@ -110,6 +158,8 @@ final class ScheduledPostManager: ObservableObject {
         caption: String,
         spaceIds: [UUID],
         privacy: SmartPostPrivacy,
+        destinationType: SmartPostDestinationType = .personalProfile,
+        targetDestinations: [FacebookDestinationItem] = [],
         scheduledDate: Date,
         images: [UIImage],
         videoData: Data?
@@ -134,15 +184,18 @@ final class ScheduledPostManager: ObservableObject {
             savedVideoName = name
         }
 
-        let title = caption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let baseTitle = caption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? (savedVideoName != nil ? "Video bài đăng" : "\(savedImageNames.count) Ảnh bài đăng")
-            : String(caption.prefix(40))
+            : String(caption.prefix(36))
+        let title = "[\(destinationType.shortLabel)] \(baseTitle)"
 
         let newTask = ScheduledPostTask(
             title: title,
             caption: caption,
             targetSpaceIds: spaceIds,
             privacy: privacy,
+            destinationType: destinationType,
+            targetDestinations: targetDestinations,
             scheduledDate: scheduledDate,
             status: .pending,
             imageFileNames: savedImageNames,
@@ -177,7 +230,7 @@ final class ScheduledPostManager: ObservableObject {
     func checkAndExecuteDueTasks() async {
         let now = Date()
         for idx in tasks.indices {
-            var task = tasks[idx]
+            let task = tasks[idx]
             if task.status == .pending && task.scheduledDate <= now {
                 tasks[idx].status = .running
                 saveTasks()
@@ -209,53 +262,111 @@ final class ScheduledPostManager: ObservableObject {
         var successCount = 0
         var totalCount = 0
         var logs: [String] = []
+        let destType = task.destinationType ?? .personalProfile
+        let destinations = task.targetDestinations ?? []
 
         for sid in task.targetSpaceIds {
-            totalCount += 1
             guard let vault = try? SecureLoginStore.readTokenVault(sid), !vault.originalToken.isEmpty else {
+                totalCount += 1
                 logs.append("Không tìm thấy token cho không gian ID: \(sid)")
                 continue
             }
             let token = vault.originalToken
             let uid = vault.uid.isEmpty ? "me" : vault.uid
-
             let accountDisplayName = vault.uid.isEmpty ? "Tài khoản FB" : "FB • \(vault.uid)"
 
-            do {
-                if let vdata = loadedVideoData {
-                    let vid = try await SmartPostAPIClient.uploadVideo(videoData: vdata, caption: task.caption, accessToken: token, userId: uid)
-                    successCount += 1
-                    logs.append("✅ Đăng video thành công ID: \(vid)")
-                    TrackedPostManager.shared.registerPublishedPost(
-                        spaceId: sid,
-                        spaceName: accountDisplayName,
-                        postId: vid,
-                        postUrl: "https://www.facebook.com/watch/?v=\(vid)",
-                        caption: task.caption,
-                        enableAIAutoReply: true
-                    )
-                } else {
-                    var pids: [String] = []
-                    for img in loadedImages {
-                        if let jdata = img.jpegData(compressionQuality: 0.85) {
-                            let pid = try await SmartPostAPIClient.uploadPhoto(imageData: jdata, accessToken: token)
-                            pids.append(pid)
+            if destType == .personalProfile || destinations.isEmpty {
+                totalCount += 1
+                do {
+                    if let vdata = loadedVideoData {
+                        let vid = try await SmartPostAPIClient.uploadVideo(videoData: vdata, caption: task.caption, accessToken: token, userId: uid)
+                        successCount += 1
+                        logs.append("✅ Đăng video cá nhân thành công ID: \(vid)")
+                        TrackedPostManager.shared.registerPublishedPost(
+                            spaceId: sid,
+                            spaceName: accountDisplayName,
+                            postId: vid,
+                            postUrl: "https://www.facebook.com/watch/?v=\(vid)",
+                            caption: task.caption,
+                            enableAIAutoReply: true
+                        )
+                    } else {
+                        var pids: [String] = []
+                        for img in loadedImages {
+                            if let jdata = img.jpegData(compressionQuality: 0.85) {
+                                let pid = try await SmartPostAPIClient.uploadPhoto(imageData: jdata, accessToken: token)
+                                pids.append(pid)
+                            }
                         }
+                        let res = try await SmartPostAPIClient.createPost(caption: task.caption, photoIds: pids, privacy: task.privacy, destinationType: .personalProfile, accessToken: token, userId: uid)
+                        successCount += 1
+                        logs.append("✅ Đăng bài cá nhân thành công ID: \(res.postId)")
+                        TrackedPostManager.shared.registerPublishedPost(
+                            spaceId: sid,
+                            spaceName: accountDisplayName,
+                            postId: res.postId,
+                            postUrl: res.postUrl,
+                            caption: task.caption,
+                            enableAIAutoReply: true
+                        )
                     }
-                    let res = try await SmartPostAPIClient.createPost(caption: task.caption, photoIds: pids, privacy: task.privacy, accessToken: token, userId: uid)
-                    successCount += 1
-                    logs.append("✅ Đăng bài thành công ID: \(res.postId)")
-                    TrackedPostManager.shared.registerPublishedPost(
-                        spaceId: sid,
-                        spaceName: accountDisplayName,
-                        postId: res.postId,
-                        postUrl: res.postUrl,
-                        caption: task.caption,
-                        enableAIAutoReply: true
-                    )
+                } catch {
+                    logs.append("❌ Lỗi: \(error.localizedDescription)")
                 }
-            } catch {
-                logs.append("❌ Lỗi: \(error.localizedDescription)")
+            } else {
+                let matchingDests = destinations.filter { $0.ownerSpaceId == nil || $0.ownerSpaceId == sid }
+                for dest in matchingDests {
+                    totalCount += 1
+                    let effectiveToken = (destType == .fanpage ? dest.pageAccessToken : nil) ?? token
+                    let uploadTarget = destType == .fanpage ? dest.id : "me"
+                    let videoTarget = dest.id
+                    let displayLabel = "\(accountDisplayName) → \(dest.name)"
+                    do {
+                        if let vdata = loadedVideoData {
+                            let vid = try await SmartPostAPIClient.uploadVideo(videoData: vdata, caption: task.caption, accessToken: effectiveToken, userId: videoTarget)
+                            successCount += 1
+                            logs.append("✅ [\(dest.name)] Đăng video thành công ID: \(vid)")
+                            TrackedPostManager.shared.registerPublishedPost(
+                                spaceId: sid,
+                                spaceName: displayLabel,
+                                postId: vid,
+                                postUrl: "https://www.facebook.com/watch/?v=\(vid)",
+                                caption: task.caption,
+                                enableAIAutoReply: true
+                            )
+                        } else {
+                            var pids: [String] = []
+                            for img in loadedImages {
+                                if let jdata = img.jpegData(compressionQuality: 0.85) {
+                                    let pid = try await SmartPostAPIClient.uploadPhoto(imageData: jdata, accessToken: effectiveToken, targetId: uploadTarget)
+                                    pids.append(pid)
+                                }
+                            }
+                            let res = try await SmartPostAPIClient.createPost(
+                                caption: task.caption,
+                                photoIds: pids,
+                                privacy: task.privacy,
+                                destinationType: destType,
+                                targetDestinationId: dest.id,
+                                pageAccessToken: dest.pageAccessToken,
+                                accessToken: token,
+                                userId: uid
+                            )
+                            successCount += 1
+                            logs.append("✅ [\(dest.name)] Đăng bài thành công ID: \(res.postId)")
+                            TrackedPostManager.shared.registerPublishedPost(
+                                spaceId: sid,
+                                spaceName: displayLabel,
+                                postId: res.postId,
+                                postUrl: res.postUrl,
+                                caption: task.caption,
+                                enableAIAutoReply: true
+                            )
+                        }
+                    } catch {
+                        logs.append("❌ [\(dest.name)] Lỗi: \(error.localizedDescription)")
+                    }
+                }
             }
         }
 
@@ -285,9 +396,267 @@ enum SmartPostAPIClient {
         "x-fb-server-cluster": "True"
     ]
 
-    /// Tải ảnh lên Graph API /me/photos để lấy Photo ID
-    static func uploadPhoto(imageData: Data, accessToken: String) async throws -> String {
-        let url = URL(string: "https://graph.facebook.com/me/photos")!
+    /// Lấy danh sách Trang (Fanpage) do tài khoản quản trị (kèm Page Access Token riêng)
+    static func fetchManagedPages(
+        accessToken: String,
+        spaceId: UUID,
+        spaceName: String
+    ) async -> [FacebookDestinationItem] {
+        var items: [FacebookDestinationItem] = []
+        guard let url = URL(string: "https://graph.facebook.com/me/accounts?fields=id,name,access_token,category&limit=100") else {
+            return items
+        }
+
+        var request = URLRequest(url: url, timeoutInterval: 18)
+        request.httpMethod = "GET"
+        for (k, v) in fbHeaders { request.setValue(v, forHTTPHeaderField: k) }
+        request.setValue("OAuth \(accessToken)", forHTTPHeaderField: "authorization")
+
+        if let (data, _) = try? await URLSession.shared.data(for: request),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let dataArr = json["data"] as? [[String: Any]] {
+            for row in dataArr {
+                guard let id = row["id"] as? String, !id.isEmpty else { continue }
+                let name = (row["name"] as? String) ?? "Fanpage \(id)"
+                let pageToken = row["access_token"] as? String
+                let category = (row["category"] as? String) ?? "Trang Fanpage"
+                items.append(FacebookDestinationItem(
+                    id: id,
+                    name: name,
+                    kind: .fanpage,
+                    pageAccessToken: pageToken,
+                    subtitle: "\(category) • \(spaceName)",
+                    ownerSpaceId: spaceId,
+                    ownerSpaceName: spaceName
+                ))
+            }
+        }
+        return items
+    }
+
+    /// Lấy danh sách Nhóm (Group) mà tài khoản đã tham gia hoặc quản trị
+    static func fetchJoinedGroups(
+        accessToken: String,
+        cookieString: String?,
+        spaceId: UUID,
+        spaceName: String
+    ) async -> [FacebookDestinationItem] {
+        var items: [FacebookDestinationItem] = []
+        var seenIds = Set<String>()
+
+        // Tầng 1: Graph API /me/groups
+        if let url = URL(string: "https://graph.facebook.com/me/groups?fields=id,name,privacy,administrator&limit=100") {
+            var request = URLRequest(url: url, timeoutInterval: 18)
+            request.httpMethod = "GET"
+            for (k, v) in fbHeaders { request.setValue(v, forHTTPHeaderField: k) }
+            request.setValue("OAuth \(accessToken)", forHTTPHeaderField: "authorization")
+
+            if let (data, _) = try? await URLSession.shared.data(for: request),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let dataArr = json["data"] as? [[String: Any]] {
+                for row in dataArr {
+                    guard let id = row["id"] as? String, !id.isEmpty, !seenIds.contains(id) else { continue }
+                    seenIds.insert(id)
+                    let name = (row["name"] as? String) ?? "Nhóm \(id)"
+                    let privacy = (row["privacy"] as? String) ?? "GROUP"
+                    let isAdmin = (row["administrator"] as? Bool) == true
+                    items.append(FacebookDestinationItem(
+                        id: id,
+                        name: name,
+                        kind: .group,
+                        pageAccessToken: nil,
+                        subtitle: "\(isAdmin ? "Quản trị viên • " : "")\(privacy) • \(spaceName)",
+                        ownerSpaceId: spaceId,
+                        ownerSpaceName: spaceName
+                    ))
+                }
+            }
+        }
+
+        // Tầng 2: Nếu /me/groups bị giới hạn quyền hoặc trả về rỗng, quét qua mbasic/www bằng Cookie
+        if items.isEmpty, let cookie = cookieString, !cookie.isEmpty {
+            let groupListURLs = [
+                "https://mbasic.facebook.com/groups/?seemore&refid=27",
+                "https://m.facebook.com/groups_browse/your_groups/",
+                "https://www.facebook.com/groups/joins/"
+            ]
+            for rawUrl in groupListURLs {
+                guard let gUrl = URL(string: rawUrl) else { continue }
+                var req = URLRequest(url: gUrl, timeoutInterval: 15)
+                req.setValue(cookie, forHTTPHeaderField: "Cookie")
+                req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
+                guard let (data, _) = try? await URLSession.shared.data(for: req),
+                      let html = String(data: data, encoding: .utf8) else { continue }
+
+                // Bắt mẫu JSON "id":"123456","name":"Tên Nhóm" hoặc href="/groups/123456..."
+                if let regex = try? NSRegularExpression(pattern: #""Group"[^\}]{0,120}"id"\s*:\s*"(\d{5,25})"[^\}]{0,160}"name"\s*:\s*"([^"]+)""#) {
+                    let nsRange = NSRange(html.startIndex..<html.endIndex, in: html)
+                    for match in regex.matches(in: html, range: nsRange) {
+                        if let idRange = Range(match.range(at: 1), in: html),
+                           let nameRange = Range(match.range(at: 2), in: html) {
+                            let gid = String(html[idRange])
+                            guard !seenIds.contains(gid) else { continue }
+                            seenIds.insert(gid)
+                            let rawName = String(html[nameRange])
+                            let decodedName = FacebookTargetPostResolver.decodeJSONEscapes(rawName)
+                            items.append(FacebookDestinationItem(
+                                id: gid,
+                                name: decodedName.isEmpty ? "Nhóm \(gid)" : decodedName,
+                                kind: .group,
+                                pageAccessToken: nil,
+                                subtitle: "Nhóm đã tham gia • \(spaceName)",
+                                ownerSpaceId: spaceId,
+                                ownerSpaceName: spaceName
+                            ))
+                        }
+                    }
+                }
+
+                // Bắt mẫu thẻ <a href="/groups/123456789...">Tên nhóm</a> trên mbasic
+                if let aRegex = try? NSRegularExpression(pattern: #"href="/groups/(\d{5,25})(?:\?|/|" )[^>]*>([^<]{2,100})<"#) {
+                    let nsRange = NSRange(html.startIndex..<html.endIndex, in: html)
+                    for match in aRegex.matches(in: html, range: nsRange) {
+                        if let idRange = Range(match.range(at: 1), in: html),
+                           let nameRange = Range(match.range(at: 2), in: html) {
+                            let gid = String(html[idRange])
+                            guard !seenIds.contains(gid) else { continue }
+                            seenIds.insert(gid)
+                            let gname = String(html[nameRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                            items.append(FacebookDestinationItem(
+                                id: gid,
+                                name: gname.isEmpty ? "Nhóm \(gid)" : gname,
+                                kind: .group,
+                                pageAccessToken: nil,
+                                subtitle: "Nhóm thành viên • \(spaceName)",
+                                ownerSpaceId: spaceId,
+                                ownerSpaceName: spaceName
+                            ))
+                        }
+                    }
+                }
+                if !items.isEmpty { break }
+            }
+        }
+
+        return items
+    }
+
+    /// Chuyển đổi URL Nhóm / URL Fanpage (kể cả link rút gọn share/g/..., share/..., username) sang ID chuẩn & lấy tên
+    static func resolveDestinationFromInput(
+        rawInput: String,
+        kind: SmartPostDestinationType,
+        accessToken: String?,
+        cookieString: String?,
+        spaceId: UUID?,
+        spaceName: String
+    ) async -> FacebookDestinationItem? {
+        let trimmed = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        var resolvedId: String? = nil
+        var resolvedName: String? = nil
+        var resolvedPageToken: String? = nil
+
+        // 1. Nếu người dùng nhập trực tiếp dãy số ID
+        if trimmed.allSatisfy(\.isNumber), trimmed.count >= 5 {
+            resolvedId = trimmed
+        } else {
+            // 2. Mở rộng link nếu là link share/g/..., share/...
+            var workingURL = trimmed
+            if !workingURL.lowercased().hasPrefix("http") {
+                workingURL = "https://www.facebook.com/\(workingURL)"
+            }
+
+            if let expanded = await FacebookTargetPostResolver.resolveShareURLToCanonical(input: workingURL, cookieString: cookieString ?? "") {
+                if !expanded.canonicalURL.isEmpty {
+                    workingURL = expanded.canonicalURL
+                }
+                if expanded.postId.allSatisfy(\.isNumber) {
+                    resolvedId = expanded.postId
+                }
+            }
+
+            // Trích xuất từ mẫu URL chuẩn: /groups/123456789 hoặc profile.php?id=123456789
+            if resolvedId == nil {
+                resolvedId = FacebookTargetPostResolver.firstMatch(pattern: #"facebook\.com/groups/(\d{5,25})"#, in: workingURL)
+                    ?? FacebookTargetPostResolver.firstMatch(pattern: #"profile\.php\?id=(\d{5,25})"#, in: workingURL)
+                    ?? FacebookTargetPostResolver.firstMatch(pattern: #"facebook\.com/(?:pages/[^/]+/|people/[^/]+/)(\d{5,25})"#, in: workingURL)
+                    ?? FacebookTargetPostResolver.firstMatch(pattern: #"^(\d{5,25})$"#, in: workingURL)
+            }
+
+            // Nếu URL dạng slug (vd: facebook.com/groups/tennhom hoặc facebook.com/tenfanpage), tải HTML để bóc tách groupID / pageID
+            if resolvedId == nil, let fetchUrl = URL(string: workingURL) {
+                var req = URLRequest(url: fetchUrl, timeoutInterval: 15)
+                if let cookie = cookieString, !cookie.isEmpty {
+                    req.setValue(cookie, forHTTPHeaderField: "Cookie")
+                }
+                req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
+                if let (data, resp) = try? await URLSession.shared.data(for: req) {
+                    if let finalUrl = resp.url?.absoluteString {
+                        resolvedId = FacebookTargetPostResolver.firstMatch(pattern: #"facebook\.com/groups/(\d{5,25})"#, in: finalUrl)
+                            ?? FacebookTargetPostResolver.firstMatch(pattern: #"profile\.php\?id=(\d{5,25})"#, in: finalUrl)
+                    }
+                    if resolvedId == nil, let html = String(data: data, encoding: .utf8) {
+                        resolvedId = FacebookTargetPostResolver.firstMatch(pattern: #""groupID"\s*:\s*"(\d{5,25})""#, in: html)
+                            ?? FacebookTargetPostResolver.firstMatch(pattern: #""pageID"\s*:\s*"(\d{5,25})""#, in: html)
+                            ?? FacebookTargetPostResolver.firstMatch(pattern: #"fb://group/(\d{5,25})"#, in: html)
+                            ?? FacebookTargetPostResolver.firstMatch(pattern: #"fb://page/(\d{5,25})"#, in: html)
+                            ?? FacebookTargetPostResolver.firstMatch(pattern: #"fb://profile/(\d{5,25})"#, in: html)
+                            ?? FacebookTargetPostResolver.firstMatch(pattern: #""owning_profile"\s*:\s*\{\s*"__typename"\s*:\s*"(?:Page|Group|User)"\s*,\s*"id"\s*:\s*"(\d{5,25})""#, in: html)
+                            ?? FacebookTargetPostResolver.firstMatch(pattern: #""entity_id"\s*:\s*"(\d{5,25})""#, in: html)
+
+                        if let titleMatch = FacebookTargetPostResolver.firstMatch(pattern: #"<title[^>]*>([^<]+)</title>"#, in: html) {
+                            let cleanTitle = titleMatch
+                                .replacingOccurrences(of: " | Facebook", with: "")
+                                .replacingOccurrences(of: " - Facebook", with: "")
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !cleanTitle.isEmpty && !cleanTitle.lowercased().contains("facebook") {
+                                resolvedName = cleanTitle
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        guard let finalId = resolvedId, !finalId.isEmpty else { return nil }
+
+        // 3. Tra cứu thêm thông tin tên & Page Access Token qua Graph API nếu có token
+        if let token = accessToken, !token.isEmpty {
+            let fields = kind == .fanpage ? "id,name,access_token,category" : "id,name,privacy"
+            if let infoUrl = URL(string: "https://graph.facebook.com/\(finalId)?fields=\(fields)") {
+                var req = URLRequest(url: infoUrl, timeoutInterval: 12)
+                for (k, v) in fbHeaders { req.setValue(v, forHTTPHeaderField: k) }
+                req.setValue("OAuth \(token)", forHTTPHeaderField: "authorization")
+                if let (data, _) = try? await URLSession.shared.data(for: req),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    if let n = json["name"] as? String, !n.isEmpty {
+                        resolvedName = n
+                    }
+                    if let pt = json["access_token"] as? String, !pt.isEmpty {
+                        resolvedPageToken = pt
+                    }
+                }
+            }
+        }
+
+        let displayTitle = resolvedName ?? "\(kind == .group ? "Nhóm" : "Fanpage") • \(finalId)"
+        let subtitle = "ID: \(finalId) • \(spaceName)"
+        return FacebookDestinationItem(
+            id: finalId,
+            name: displayTitle,
+            kind: kind,
+            pageAccessToken: resolvedPageToken,
+            subtitle: subtitle,
+            ownerSpaceId: spaceId,
+            ownerSpaceName: spaceName
+        )
+    }
+
+    /// Tải ảnh lên Graph API /\(targetId)/photos để lấy Photo ID (hỗ trợ me, Group hoặc Fanpage)
+    static func uploadPhoto(imageData: Data, accessToken: String, targetId: String = "me") async throws -> String {
+        let cleanTarget = targetId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "me" : targetId
+        let url = URL(string: "https://graph.facebook.com/\(cleanTarget)/photos")!
         let sessionId = UUID().uuidString
         let boundary = "Boundary-\(UUID().uuidString)"
 
@@ -334,13 +703,16 @@ enum SmartPostAPIClient {
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let photoId = json["id"] as? String {
             return photoId
+        } else if cleanTarget != "me" {
+            // Fallback về /me/photos nếu endpoint đích từ chối unpublished photo
+            return try await uploadPhoto(imageData: imageData, accessToken: accessToken, targetId: "me")
         } else {
             let errText = String(data: data, encoding: .utf8) ?? "HTTP \(statusCode)"
             throw NSError(domain: "SmartPost", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Lỗi tải ảnh: \(errText.prefix(120))"])
         }
     }
 
-    /// Đăng Video lên Facebook qua Graph API /me/videos (chuẩn Video Uploader)
+    /// Đăng Video lên Facebook qua Graph API /\(userId)/videos (hỗ trợ Trang cá nhân, Group ID, hoặc Page ID)
     static func uploadVideo(
         videoData: Data,
         caption: String,
@@ -391,14 +763,98 @@ enum SmartPostAPIClient {
         }
     }
 
-    /// Đăng bài viết (status hoặc ảnh) qua GraphQL ComposerStoryCreateMutation
+    /// Đăng bài qua Graph API /\(targetId)/feed (dùng cho Fanpage hoặc Fallback cho Nhóm / Cá nhân)
+    private static func createFeedPostGraphAPI(
+        targetId: String,
+        caption: String,
+        photoIds: [String],
+        accessToken: String
+    ) async throws -> (postId: String, postUrl: String?) {
+        guard let url = URL(string: "https://graph.facebook.com/\(targetId)/feed") else {
+            throw NSError(domain: "SmartPost", code: -1, userInfo: [NSLocalizedDescriptionKey: "Target ID không hợp lệ"])
+        }
+
+        var request = URLRequest(url: url, timeoutInterval: 25)
+        request.httpMethod = "POST"
+        for (k, v) in fbHeaders { request.setValue(v, forHTTPHeaderField: k) }
+        request.setValue("OAuth \(accessToken)", forHTTPHeaderField: "authorization")
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "content-type")
+
+        var params: [String: String] = [
+            "format": "json",
+            "locale": "vi_VN"
+        ]
+        if !caption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["message"] = caption
+        }
+        for (idx, pid) in photoIds.enumerated() {
+            params["attached_media[\(idx)]"] = "{\"media_fbid\":\"\(pid)\"}"
+        }
+
+        let formPairs = params.map { k, v in
+            let ek = k.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? k
+            let ev = v.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? v
+            return "\(ek)=\(ev)"
+        }
+        request.httpBody = formPairs.joined(separator: "&").data(using: .utf8)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let id = json["id"] as? String, !id.isEmpty {
+            let cleanId = id.contains("_") ? String(id.split(separator: "_").last ?? Substring(id)) : id
+            let canonicalUrl = FacebookTargetPostResolver.buildCanonicalURL(
+                id: cleanId,
+                kind: "Bài viết (Post)",
+                originalURL: "https://www.facebook.com/\(targetId)/posts/\(cleanId)"
+            )
+            return (id, canonicalUrl)
+        }
+        let errText = String(data: data, encoding: .utf8) ?? "HTTP \(statusCode)"
+        throw NSError(domain: "SmartPost", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Graph feed lỗi: \(errText.prefix(120))"])
+    }
+
+    /// Đăng bài viết (status hoặc ảnh) hỗ trợ Trang cá nhân, Nhóm (Group) và Trang (Fanpage)
     static func createPost(
         caption: String,
         photoIds: [String] = [],
         privacy: SmartPostPrivacy = .everyone,
+        destinationType: SmartPostDestinationType = .personalProfile,
+        targetDestinationId: String? = nil,
+        pageAccessToken: String? = nil,
         accessToken: String,
         userId: String
     ) async throws -> (postId: String, postUrl: String?) {
+        let cleanDestId = (targetDestinationId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 1. Nếu đăng lên Fanpage: Ưu tiên dùng Page Access Token + Graph API /pageId/feed trước
+        if destinationType == .fanpage, !cleanDestId.isEmpty {
+            var effectivePageToken = pageAccessToken ?? ""
+            if effectivePageToken.isEmpty {
+                // Tự động lấy Page Access Token nếu chưa có
+                if let pageUrl = URL(string: "https://graph.facebook.com/\(cleanDestId)?fields=access_token") {
+                    var req = URLRequest(url: pageUrl, timeoutInterval: 10)
+                    req.setValue("OAuth \(accessToken)", forHTTPHeaderField: "authorization")
+                    if let (d, _) = try? await URLSession.shared.data(for: req),
+                       let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                       let pt = j["access_token"] as? String, !pt.isEmpty {
+                        effectivePageToken = pt
+                    }
+                }
+            }
+            let tokenToUse = effectivePageToken.isEmpty ? accessToken : effectivePageToken
+
+            if let feedRes = try? await createFeedPostGraphAPI(
+                targetId: cleanDestId,
+                caption: caption,
+                photoIds: photoIds,
+                accessToken: tokenToUse
+            ) {
+                return feedRes
+            }
+        }
+
+        // 2. Đăng qua GraphQL ComposerStoryCreateMutation (Hỗ trợ Cá nhân, Nhóm, Fanpage)
         let url = URL(string: "https://graph.facebook.com/graphql")!
         let composerSessionId = UUID().uuidString
         let clientTraceId = UUID().uuidString
@@ -420,6 +876,56 @@ enum SmartPostAPIClient {
             ])
         }
 
+        let effectiveActorId: String
+        let effectiveToken: String
+        let audiencesArray: [[String: Any]]
+        let composerType: String
+        let sourceSurface: String
+        let entryPoint: String
+        let nectarModule: String
+
+        switch destinationType {
+        case .personalProfile:
+            effectiveActorId = userId
+            effectiveToken = accessToken
+            audiencesArray = [[
+                "undirected": [
+                    "privacy": [
+                        "tag_expansion_state": "UNSPECIFIED",
+                        "deny": [],
+                        "base_state": privacy.apiKey,
+                        "allow": []
+                    ]
+                ]
+            ]]
+            composerType = "status"
+            sourceSurface = "timeline"
+            entryPoint = "profile_inline_composer"
+            nectarModule = "profile_timeline_composer"
+
+        case .group:
+            effectiveActorId = userId
+            effectiveToken = accessToken
+            audiencesArray = [[
+                "to_id": cleanDestId
+            ]]
+            composerType = "group"
+            sourceSurface = "group_feed"
+            entryPoint = "group_composer"
+            nectarModule = "group_composer"
+
+        case .fanpage:
+            effectiveActorId = cleanDestId.isEmpty ? userId : cleanDestId
+            effectiveToken = (pageAccessToken?.isEmpty == false) ? pageAccessToken! : accessToken
+            audiencesArray = [[
+                "to_id": effectiveActorId
+            ]]
+            composerType = "page"
+            sourceSurface = "page_feed"
+            entryPoint = "page_inline_composer"
+            nectarModule = "page_timeline_composer"
+        }
+
         var inputDict: [String: Any] = [
             "producer_supported_features": ["LIGHTWEIGHT_REPLY"],
             "logging": [
@@ -427,7 +933,7 @@ enum SmartPostAPIClient {
             ],
             "is_throwback_post": "NOT_THROWBACK_POST",
             "navigation_data": [
-                "attribution_id_v2": "ProfileFragment,profile_vnext_tab_posts,tap_bookmark,\(actionTimestamp).871,244483734,\(userId),,,\(actionTimestamp).378"
+                "attribution_id_v2": "ProfileFragment,profile_vnext_tab_posts,tap_bookmark,\(actionTimestamp).871,244483734,\(effectiveActorId),,,\(actionTimestamp).378"
             ],
             "reshare_original_post": "SHARE_LINK_ONLY",
             "idempotence_token": "FEED_\(composerSessionId)",
@@ -437,26 +943,17 @@ enum SmartPostAPIClient {
                 "deduplication_id": composerSessionId
             ],
             "connection_class": "EXCELLENT",
-            "composer_type": "status",
-            "composer_source_surface": "timeline",
+            "composer_type": composerType,
+            "composer_source_surface": sourceSurface,
             "message": [
                 "text": caption
             ],
             "implicit_with_tags_ids": [],
-            "composer_entry_point": "profile_inline_composer",
-            "nectar_module": "profile_timeline_composer",
+            "composer_entry_point": entryPoint,
+            "nectar_module": nectarModule,
             "composer_entry_picker": "NULL",
             "action_timestamp": actionTimestamp,
-            "audiences": [[
-                "undirected": [
-                    "privacy": [
-                        "tag_expansion_state": "UNSPECIFIED",
-                        "deny": [],
-                        "base_state": privacy.apiKey,
-                        "allow": []
-                    ]
-                ]
-            ]],
+            "audiences": audiencesArray,
             "tag_expansion_metadata": [
                 "tag_expansion_ids": []
             ],
@@ -471,7 +968,7 @@ enum SmartPostAPIClient {
             ],
             "audiences_is_complete": true,
             "source": "MOBILE",
-            "actor_id": userId
+            "actor_id": effectiveActorId
         ]
 
         if !attachments.isEmpty {
@@ -492,7 +989,7 @@ enum SmartPostAPIClient {
         for (k, v) in fbHeaders {
             request.setValue(v, forHTTPHeaderField: k)
         }
-        request.setValue("OAuth \(accessToken)", forHTTPHeaderField: "authorization")
+        request.setValue("OAuth \(effectiveToken)", forHTTPHeaderField: "authorization")
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "content-type")
         request.setValue("graphservice", forHTTPHeaderField: "x-graphql-client-library")
         request.setValue("ComposerStoryCreateMutation", forHTTPHeaderField: "x-fb-friendly-name")
@@ -526,18 +1023,44 @@ enum SmartPostAPIClient {
            let d = directJson["data"] as? [String: Any],
            let sc = d["story_create"] as? [String: Any],
            let story = sc["story"] as? [String: Any] {
-            let pid = (story["id"] as? String) ?? (story["legacy_api_story_id"] as? String) ?? ""
-            let purl = story["url"] as? String
+            let pid = (story["legacy_api_story_id"] as? String) ?? (story["id"] as? String) ?? ""
+            var purl = story["url"] as? String
+            if purl == nil && !pid.isEmpty {
+                if destinationType == .group && !cleanDestId.isEmpty {
+                    purl = "https://www.facebook.com/groups/\(cleanDestId)/posts/\(pid)"
+                } else {
+                    let ownerActor = cleanDestId.isEmpty ? userId : cleanDestId
+                    purl = FacebookTargetPostResolver.buildCanonicalURL(
+                        id: pid,
+                        kind: "Bài viết (Post)",
+                        originalURL: "https://www.facebook.com/\(ownerActor)/posts/\(pid)"
+                    )
+                }
+            }
             return (pid.isEmpty ? "Đã đăng thành công" : pid, purl)
         }
 
         if let pidMatch = FacebookTargetPostResolver.firstMatch(pattern: "\"legacy_api_story_id\":\"([0-9]+)\"", in: respString)
             ?? FacebookTargetPostResolver.firstMatch(pattern: "\"id\":\"([0-9_]+)\"", in: respString) {
-            return (pidMatch, "https://www.facebook.com/\(pidMatch)")
+            let purl = (destinationType == .group && !cleanDestId.isEmpty)
+                ? "https://www.facebook.com/groups/\(cleanDestId)/posts/\(pidMatch)"
+                : "https://www.facebook.com/\(pidMatch)"
+            return (pidMatch, purl)
         }
 
-        if respString.contains("\"story_create\"") {
+        if respString.contains("\"story_create\"") && !respString.contains("\"errors\"") {
             return ("Thành công", nil)
+        }
+
+        // 3. Fallback qua Graph API /targetId/feed nếu GraphQL trả lỗi
+        let fallbackTarget = cleanDestId.isEmpty ? "me" : cleanDestId
+        if let fallbackRes = try? await createFeedPostGraphAPI(
+            targetId: fallbackTarget,
+            caption: caption,
+            photoIds: photoIds,
+            accessToken: effectiveToken
+        ) {
+            return fallbackRes
         }
 
         throw NSError(domain: "SmartPost", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Đăng bài thất bại: \(respString.prefix(120))"])
@@ -708,6 +1231,14 @@ struct SmartPostView: View {
 
     // Selection
     @State private var selectedSpaceIds: Set<UUID> = []
+    @State private var destinationType: SmartPostDestinationType = .personalProfile
+    @State private var discoveredGroups: [FacebookDestinationItem] = []
+    @State private var discoveredPages: [FacebookDestinationItem] = []
+    @State private var selectedDestinationKeys: Set<String> = []
+    @State private var manualDestinationInput: String = ""
+    @State private var isLoadingDestinations = false
+    @State private var isResolvingManualDestination = false
+
     @State private var postCaption = ""
     @State private var privacyOption: SmartPostPrivacy = .everyone
     @State private var autoTrackAndAIReply = true
@@ -999,19 +1530,69 @@ struct SmartPostView: View {
                 }
             }
 
-            // Nội dung
+            // Nội dung & Nơi đăng bài
             if !isPrivacyOnlyMode {
-                Section("2. Nội dung bài viết") {
+                Section("2. Nơi đăng bài (Trang cá nhân / Nhóm / Fanpage)") {
+                    // 3 Nút chọn Nơi đăng gọn gàng, trang trí đẹp
+                    HStack(spacing: 8) {
+                        ForEach(SmartPostDestinationType.allCases) { dtype in
+                            let isSelected = destinationType == dtype
+                            Button {
+                                withAnimation(.spring(response: 0.28)) {
+                                    destinationType = dtype
+                                }
+                                if dtype == .group && discoveredGroups.isEmpty {
+                                    Task { await loadDestinationsForSelectedSpaces(kind: .group) }
+                                } else if dtype == .fanpage && discoveredPages.isEmpty {
+                                    Task { await loadDestinationsForSelectedSpaces(kind: .fanpage) }
+                                }
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: dtype.icon)
+                                        .font(.caption.bold())
+                                    Text(dtype.shortLabel)
+                                        .font(.caption.bold())
+                                        .lineLimit(1)
+                                }
+                                .foregroundStyle(isSelected ? Color.white : Color.primary)
+                                .padding(.vertical, 9)
+                                .frame(maxWidth: .infinity)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .fill(
+                                            isSelected
+                                                ? AnyShapeStyle(LinearGradient(colors: dtype.gradientColors, startPoint: .topLeading, endPoint: .bottomTrailing))
+                                                : AnyShapeStyle(Color(uiColor: .secondarySystemGroupedBackground))
+                                        )
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 10)
+                                                .stroke(isSelected ? Color.clear : Color.gray.opacity(0.22), lineWidth: 1)
+                                        )
+                                        .shadow(color: isSelected ? (dtype.gradientColors.first ?? .blue).opacity(0.25) : .clear, radius: 3, x: 0, y: 1.5)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isPublishing)
+                        }
+                    }
+                    .padding(.vertical, 2)
+
+                    if destinationType == .personalProfile {
+                        Picker("Quyền riêng tư (Trang cá nhân)", selection: $privacyOption) {
+                            ForEach(SmartPostPrivacy.allCases) { opt in
+                                Label(opt.rawValue, systemImage: opt.icon).tag(opt)
+                            }
+                        }
+                        .disabled(isPublishing)
+                    } else {
+                        destinationSelectorPanel(for: destinationType)
+                    }
+                }
+
+                Section("3. Nội dung & Hình ảnh / Video") {
                     TextField("Nhập nội dung chia sẻ...", text: $postCaption, axis: .vertical)
                         .lineLimit(3...7)
                         .disabled(isPublishing)
-
-                    Picker("Quyền riêng tư", selection: $privacyOption) {
-                        ForEach(SmartPostPrivacy.allCases) { opt in
-                            Label(opt.rawValue, systemImage: opt.icon).tag(opt)
-                        }
-                    }
-                    .disabled(isPublishing)
 
                     // Quản lý Media (Ảnh & Video)
                     VStack(alignment: .leading, spacing: 10) {
@@ -1171,7 +1752,7 @@ struct SmartPostView: View {
                 }
 
                 // Lên lịch đăng & Theo dõi tự động
-                Section("3. Hẹn giờ & Theo dõi tương tác AI") {
+                Section("4. Hẹn giờ & Theo dõi tương tác AI") {
                     Toggle(isOn: $autoTrackAndAIReply) {
                         Label("Tự động theo dõi & tick AI trả lời sau khi đăng", systemImage: "sparkles")
                             .font(.subheadline)
@@ -1228,7 +1809,7 @@ struct SmartPostView: View {
                         Spacer()
                         Label(
                             isPrivacyOnlyMode ? "Cập nhật quyền riêng tư" :
-                                (isScheduling ? "Lưu vào Lịch Đăng Tự Động" : "Đăng ngay lên các tài khoản"),
+                                (isScheduling ? "Lưu vào Lịch Đăng (\(destinationType.shortLabel))" : "Đăng ngay lên \(destinationType.rawValue)"),
                             systemImage: isPrivacyOnlyMode ? "lock.rotation" :
                                 (isScheduling ? "calendar.badge.clock" : "paperplane.fill")
                         )
@@ -1286,6 +1867,257 @@ struct SmartPostView: View {
         }
     }
 
+    // MARK: - Destination Selector Panel (Group / Fanpage)
+
+    private var currentDestinationList: [FacebookDestinationItem] {
+        destinationType == .group ? discoveredGroups : discoveredPages
+    }
+
+    private var activeSelectedDestinations: [FacebookDestinationItem] {
+        currentDestinationList.filter { selectedDestinationKeys.contains($0.uniqueSelectionKey) }
+    }
+
+    @ViewBuilder
+    private func destinationSelectorPanel(for kind: SmartPostDestinationType) -> some View {
+        let isGroup = (kind == .group)
+        VStack(alignment: .leading, spacing: 10) {
+            // Nút tải tự động danh sách Nhóm / Fanpage từ các tài khoản đã chọn
+            HStack(spacing: 8) {
+                Button {
+                    Task { await loadDestinationsForSelectedSpaces(kind: kind) }
+                } label: {
+                    HStack(spacing: 6) {
+                        if isLoadingDestinations {
+                            ProgressView().controlSize(.mini).tint(.white)
+                        } else {
+                            Image(systemName: isGroup ? "person.3.sequence.fill" : "flag.2.crossed.fill")
+                        }
+                        Text(isLoadingDestinations
+                             ? "Đang tải danh sách \(isGroup ? "Nhóm" : "Fanpage")..."
+                             : "Tải danh sách \(isGroup ? "Nhóm đã tham gia" : "Fanpage quản trị")")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(GradientPillButtonStyle(colors: kind.gradientColors, isCompact: true))
+                .disabled(isLoadingDestinations || isPublishing || selectedSpaces.isEmpty)
+            }
+
+            // Ô nhập tay Link hoặc ID Nhóm / Fanpage kèm Chuyển đổi URL
+            VStack(alignment: .leading, spacing: 6) {
+                Text(isGroup ? "Hoặc dán Link / ID Nhóm bất kỳ:" : "Hoặc dán Link / ID Trang Fanpage:")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 6) {
+                    TextField(
+                        isGroup ? "VD: https://facebook.com/groups/... hoặc ID" : "VD: https://facebook.com/... hoặc Page ID",
+                        text: $manualDestinationInput
+                    )
+                    .font(.caption)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+
+                    Button {
+                        if let clip = UIPasteboard.general.string {
+                            manualDestinationInput = clip.trimmingCharacters(in: .whitespacesAndNewlines)
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "doc.on.clipboard")
+                            Text("Dán")
+                        }
+                    }
+                    .buttonStyle(GradientPillButtonStyle(colors: [.gray, .secondary], isCompact: true))
+
+                    Button {
+                        Task { await resolveAndAddManualDestination(kind: kind) }
+                    } label: {
+                        HStack(spacing: 4) {
+                            if isResolvingManualDestination {
+                                ProgressView().controlSize(.mini).tint(.white)
+                            } else {
+                                Image(systemName: "plus.circle.fill")
+                            }
+                            Text("Thêm")
+                        }
+                    }
+                    .buttonStyle(GradientPillButtonStyle(colors: [.blue, .indigo], isCompact: true))
+                    .disabled(manualDestinationInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isResolvingManualDestination)
+                }
+            }
+
+            // Danh sách Nhóm / Fanpage để tick chọn
+            let list = currentDestinationList
+            if list.isEmpty {
+                Text(isGroup
+                     ? "Chưa có Nhóm nào trong danh sách. Hãy bấm 'Tải danh sách Nhóm' hoặc dán Link/ID Nhóm ở trên."
+                     : "Chưa có Fanpage nào. Hãy bấm 'Tải danh sách Fanpage quản trị' hoặc dán Link/ID Fanpage ở trên.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 2)
+            } else {
+                HStack {
+                    Text("Đã chọn \(activeSelectedDestinations.count)/\(list.count) \(isGroup ? "Nhóm" : "Fanpage")")
+                        .font(.caption.bold())
+                        .foregroundStyle(kind.gradientColors.first ?? .blue)
+                    Spacer()
+                    Button("Chọn hết") {
+                        for item in list { selectedDestinationKeys.insert(item.uniqueSelectionKey) }
+                    }
+                    .font(.caption2.bold())
+                    Text("•").foregroundStyle(.secondary)
+                    Button("Bỏ chọn") {
+                        for item in list { selectedDestinationKeys.remove(item.uniqueSelectionKey) }
+                    }
+                    .font(.caption2.bold())
+                }
+
+                ForEach(list, id: \.uniqueSelectionKey) { item in
+                    let isChecked = selectedDestinationKeys.contains(item.uniqueSelectionKey)
+                    Button {
+                        if isChecked {
+                            selectedDestinationKeys.remove(item.uniqueSelectionKey)
+                        } else {
+                            selectedDestinationKeys.insert(item.uniqueSelectionKey)
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: isChecked ? "checkmark.square.fill" : "square")
+                                .foregroundStyle(isChecked ? (kind.gradientColors.first ?? .blue) : .secondary)
+                                .font(.subheadline)
+                            Image(systemName: item.kind.icon)
+                                .font(.caption)
+                                .foregroundStyle(kind.gradientColors.first ?? .blue)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.name)
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                HStack(spacing: 4) {
+                                    Text("ID: \(item.id)")
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                    Text("•")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    Text(item.subtitle)
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                            }
+                            Spacer()
+                            if item.pageAccessToken != nil {
+                                Text("Page Token")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 2)
+                                    .background(Color.green.opacity(0.15), in: Capsule())
+                                    .foregroundStyle(.green)
+                            }
+                        }
+                        .padding(.vertical, 3)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    @MainActor
+    private func loadDestinationsForSelectedSpaces(kind: SmartPostDestinationType) async {
+        guard !selectedSpaces.isEmpty else { return }
+        isLoadingDestinations = true
+        defer { isLoadingDestinations = false }
+
+        var loaded: [FacebookDestinationItem] = []
+        for space in selectedSpaces {
+            let creds = await TrackedPostManager.resolveCookieAndToken(for: space)
+            let token = creds.token
+            let cookie = creds.cookie
+
+            if kind == .fanpage {
+                guard !token.isEmpty else { continue }
+                let pages = await SmartPostAPIClient.fetchManagedPages(
+                    accessToken: token,
+                    spaceId: space.id,
+                    spaceName: space.name
+                )
+                loaded.append(contentsOf: pages)
+            } else if kind == .group {
+                let groups = await SmartPostAPIClient.fetchJoinedGroups(
+                    accessToken: token,
+                    cookieString: cookie,
+                    spaceId: space.id,
+                    spaceName: space.name
+                )
+                loaded.append(contentsOf: groups)
+            }
+        }
+
+        if kind == .group {
+            // Giữ lại các nhóm nhập tay trước đó
+            let manualExisting = discoveredGroups.filter { $0.ownerSpaceId == nil }
+            var combined = manualExisting
+            for g in loaded where !combined.contains(where: { $0.uniqueSelectionKey == g.uniqueSelectionKey }) {
+                combined.append(g)
+            }
+            discoveredGroups = combined
+            for g in combined { selectedDestinationKeys.insert(g.uniqueSelectionKey) }
+        } else if kind == .fanpage {
+            let manualExisting = discoveredPages.filter { $0.ownerSpaceId == nil }
+            var combined = manualExisting
+            for p in loaded where !combined.contains(where: { $0.uniqueSelectionKey == p.uniqueSelectionKey }) {
+                combined.append(p)
+            }
+            discoveredPages = combined
+            for p in combined { selectedDestinationKeys.insert(p.uniqueSelectionKey) }
+        }
+    }
+
+    @MainActor
+    private func resolveAndAddManualDestination(kind: SmartPostDestinationType) async {
+        let raw = manualDestinationInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return }
+        isResolvingManualDestination = true
+        defer { isResolvingManualDestination = false }
+
+        let firstSpace = selectedSpaces.first ?? availableSpaces.first
+        let creds: (cookie: String, token: String, uid: String)
+        if let firstSpace {
+            creds = await TrackedPostManager.resolveCookieAndToken(for: firstSpace)
+        } else {
+            creds = ("", "", "")
+        }
+
+        if let item = await SmartPostAPIClient.resolveDestinationFromInput(
+            rawInput: raw,
+            kind: kind,
+            accessToken: creds.token,
+            cookieString: creds.cookie,
+            spaceId: nil, // Áp dụng cho mọi tài khoản đã chọn
+            spaceName: "Áp dụng cho tài khoản đã chọn"
+        ) {
+            if kind == .group {
+                if !discoveredGroups.contains(where: { $0.id == item.id && $0.ownerSpaceId == nil }) {
+                    discoveredGroups.insert(item, at: 0)
+                }
+            } else if kind == .fanpage {
+                if !discoveredPages.contains(where: { $0.id == item.id && $0.ownerSpaceId == nil }) {
+                    discoveredPages.insert(item, at: 0)
+                }
+            }
+            selectedDestinationKeys.insert(item.uniqueSelectionKey)
+            manualDestinationInput = ""
+        } else {
+            alertMessage = "Không tìm thấy ID \(kind == .group ? "Nhóm" : "Fanpage") hợp lệ từ đường dẫn hoặc chuỗi đã nhập."
+        }
+    }
+
     // MARK: - Schedule Manager View
 
     @ViewBuilder
@@ -1337,7 +2169,11 @@ struct SmartPostView: View {
                                 .font(.caption)
                                 .foregroundStyle(.blue)
                             Text("•")
-                            Text("\(task.targetSpaceIds.count) tài khoản")
+                            Text("\((task.destinationType ?? .personalProfile).rawValue)")
+                                .font(.caption.bold())
+                                .foregroundStyle(.indigo)
+                            Text("•")
+                            Text("\(task.targetSpaceIds.count) TK")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             if task.videoFileName != nil {
@@ -1380,7 +2216,13 @@ struct SmartPostView: View {
         if isPrivacyOnlyMode {
             return !targetPostIdToUpdatePrivacy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         } else {
-            return !postCaption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !selectedImages.isEmpty || selectedVideoData != nil
+            let hasContent = !postCaption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !selectedImages.isEmpty || selectedVideoData != nil
+            guard hasContent else { return false }
+            if destinationType == .personalProfile {
+                return true
+            } else {
+                return !activeSelectedDestinations.isEmpty || !manualDestinationInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
         }
     }
 
@@ -1389,11 +2231,13 @@ struct SmartPostView: View {
             caption: postCaption,
             spaceIds: selectedSpaces.map(\.id),
             privacy: privacyOption,
+            destinationType: destinationType,
+            targetDestinations: activeSelectedDestinations,
             scheduledDate: scheduledDate,
             images: selectedImages,
             videoData: selectedVideoData
         )
-        alertMessage = "Đã lên lịch đăng thành công vào lúc \(scheduledDate.formatted(date: .numeric, time: .shortened))!"
+        alertMessage = "Đã lên lịch đăng (\(destinationType.rawValue)) thành công vào lúc \(scheduledDate.formatted(date: .numeric, time: .shortened))!"
         selectedTab = 1 // Chuyển sang xem danh sách lịch
     }
 
@@ -1402,6 +2246,11 @@ struct SmartPostView: View {
         isPublishing = true
         results.removeAll()
         defer { isPublishing = false }
+
+        // Nếu người dùng đang gõ dở link/ID Nhóm hoặc Fanpage mà quên bấm "Thêm", tự động chuyển đổi & thêm luôn
+        if destinationType != .personalProfile && activeSelectedDestinations.isEmpty && !manualDestinationInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            await resolveAndAddManualDestination(kind: destinationType)
+        }
 
         for (idx, space) in selectedSpaces.enumerated() {
             progressMessage = "Đang xử lý (\(idx + 1)/\(selectedSpaces.count)): \(space.name)..."
@@ -1444,86 +2293,198 @@ struct SmartPostView: View {
                         message: error.localizedDescription
                     ))
                 }
-            } else if let vdata = selectedVideoData {
-                // Đăng Video
-                do {
-                    progressMessage = "\(space.name): Đang đăng Video MP4 lên Facebook..."
-                    let videoId = try await SmartPostAPIClient.uploadVideo(
-                        videoData: vdata,
-                        caption: postCaption,
-                        accessToken: token,
-                        userId: uid
-                    )
-                    let videoUrl = "https://www.facebook.com/watch/?v=\(videoId)"
-                    tracker.registerPublishedPost(
-                        spaceId: space.id,
-                        spaceName: space.name,
-                        postId: videoId,
-                        postUrl: videoUrl,
-                        caption: postCaption,
-                        enableAIAutoReply: autoTrackAndAIReply
-                    )
-                    results.append(SmartPostResult(
-                        spaceName: space.name,
-                        isSuccess: true,
-                        postId: videoId,
-                        postUrl: videoUrl,
-                        message: "Đăng Video thành công!"
-                    ))
-                } catch {
-                    results.append(SmartPostResult(
-                        spaceName: space.name,
-                        isSuccess: false,
-                        postId: nil,
-                        postUrl: nil,
-                        message: error.localizedDescription
-                    ))
+                continue
+            }
+
+            // Trường hợp 1: Đăng lên Trang cá nhân (Personal Profile)
+            if destinationType == .personalProfile {
+                if let vdata = selectedVideoData {
+                    do {
+                        progressMessage = "\(space.name): Đang đăng Video MP4 lên Trang cá nhân..."
+                        let videoId = try await SmartPostAPIClient.uploadVideo(
+                            videoData: vdata,
+                            caption: postCaption,
+                            accessToken: token,
+                            userId: uid
+                        )
+                        let videoUrl = "https://www.facebook.com/watch/?v=\(videoId)"
+                        tracker.registerPublishedPost(
+                            spaceId: space.id,
+                            spaceName: space.name,
+                            postId: videoId,
+                            postUrl: videoUrl,
+                            caption: postCaption,
+                            enableAIAutoReply: autoTrackAndAIReply
+                        )
+                        results.append(SmartPostResult(
+                            spaceName: "\(space.name) (Cá nhân)",
+                            isSuccess: true,
+                            postId: videoId,
+                            postUrl: videoUrl,
+                            message: "Đăng Video lên Trang cá nhân thành công!"
+                        ))
+                    } catch {
+                        results.append(SmartPostResult(
+                            spaceName: "\(space.name) (Cá nhân)",
+                            isSuccess: false,
+                            postId: nil,
+                            postUrl: nil,
+                            message: error.localizedDescription
+                        ))
+                    }
+                } else {
+                    do {
+                        var uploadedPhotoIds: [String] = []
+                        for (pIdx, uiImg) in selectedImages.enumerated() {
+                            progressMessage = "\(space.name): Đang tải ảnh \(pIdx + 1)/\(selectedImages.count)..."
+                            if let jpegData = uiImg.jpegData(compressionQuality: 0.85) {
+                                let photoId = try await SmartPostAPIClient.uploadPhoto(imageData: jpegData, accessToken: token)
+                                uploadedPhotoIds.append(photoId)
+                            }
+                        }
+
+                        progressMessage = "\(space.name): Đang xuất bản bài viết lên Trang cá nhân..."
+                        let res = try await SmartPostAPIClient.createPost(
+                            caption: postCaption,
+                            photoIds: uploadedPhotoIds,
+                            privacy: privacyOption,
+                            destinationType: .personalProfile,
+                            accessToken: token,
+                            userId: uid
+                        )
+
+                        tracker.registerPublishedPost(
+                            spaceId: space.id,
+                            spaceName: space.name,
+                            postId: res.postId,
+                            postUrl: res.postUrl,
+                            caption: postCaption,
+                            enableAIAutoReply: autoTrackAndAIReply
+                        )
+
+                        results.append(SmartPostResult(
+                            spaceName: "\(space.name) (Cá nhân)",
+                            isSuccess: true,
+                            postId: res.postId,
+                            postUrl: res.postUrl,
+                            message: "Đăng Trang cá nhân thành công! (\(privacyOption.rawValue))"
+                        ))
+                    } catch {
+                        results.append(SmartPostResult(
+                            spaceName: "\(space.name) (Cá nhân)",
+                            isSuccess: false,
+                            postId: nil,
+                            postUrl: nil,
+                            message: error.localizedDescription
+                        ))
+                    }
                 }
             } else {
-                // Đăng nhiều ảnh / status
-                do {
-                    var uploadedPhotoIds: [String] = []
-                    for (pIdx, uiImg) in selectedImages.enumerated() {
-                        progressMessage = "\(space.name): Đang tải ảnh \(pIdx + 1)/\(selectedImages.count)..."
-                        if let jpegData = uiImg.jpegData(compressionQuality: 0.85) {
-                            let photoId = try await SmartPostAPIClient.uploadPhoto(imageData: jpegData, accessToken: token)
-                            uploadedPhotoIds.append(photoId)
-                        }
-                    }
-
-                    progressMessage = "\(space.name): Đang xuất bản bài viết..."
-                    let res = try await SmartPostAPIClient.createPost(
-                        caption: postCaption,
-                        photoIds: uploadedPhotoIds,
-                        privacy: privacyOption,
-                        accessToken: token,
-                        userId: uid
-                    )
-
-                    tracker.registerPublishedPost(
-                        spaceId: space.id,
-                        spaceName: space.name,
-                        postId: res.postId,
-                        postUrl: res.postUrl,
-                        caption: postCaption,
-                        enableAIAutoReply: autoTrackAndAIReply
-                    )
-
-                    results.append(SmartPostResult(
-                        spaceName: space.name,
-                        isSuccess: true,
-                        postId: res.postId,
-                        postUrl: res.postUrl,
-                        message: "Đăng thành công! (\(privacyOption.rawValue))"
-                    ))
-                } catch {
+                // Trường hợp 2: Đăng lên Nhóm (Group) hoặc Trang (Fanpage)
+                let targetsForSpace = activeSelectedDestinations.filter { $0.ownerSpaceId == nil || $0.ownerSpaceId == space.id }
+                if targetsForSpace.isEmpty {
                     results.append(SmartPostResult(
                         spaceName: space.name,
                         isSuccess: false,
                         postId: nil,
                         postUrl: nil,
-                        message: error.localizedDescription
+                        message: "Không có \(destinationType.shortLabel) nào được chọn cho tài khoản này."
                     ))
+                    continue
+                }
+
+                for dest in targetsForSpace {
+                    let label = "\(space.name) → \(dest.name)"
+                    let effectiveUploadToken = (destinationType == .fanpage ? dest.pageAccessToken : nil) ?? token
+                    let photoUploadTarget = destinationType == .fanpage ? dest.id : "me"
+
+                    if let vdata = selectedVideoData {
+                        do {
+                            progressMessage = "\(label): Đang đăng Video MP4..."
+                            let videoId = try await SmartPostAPIClient.uploadVideo(
+                                videoData: vdata,
+                                caption: postCaption,
+                                accessToken: effectiveUploadToken,
+                                userId: dest.id
+                            )
+                            let videoUrl = "https://www.facebook.com/watch/?v=\(videoId)"
+                            tracker.registerPublishedPost(
+                                spaceId: space.id,
+                                spaceName: label,
+                                postId: videoId,
+                                postUrl: videoUrl,
+                                caption: postCaption,
+                                enableAIAutoReply: autoTrackAndAIReply
+                            )
+                            results.append(SmartPostResult(
+                                spaceName: label,
+                                isSuccess: true,
+                                postId: videoId,
+                                postUrl: videoUrl,
+                                message: "Đăng Video lên \(destinationType.shortLabel) thành công!"
+                            ))
+                        } catch {
+                            results.append(SmartPostResult(
+                                spaceName: label,
+                                isSuccess: false,
+                                postId: nil,
+                                postUrl: nil,
+                                message: error.localizedDescription
+                            ))
+                        }
+                    } else {
+                        do {
+                            var uploadedPhotoIds: [String] = []
+                            for (pIdx, uiImg) in selectedImages.enumerated() {
+                                progressMessage = "\(label): Đang tải ảnh \(pIdx + 1)/\(selectedImages.count)..."
+                                if let jpegData = uiImg.jpegData(compressionQuality: 0.85) {
+                                    let photoId = try await SmartPostAPIClient.uploadPhoto(
+                                        imageData: jpegData,
+                                        accessToken: effectiveUploadToken,
+                                        targetId: photoUploadTarget
+                                    )
+                                    uploadedPhotoIds.append(photoId)
+                                }
+                            }
+
+                            progressMessage = "\(label): Đang xuất bản bài viết..."
+                            let res = try await SmartPostAPIClient.createPost(
+                                caption: postCaption,
+                                photoIds: uploadedPhotoIds,
+                                privacy: privacyOption,
+                                destinationType: destinationType,
+                                targetDestinationId: dest.id,
+                                pageAccessToken: dest.pageAccessToken,
+                                accessToken: token,
+                                userId: uid
+                            )
+
+                            tracker.registerPublishedPost(
+                                spaceId: space.id,
+                                spaceName: label,
+                                postId: res.postId,
+                                postUrl: res.postUrl,
+                                caption: postCaption,
+                                enableAIAutoReply: autoTrackAndAIReply
+                            )
+
+                            results.append(SmartPostResult(
+                                spaceName: label,
+                                isSuccess: true,
+                                postId: res.postId,
+                                postUrl: res.postUrl,
+                                message: "Đăng lên \(destinationType.shortLabel) (\(dest.name)) thành công!"
+                            ))
+                        } catch {
+                            results.append(SmartPostResult(
+                                spaceName: label,
+                                isSuccess: false,
+                                postId: nil,
+                                postUrl: nil,
+                                message: error.localizedDescription
+                            ))
+                        }
+                    }
                 }
             }
         }
