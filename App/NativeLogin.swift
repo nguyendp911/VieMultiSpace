@@ -1121,12 +1121,6 @@ enum WebCookieBridge {
         }
         return nil
     }
-        if let token = try? await webView.evaluateJavaScript(script) as? String,
-           token.hasPrefix("EAA") {
-            return token
-        }
-        return nil
-    }
 
     @MainActor
     static func injectCookies(from vault: SpaceTokenVault, into spaceId: UUID) async -> Int {
