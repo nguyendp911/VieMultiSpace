@@ -859,25 +859,44 @@ enum FacebookAPILoginClient {
 
         // 6. Xử lý phản hồi lỗi hoặc yêu cầu 2FA
         if let errInfo = extractErrorInfo(from: responseJson) {
-            let errorData: [String: Any]
+            var errorData: [String: Any] = [:]
             if let dict = errInfo.errorObj["error_data"] as? [String: Any] {
                 errorData = dict
             } else if let rawStr = errInfo.errorObj["error_data"] as? String,
                       let data = rawStr.data(using: .utf8),
                       let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 errorData = parsed
-            } else {
-                errorData = [:]
+            }
+            if errorData.isEmpty {
+                if let dict = responseJson["error_data"] as? [String: Any] {
+                    errorData = dict
+                } else if let rawStr = responseJson["error_data"] as? String,
+                          let data = rawStr.data(using: .utf8),
+                          let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    errorData = parsed
+                }
             }
 
-            let firstFactor = (errorData["login_first_factor"] as? String) ?? (savedRecord?.pendingFirstFactor ?? "")
-            if !firstFactor.isEmpty || errInfo.code == 406 || errInfo.code == 405 {
-                let uidValue: String = {
-                    if let uidStr = errorData["uid"] as? String, !uidStr.isEmpty { return uidStr }
-                    if let uidNum = errorData["uid"] as? NSNumber { return uidNum.stringValue }
-                    return cleanUser
-                }()
+            let firstFactor: String = {
+                if let f = errorData["login_first_factor"] as? String, !f.isEmpty { return f }
+                if let f = responseJson["login_first_factor"] as? String, !f.isEmpty { return f }
+                if let f = errInfo.errorObj["login_first_factor"] as? String, !f.isEmpty { return f }
+                return ""
+            }()
 
+            let serverMachineId = (errorData["machine_id"] as? String)
+                ?? (responseJson["machine_id"] as? String)
+                ?? resolvedMachineId
+
+            let uidValue: String = {
+                if let uidStr = errorData["uid"] as? String, !uidStr.isEmpty { return uidStr }
+                if let uidNum = errorData["uid"] as? NSNumber { return uidNum.stringValue }
+                if let uidStr = responseJson["uid"] as? String, !uidStr.isEmpty { return uidStr }
+                return cleanUser
+            }()
+
+            // CHỈ gửi request 2FA khi firstFactor thực sự có giá trị từ Facebook
+            if !firstFactor.isEmpty {
                 guard !cleanTotp.isEmpty else {
                     throw SpaceLoginError.apiError("Tài khoản yêu cầu 2FA nhưng chưa nhập mã hoặc khóa 2FA.")
                 }
@@ -888,46 +907,109 @@ enum FacebookAPILoginClient {
 
                 onStatusUpdate?("Đang xác thực 2FA (\(otpCode))...")
 
-                // Cấu trúc 2FA chính xác từ script Python 1767528775-Login2FaConvertToken.py
-                let data2FA: [String: String] = [
-                    "locale": "vi_VN",
-                    "format": "json",
-                    "email": cleanUser,
-                    "device_id": deviceId,
-                    "access_token": accessToken,
-                    "generate_session_cookies": "true",
-                    "generate_machine_id": "1",
-                    "twofactor_code": otpCode,
-                    "credentials_type": "two_factor",
-                    "error_detail_type": "button_with_disabled",
-                    "first_factor": firstFactor,
-                    "password": encryptedPassword,
-                    "userid": uidValue,
-                    "machine_id": firstFactor
+                // Thử các cấu hình 2FA của FB4A (CodePass vs EncPass, serverMachineId vs firstFactor)
+                let twoFactorVariants: [(label: String, pass: String, machine: String, includeApiKey: Bool)] = [
+                    ("CodePass_ServerMachine", otpCode, serverMachineId, true),
+                    ("EncPass_FactorMachine", encryptedPassword, firstFactor, false),
+                    ("CodePass_FactorMachine", otpCode, firstFactor, false),
+                    ("EncPass_ServerMachine", encryptedPassword, serverMachineId, true)
                 ]
 
-                let response2FA = try await sendAuthRequest(url: apiURL, params: data2FA)
-                if let token2FA = response2FA["access_token"] as? String, !token2FA.isEmpty {
-                    let finalMachine = (response2FA["machine_id"] as? String) ?? firstFactor
+                var last2FAError: String = ""
+
+                for variant in twoFactorVariants {
+                    var data2FA: [String: String] = [
+                        "locale": "vi_VN",
+                        "format": "json",
+                        "email": cleanUser,
+                        "device_id": deviceId,
+                        "access_token": accessToken,
+                        "generate_session_cookies": "true",
+                        "generate_machine_id": "1",
+                        "twofactor_code": otpCode,
+                        "credentials_type": "two_factor",
+                        "error_detail_type": "button_with_disabled",
+                        "first_factor": firstFactor,
+                        "password": variant.pass,
+                        "userid": uidValue,
+                        "machine_id": variant.machine
+                    ]
+                    if variant.includeApiKey {
+                        data2FA["api_key"] = apiKey
+                        data2FA["sig"] = sig
+                    }
+
+                    if let response2FA = try? await sendAuthRequest(url: apiURL, params: data2FA) {
+                        if let token2FA = response2FA["access_token"] as? String, !token2FA.isEmpty {
+                            let finalMachine = (response2FA["machine_id"] as? String) ?? serverMachineId
+                            persistLoginDeviceState(
+                                spaceId: spaceId,
+                                cleanUser: cleanUser,
+                                cleanPass: cleanPass,
+                                cleanTotp: cleanTotp,
+                                machineId: finalMachine,
+                                deviceId: deviceId,
+                                adid: adid,
+                                simSerial: simSerial,
+                                pendingFirstFactor: "",
+                                pendingUid: uidValue
+                            )
+                            onStatusUpdate?("Xác thực 2FA thành công! Đang convert sang 6 App Token...")
+                            return await buildVault(uid: uidValue, responseJson: response2FA, convertAll: convertAll)
+                        }
+
+                        if let err2FA = extractErrorInfo(from: response2FA) {
+                            last2FAError = err2FA.message
+                        }
+                    }
+                }
+
+                if !last2FAError.isEmpty {
+                    throw SpaceLoginError.apiError("Lỗi xác thực 2FA: \(last2FAError)")
+                }
+            }
+
+            // Trường hợp Facebook báo yêu cầu phê duyệt thiết bị (Login Approvals 406/405) nhưng không cấp first_factor
+            if firstFactor.isEmpty && (errInfo.code == 406 || errInfo.code == 405) {
+                let approvalParams: [String: String] = [
+                    "locale": "vi_VN",
+                    "client_country_code": "VN",
+                    "format": "json",
+                    "email": cleanUser,
+                    "userid": uidValue,
+                    "password": encryptedPassword,
+                    "device_id": deviceId,
+                    "family_device_id": deviceId,
+                    "adid": adid,
+                    "access_token": accessToken,
+                    "api_key": apiKey,
+                    "generate_session_cookies": "1",
+                    "generate_machine_id": "1",
+                    "credentials_type": "check_approved_machine",
+                    "source": "login",
+                    "error_detail_type": "button_with_disabled",
+                    "machine_id": serverMachineId,
+                    "fb_api_req_friendly_name": "authenticate",
+                    "fb_api_caller_class": "com.facebook.account.login.protocol.Fb4aAuthHandler"
+                ]
+                if let jsonApp = try? await sendAuthRequest(url: apiURL, params: approvalParams),
+                   let tok = jsonApp["access_token"] as? String, !tok.isEmpty {
                     persistLoginDeviceState(
                         spaceId: spaceId,
                         cleanUser: cleanUser,
                         cleanPass: cleanPass,
                         cleanTotp: cleanTotp,
-                        machineId: finalMachine,
+                        machineId: (jsonApp["machine_id"] as? String) ?? serverMachineId,
                         deviceId: deviceId,
                         adid: adid,
                         simSerial: simSerial,
                         pendingFirstFactor: "",
                         pendingUid: uidValue
                     )
-                    onStatusUpdate?("Xác thực 2FA thành công! Đang convert sang 6 App Token...")
-                    return await buildVault(uid: uidValue, responseJson: response2FA, convertAll: convertAll)
+                    return await buildVault(uid: uidValue, responseJson: jsonApp, convertAll: convertAll)
                 }
 
-                if let err2FA = extractErrorInfo(from: response2FA) {
-                    throw SpaceLoginError.apiError("Lỗi xác thực 2FA: \(err2FA.message)")
-                }
+                throw SpaceLoginError.apiError("Facebook yêu cầu phê duyệt trên ứng dụng đã đăng nhập trước đó (Login Approvals).\n• Hãy mở app Facebook trên điện thoại hoặc trình duyệt để bấm 'Phê duyệt'.\n• Hoặc đăng nhập tài khoản vào WebView của Space rồi bấm 'Trích xuất Cookie & Lấy Token API' ngay bên dưới.")
             }
 
             // Fallback: nếu space đã có cookie WebView đăng nhập, trích xuất token trực tiếp
