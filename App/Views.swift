@@ -23,9 +23,11 @@ struct SpaceDashboard: View {
     @State private var navigateToAutoInteract = false
     @State private var navigateToSync = false
     @State private var navigateToSmartPost = false
+    @State private var navigateToPostTracker = false
     @State private var inlineRenameId: UUID? = nil
     @State private var inlineRenameText = ""
     @ObservedObject private var logger = AppLogger.shared
+    @ObservedObject private var postTracker = TrackedPostManager.shared
 
     var body: some View {
         NavigationStack {
@@ -76,131 +78,52 @@ struct SpaceDashboard: View {
                         }
                     }
                     Section("Tự động hóa & Quản lý bài viết") {
-                        HStack(spacing: 14) {
-                            Button {
-                                navigateToSmartPost = true
-                            } label: {
-                                VStack(spacing: 7) {
-                                    if let img = AppVisualAssets.smartPostImage {
-                                        Image(uiImage: img)
-                                            .resizable()
-                                            .scaledToFit()
-                                            .frame(width: 62, height: 62)
-                                            .clipShape(Circle())
-                                            .shadow(color: Color.orange.opacity(0.4), radius: 4, x: 0, y: 2)
-                                    } else {
-                                        ZStack {
-                                            Circle()
-                                                .fill(LinearGradient(
-                                                    colors: [Color(red: 1.0, green: 0.65, blue: 0.1), Color(red: 0.95, green: 0.35, blue: 0.1)],
-                                                    startPoint: .topLeading,
-                                                    endPoint: .bottomTrailing
-                                                ))
-                                                .frame(width: 62, height: 62)
-                                            Image(systemName: "paperplane.fill")
-                                                .font(.title3.bold())
-                                                .foregroundStyle(.white)
-                                        }
-                                        .shadow(color: Color.orange.opacity(0.35), radius: 4, x: 0, y: 2)
-                                    }
-                                    VStack(spacing: 2) {
-                                        Text("Smart Post")
-                                            .font(.caption.bold())
-                                            .foregroundStyle(.primary)
-                                            .multilineTextAlignment(.center)
-                                        Text("Đăng & Quản lý")
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                            .multilineTextAlignment(.center)
-                                    }
+                        VStack(spacing: 8) {
+                            HStack(spacing: 8) {
+                                compactFeatureButton(
+                                    title: "Smart Post",
+                                    subtitle: "Đăng & Lên lịch",
+                                    icon: "paperplane.fill",
+                                    colors: [Color.orange, Color.red],
+                                    badge: nil
+                                ) {
+                                    navigateToSmartPost = true
                                 }
-                                .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.plain)
 
-                            Button {
-                                navigateToAutoInteract = true
-                            } label: {
-                                VStack(spacing: 7) {
-                                    if let img = AppVisualAssets.autoFeedImage {
-                                        Image(uiImage: img)
-                                            .resizable()
-                                            .scaledToFit()
-                                            .frame(width: 62, height: 62)
-                                            .clipShape(Circle())
-                                            .shadow(color: Color.purple.opacity(0.35), radius: 4, x: 0, y: 2)
-                                    } else {
-                                        ZStack {
-                                            Circle()
-                                                .fill(LinearGradient(
-                                                    colors: [Color(red: 0.65, green: 0.25, blue: 0.9), Color(red: 0.25, green: 0.5, blue: 0.95)],
-                                                    startPoint: .topLeading,
-                                                    endPoint: .bottomTrailing
-                                                ))
-                                                .frame(width: 62, height: 62)
-                                            Image(systemName: "sparkles")
-                                                .font(.title3.bold())
-                                                .foregroundStyle(.white)
-                                        }
-                                        .shadow(color: Color.purple.opacity(0.35), radius: 4, x: 0, y: 2)
-                                    }
-                                    VStack(spacing: 2) {
-                                        Text("Auto Feeds")
-                                            .font(.caption.bold())
-                                            .foregroundStyle(.primary)
-                                            .multilineTextAlignment(.center)
-                                        Text("Reaction & AI")
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                            .multilineTextAlignment(.center)
-                                    }
+                                compactFeatureButton(
+                                    title: "Theo dõi bài",
+                                    subtitle: "Thống kê & AI Reply",
+                                    icon: "chart.bar.doc.horizontal.fill",
+                                    colors: [Color.teal, Color.blue],
+                                    badge: postTracker.posts.isEmpty ? nil : "\(postTracker.posts.count)"
+                                ) {
+                                    navigateToPostTracker = true
                                 }
-                                .frame(maxWidth: .infinity)
                             }
-                            .buttonStyle(.plain)
 
-                            Button {
-                                navigateToSync = true
-                            } label: {
-                                VStack(spacing: 7) {
-                                    if let img = AppVisualAssets.multiSpaceSyncImage {
-                                        Image(uiImage: img)
-                                            .resizable()
-                                            .scaledToFit()
-                                            .frame(width: 62, height: 62)
-                                            .clipShape(Circle())
-                                            .shadow(color: Color.blue.opacity(0.35), radius: 4, x: 0, y: 2)
-                                    } else {
-                                        ZStack {
-                                            Circle()
-                                                .fill(LinearGradient(
-                                                    colors: [Color(red: 0.15, green: 0.6, blue: 0.95), Color(red: 0.85, green: 0.2, blue: 0.6)],
-                                                    startPoint: .topLeading,
-                                                    endPoint: .bottomTrailing
-                                                ))
-                                                .frame(width: 62, height: 62)
-                                            Image(systemName: "square.stack.3d.up")
-                                                .font(.title3.bold())
-                                                .foregroundStyle(.white)
-                                        }
-                                        .shadow(color: Color.blue.opacity(0.35), radius: 4, x: 0, y: 2)
-                                    }
-                                    VStack(spacing: 2) {
-                                        Text("MultiSpace")
-                                            .font(.caption.bold())
-                                            .foregroundStyle(.primary)
-                                            .multilineTextAlignment(.center)
-                                        Text("Sync Tương tác")
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                            .multilineTextAlignment(.center)
-                                    }
+                            HStack(spacing: 8) {
+                                compactFeatureButton(
+                                    title: "Auto Feeds",
+                                    subtitle: "Reaction & Cmt AI",
+                                    icon: "sparkles",
+                                    colors: [Color.purple, Color.pink],
+                                    badge: nil
+                                ) {
+                                    navigateToAutoInteract = true
                                 }
-                                .frame(maxWidth: .infinity)
+
+                                compactFeatureButton(
+                                    title: "MultiSpace",
+                                    subtitle: "Sync Tương tác",
+                                    icon: "square.stack.3d.up.fill",
+                                    colors: [Color.indigo, Color.cyan],
+                                    badge: nil
+                                ) {
+                                    navigateToSync = true
+                                }
                             }
-                            .buttonStyle(.plain)
                         }
-                        .padding(.vertical, 8)
+                        .padding(.vertical, 2)
                     }
                     Section("Không gian của tôi") {
                         ForEach(library.spaces) { space in
@@ -357,7 +280,10 @@ struct SpaceDashboard: View {
                 MultiSpaceSyncView()
             }
             .navigationDestination(isPresented: $navigateToSmartPost) {
-                SmartPostView()
+                SmartPostView(initialTab: 0)
+            }
+            .navigationDestination(isPresented: $navigateToPostTracker) {
+                SmartPostView(initialTab: 2)
             }
             .sheet(isPresented: $showLog) {
                 LogConsoleView()
@@ -450,6 +376,68 @@ struct SpaceDashboard: View {
                 if newValue { authenticate() }
             }
         }
+    }
+
+    @ViewBuilder
+    private func compactFeatureButton(
+        title: String,
+        subtitle: String,
+        icon: String,
+        colors: [Color],
+        badge: String?,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 9)
+                        .fill(LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 32, height: 32)
+                    Image(systemName: icon)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 4) {
+                        Text(title)
+                            .font(.caption.bold())
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        if let badge, !badge.isEmpty {
+                            Text(badge)
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(colors.first ?? .blue, in: Capsule())
+                        }
+                    }
+                    Text(subtitle)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill((colors.first ?? .blue).opacity(0.08))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke((colors.first ?? .blue).opacity(0.24), lineWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     private func authenticate() {

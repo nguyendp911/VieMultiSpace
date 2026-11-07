@@ -224,6 +224,14 @@ final class ScheduledPostManager: ObservableObject {
                     let vid = try await SmartPostAPIClient.uploadVideo(videoData: vdata, caption: task.caption, accessToken: token, userId: uid)
                     successCount += 1
                     logs.append("✅ Đăng video thành công ID: \(vid)")
+                    TrackedPostManager.shared.registerPublishedPost(
+                        spaceId: sid,
+                        spaceName: vault.accountName.isEmpty ? "Tài khoản FB" : vault.accountName,
+                        postId: vid,
+                        postUrl: "https://www.facebook.com/watch/?v=\(vid)",
+                        caption: task.caption,
+                        enableAIAutoReply: true
+                    )
                 } else {
                     var pids: [String] = []
                     for img in loadedImages {
@@ -235,6 +243,14 @@ final class ScheduledPostManager: ObservableObject {
                     let res = try await SmartPostAPIClient.createPost(caption: task.caption, photoIds: pids, privacy: task.privacy, accessToken: token, userId: uid)
                     successCount += 1
                     logs.append("✅ Đăng bài thành công ID: \(res.postId)")
+                    TrackedPostManager.shared.registerPublishedPost(
+                        spaceId: sid,
+                        spaceName: vault.accountName.isEmpty ? "Tài khoản FB" : vault.accountName,
+                        postId: res.postId,
+                        postUrl: res.postUrl,
+                        caption: task.caption,
+                        enableAIAutoReply: true
+                    )
                 }
             } catch {
                 logs.append("❌ Lỗi: \(error.localizedDescription)")
@@ -683,14 +699,20 @@ struct SmartPostView: View {
     @EnvironmentObject private var library: SpaceLibrary
     @Environment(\.dismiss) private var dismiss
     @StateObject private var scheduler = ScheduledPostManager.shared
+    @StateObject private var tracker = TrackedPostManager.shared
 
-    // Navigation Tabs
-    @State private var selectedTab = 0 // 0: Đăng ngay / Lên lịch, 1: Quản lý lịch đăng
+    // Navigation Tabs: 0 = Soạn & Đăng, 1 = Lịch đăng, 2 = Theo dõi & AI
+    @State private var selectedTab: Int
 
     // Selection
     @State private var selectedSpaceIds: Set<UUID> = []
     @State private var postCaption = ""
     @State private var privacyOption: SmartPostPrivacy = .everyone
+    @State private var autoTrackAndAIReply = true
+
+    init(initialTab: Int = 0) {
+        _selectedTab = State(initialValue: initialTab)
+    }
 
     // Media
     @State private var selectedImages: [UIImage] = []
@@ -723,63 +745,39 @@ struct SmartPostView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // Custom Modern Tab Switcher
-                HStack(spacing: 8) {
-                    Button {
-                        withAnimation(.spring(response: 0.3)) { selectedTab = 0 }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "square.and.pencil")
-                                .font(.subheadline.bold())
-                            Text("Soạn & Đăng bài")
-                                .font(.subheadline.bold())
-                        }
-                        .foregroundStyle(selectedTab == 0 ? Color.white : Color.primary)
-                        .padding(.vertical, 8)
-                        .frame(maxWidth: .infinity)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10)
-                                .fill(selectedTab == 0 ? Color.blue : Color(uiColor: .tertiarySystemGroupedBackground))
-                                .shadow(color: selectedTab == 0 ? Color.blue.opacity(0.3) : Color.clear, radius: 4, x: 0, y: 2)
-                        )
-                    }
-                    .buttonStyle(.plain)
-
-                    Button {
-                        withAnimation(.spring(response: 0.3)) { selectedTab = 1 }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "calendar.badge.clock")
-                                .font(.subheadline.bold())
-                            Text("Quản lý lịch")
-                                .font(.subheadline.bold())
-                            if !scheduler.tasks.isEmpty {
-                                Text("\(scheduler.tasks.count)")
-                                    .font(.caption2.bold())
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(selectedTab == 1 ? Color.white.opacity(0.3) : Color.blue, in: Capsule())
-                                    .foregroundStyle(.white)
-                            }
-                        }
-                        .foregroundStyle(selectedTab == 1 ? Color.white : Color.primary)
-                        .padding(.vertical, 8)
-                        .frame(maxWidth: .infinity)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10)
-                                .fill(selectedTab == 1 ? Color.blue : Color(uiColor: .tertiarySystemGroupedBackground))
-                                .shadow(color: selectedTab == 1 ? Color.blue.opacity(0.3) : Color.clear, radius: 4, x: 0, y: 2)
-                        )
-                    }
-                    .buttonStyle(.plain)
+                // Custom Modern 3-Tab Switcher (Gọn gàng & Trang trí đẹp mắt)
+                HStack(spacing: 6) {
+                    smartTabButton(
+                        index: 0,
+                        title: "Soạn & Đăng",
+                        icon: "square.and.pencil",
+                        badgeCount: 0,
+                        activeColors: [.blue, .indigo]
+                    )
+                    smartTabButton(
+                        index: 1,
+                        title: "Lịch đăng",
+                        icon: "calendar.badge.clock",
+                        badgeCount: scheduler.tasks.count,
+                        activeColors: [.orange, .red]
+                    )
+                    smartTabButton(
+                        index: 2,
+                        title: "Theo dõi & AI",
+                        icon: "chart.bar.doc.horizontal.fill",
+                        badgeCount: tracker.posts.count,
+                        activeColors: [.purple, .pink]
+                    )
                 }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
 
                 if selectedTab == 0 {
                     composeForm
-                } else {
+                } else if selectedTab == 1 {
                     scheduleManagerView
+                } else {
+                    PostTrackerView()
                 }
             }
             .navigationTitle("Smart Post")
@@ -826,33 +824,56 @@ struct SmartPostView: View {
         }
     }
 
+    // MARK: - Custom Tab Switcher Button
+
+    @ViewBuilder
+    private func smartTabButton(
+        index: Int,
+        title: String,
+        icon: String,
+        badgeCount: Int,
+        activeColors: [Color]
+    ) -> some View {
+        let isSelected = selectedTab == index
+        Button {
+            withAnimation(.spring(response: 0.28)) { selectedTab = index }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.caption.bold())
+                Text(title)
+                    .font(.caption.bold())
+                    .lineLimit(1)
+                if badgeCount > 0 {
+                    Text("\(badgeCount)")
+                        .font(.system(size: 10, weight: .bold))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(isSelected ? Color.white.opacity(0.28) : (activeColors.first ?? .blue), in: Capsule())
+                        .foregroundStyle(.white)
+                }
+            }
+            .foregroundStyle(isSelected ? Color.white : Color.primary)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(
+                        isSelected
+                            ? AnyShapeStyle(LinearGradient(colors: activeColors, startPoint: .topLeading, endPoint: .bottomTrailing))
+                            : AnyShapeStyle(Color(uiColor: .tertiarySystemGroupedBackground))
+                    )
+                    .shadow(color: isSelected ? (activeColors.first ?? .blue).opacity(0.25) : Color.clear, radius: 3, x: 0, y: 1.5)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
     // MARK: - Compose Form View
 
     @ViewBuilder
     private var composeForm: some View {
         Form {
-            // Header Info
-            Section {
-                HStack(spacing: 12) {
-                    if let img = AppVisualAssets.smartPostImage {
-                        Image(uiImage: img)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 52, height: 52)
-                            .clipShape(Circle())
-                            .shadow(color: .orange.opacity(0.3), radius: 4)
-                    }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Smart Post • Đăng đa tài khoản & Lên lịch")
-                            .font(.headline)
-                        Text("Hỗ trợ đăng nhiều ảnh, video MP4, đặt lịch đăng tự động và đổi quyền riêng tư.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.vertical, 2)
-            }
-
             // Chế độ thao tác với Icon & Card chuyên nghiệp
             Section("Loại thao tác") {
                 HStack(spacing: 12) {
@@ -1147,15 +1168,21 @@ struct SmartPostView: View {
                     .padding(.vertical, 4)
                 }
 
-                // Lên lịch đăng
-                Section("3. Hẹn giờ / Lên lịch đăng tự động") {
-                    Toggle("Bật lên lịch đăng", isOn: $isScheduling)
+                // Lên lịch đăng & Theo dõi tự động
+                Section("3. Hẹn giờ & Theo dõi tương tác AI") {
+                    Toggle(isOn: $autoTrackAndAIReply) {
+                        Label("Tự động theo dõi & tick AI trả lời sau khi đăng", systemImage: "sparkles")
+                            .font(.subheadline)
+                    }
+                    .disabled(isPublishing)
+
+                    Toggle("Bật lên lịch đăng tự động", isOn: $isScheduling)
                         .disabled(isPublishing)
 
                     if isScheduling {
                         DatePicker("Thời gian đăng", selection: $scheduledDate, in: Date()..., displayedComponents: [.date, .hourAndMinute])
                             .datePickerStyle(.compact)
-                        Text("Hệ thống sẽ tự động đăng bài theo đúng giờ đã hẹn ngay cả khi không thao tác thủ công.")
+                        Text("Hệ thống sẽ tự động đăng bài theo đúng giờ đã hẹn và thêm vào mục Theo dõi.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -1216,6 +1243,22 @@ struct SmartPostView: View {
             // Kết quả trực tiếp
             if !results.isEmpty {
                 Section("Kết quả thực hiện (\(results.filter(\.isSuccess).count)/\(results.count) thành công)") {
+                    if results.contains(where: \.isSuccess) {
+                        Button {
+                            withAnimation(.spring(response: 0.3)) { selectedTab = 2 }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "chart.bar.doc.horizontal.fill")
+                                Text("Mở Theo dõi tương tác & AI Trả lời")
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.bold())
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(GradientPillButtonStyle(colors: [.purple, .indigo], isCompact: true))
+                    }
+
                     ForEach(results) { res in
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
@@ -1409,11 +1452,20 @@ struct SmartPostView: View {
                         accessToken: token,
                         userId: uid
                     )
+                    let videoUrl = "https://www.facebook.com/watch/?v=\(videoId)"
+                    tracker.registerPublishedPost(
+                        spaceId: space.id,
+                        spaceName: space.name,
+                        postId: videoId,
+                        postUrl: videoUrl,
+                        caption: postCaption,
+                        enableAIAutoReply: autoTrackAndAIReply
+                    )
                     results.append(SmartPostResult(
                         spaceName: space.name,
                         isSuccess: true,
                         postId: videoId,
-                        postUrl: "https://www.facebook.com/watch/?v=\(videoId)",
+                        postUrl: videoUrl,
                         message: "Đăng Video thành công!"
                     ))
                 } catch {
@@ -1444,6 +1496,15 @@ struct SmartPostView: View {
                         privacy: privacyOption,
                         accessToken: token,
                         userId: uid
+                    )
+
+                    tracker.registerPublishedPost(
+                        spaceId: space.id,
+                        spaceName: space.name,
+                        postId: res.postId,
+                        postUrl: res.postUrl,
+                        caption: postCaption,
+                        enableAIAutoReply: autoTrackAndAIReply
                     )
 
                     results.append(SmartPostResult(
