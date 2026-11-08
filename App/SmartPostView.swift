@@ -570,7 +570,8 @@ enum SmartPostAPIClient {
     static func commentOnPost(
         postId: String,
         commentText: String,
-        accessToken: String
+        accessToken: String,
+        proxy: SpaceProxy? = nil
     ) async -> (success: Bool, message: String) {
         let cleanText = commentText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanText.isEmpty else { return (false, "Nội dung rỗng") }
@@ -595,12 +596,23 @@ enum SmartPostAPIClient {
             }
         }
 
+        let config = URLSessionConfiguration.default
+        if let proxy, proxy.isEnabled {
+            config.proxyConfigurations = [proxy.toNetworkProxyConfiguration()]
+        }
+        let session = URLSession(configuration: config)
+
         // Ưu tiên clean numeric post ID trước, chỉ thử postId gốc nếu khác biệt
         let targets: [String] = (cleanPostId != postId) ? [cleanPostId, postId] : [cleanPostId]
         let endpoints = [
             "https://graph.facebook.com",
             "https://b-graph.facebook.com"
         ]
+
+        let allowed = CharacterSet.alphanumerics
+        let encMsg = cleanText.addingPercentEncoding(withAllowedCharacters: allowed) ?? cleanText
+        let encTok = cleanToken.addingPercentEncoding(withAllowedCharacters: allowed) ?? cleanToken
+        let postBody = "message=\(encMsg)&access_token=\(encTok)".data(using: .utf8)
 
         for target in targets {
             for base in endpoints {
@@ -610,9 +622,9 @@ enum SmartPostAPIClient {
                 req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
                 req.setValue("OAuth \(cleanToken)", forHTTPHeaderField: "authorization")
                 for (k, v) in fbHeaders { req.setValue(v, forHTTPHeaderField: k) }
-                let enc = cleanText.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? cleanText
-                req.httpBody = "message=\(enc)".data(using: .utf8)
-                if let (data, resp) = try? await URLSession.shared.data(for: req),
+                req.httpBody = postBody
+
+                if let (data, resp) = try? await session.data(for: req),
                    let http = resp as? HTTPURLResponse {
                     // Nếu status 200...299 thì Facebook đã tiếp nhận và tạo bình luận thành công!
                     // Dừng ngay lập tức để không bị double comment trên Facebook
@@ -624,7 +636,7 @@ enum SmartPostAPIClient {
                 }
             }
         }
-        return (false, "Không thể bình luận")
+        return (false, "Không thể bình luận qua Graph API")
     }
 
     /// Lấy danh sách Trang (Fanpage) do tài khoản quản trị (kèm Page Access Token riêng)

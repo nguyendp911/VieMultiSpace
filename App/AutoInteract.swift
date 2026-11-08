@@ -1065,6 +1065,28 @@ enum FacebookTargetPostResolver {
     }
 }
 
+// MARK: - Cookie-Preserving Redirect Delegate
+
+final class CookiePreservingRedirectDelegate: NSObject, URLSessionTaskDelegate {
+    let cookieString: String
+    init(cookieString: String) {
+        self.cookieString = cookieString
+    }
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        var req = request
+        if !cookieString.isEmpty {
+            req.setValue(cookieString, forHTTPHeaderField: "Cookie")
+        }
+        completionHandler(req)
+    }
+}
+
 // MARK: - Facebook GraphQL Auto Reaction & Comment Client (Ported from 1758035539-Test.py)
 
 final class FacebookGraphQLAutoClient {
@@ -1121,7 +1143,11 @@ final class FacebookGraphQLAutoClient {
         if let proxy, proxy.isEnabled {
             config.proxyConfigurations = [proxy.toNetworkProxyConfiguration()]
         }
-        self.session = URLSession(configuration: config)
+        self.session = URLSession(
+            configuration: config,
+            delegate: CookiePreservingRedirectDelegate(cookieString: cookieString),
+            delegateQueue: nil
+        )
     }
 
     func prepareTokens(forceRefresh: Bool = false) async throws -> FacebookWebSessionTokens {
@@ -1143,27 +1169,35 @@ final class FacebookGraphQLAutoClient {
             throw SpaceLoginError.apiError("Không tìm thấy c_user trong Cookie của không gian này.")
         }
 
-        let checkUrls = [
-            "https://m.facebook.com/me",
-            "https://mbasic.facebook.com/me",
-            "https://www.facebook.com"
+        let mobileUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+        let desktopUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+        // Quét mbasic và m.facebook bằng Mobile User-Agent để tránh 400 Bad Request và 301 Redirect
+        let checkEndpoints: [(url: String, ua: String)] = [
+            ("https://mbasic.facebook.com/", mobileUA),
+            ("https://m.facebook.com/", mobileUA),
+            ("https://mbasic.facebook.com/me", mobileUA),
+            ("https://m.facebook.com/me", mobileUA),
+            ("https://www.facebook.com/", desktopUA)
         ]
 
         var resolvedDtsg: String? = nil
         var resolvedLsd: String? = nil
         var resolvedJazoest = "25400"
 
-        for urlStr in checkUrls {
-            guard let url = URL(string: urlStr) else { continue }
+        for item in checkEndpoints {
+            guard let url = URL(string: item.url) else { continue }
             var request = URLRequest(url: url, timeoutInterval: 12)
             request.httpMethod = "GET"
             for (k, v) in baseHeaders {
                 request.setValue(v, forHTTPHeaderField: k)
             }
+            request.setValue(item.ua, forHTTPHeaderField: "User-Agent")
             request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8", forHTTPHeaderField: "Accept")
             request.setValue("1", forHTTPHeaderField: "upgrade-insecure-requests")
             request.setValue("navigate", forHTTPHeaderField: "sec-fetch-mode")
             request.setValue("document", forHTTPHeaderField: "sec-fetch-dest")
+            request.setValue(cookieString, forHTTPHeaderField: "Cookie")
 
             guard let (data, _) = try? await session.data(for: request) else { continue }
             let html = String(data: data, encoding: .utf8) ?? ""
@@ -2087,20 +2121,24 @@ final class FacebookGraphQLAutoClient {
     static func parseCookies(from cookieString: String) -> [HTTPCookie] {
         var cookies: [HTTPCookie] = []
         let pairs = cookieString.components(separatedBy: ";")
+        let domains = [".facebook.com", "facebook.com", "m.facebook.com", "mbasic.facebook.com", "www.facebook.com"]
         for pair in pairs {
             let trimmed = pair.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let eqIdx = trimmed.firstIndex(of: "=") else { continue }
             let name = String(trimmed[..<eqIdx]).trimmingCharacters(in: .whitespacesAndNewlines)
             let value = String(trimmed[trimmed.index(after: eqIdx)...]).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty else { continue }
-            let props: [HTTPCookiePropertyKey: Any] = [
-                .name: name,
-                .value: value,
-                .domain: ".facebook.com",
-                .path: "/"
-            ]
-            if let c = HTTPCookie(properties: props) {
-                cookies.append(c)
+            for d in domains {
+                let props: [HTTPCookiePropertyKey: Any] = [
+                    .name: name,
+                    .value: value,
+                    .domain: d,
+                    .path: "/",
+                    .secure: "TRUE"
+                ]
+                if let c = HTTPCookie(properties: props) {
+                    cookies.append(c)
+                }
             }
         }
         return cookies
