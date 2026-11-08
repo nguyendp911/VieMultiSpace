@@ -791,7 +791,94 @@ enum FacebookAPILoginClient {
         }
     }
 
-    /// Trích xuất Access Token (EAAB / EAAG / EAAA) từ Cookie phiên đã đăng nhập (dự phòng khi đã duyệt trên Web)
+    /// Trích xuất CSRF Token (fb_dtsg) từ HTML của trang Facebook
+    static func extractDtsg(from html: String) -> String? {
+        let patterns = [
+            #"\"DTSGInitialData\",\s*\[\],\s*\{\"token\":\"([^\"]+)\""#,
+            #"\"DTSGInitData\",\s*\[\],\s*\{\"token\":\"([^\"]+)\""#,
+            #"\"token\":\"(NA[A-Za-z0-9_\-:]+|AQ[A-Za-z0-9_\-:]+)\""#,
+            #"name=\"fb_dtsg\"\s+value=\"([^\"]+)\""#,
+            #"value=\"([^\"]+)\"\s+name=\"fb_dtsg\""#,
+            #"\"dtsg\":\{\"token\":\"([^\"]+)\""#,
+            #"\"async_get_token\":\"([^\"]+)\""#
+        ]
+        for p in patterns {
+            if let m = FacebookTargetPostResolver.firstMatch(pattern: p, in: html) {
+                return m
+            }
+        }
+        return nil
+    }
+
+    /// Trích xuất Access Token qua endpoint /v1.0/dialog/oauth/confirm khi có fb_dtsg và cookie
+    static func extractTokenUsingDtsg(_ dtsg: String, cookieString: String) async -> String? {
+        guard !dtsg.isEmpty, !cookieString.isEmpty else { return nil }
+
+        let appIds = [
+            "165907476854626", // Pages Manager / Graph API Explorer (EAAB)
+            "350685531728",    // Facebook for Android (EAAAAU)
+            "124024574287414", // Instagram OAuth (EAA...)
+            "438142079694454"  // Ads Manager App (EAA...)
+        ]
+
+        let endpoints = [
+            "https://www.facebook.com/v1.0/dialog/oauth/confirm",
+            "https://m.facebook.com/v1.0/dialog/oauth/confirm"
+        ]
+
+        let noRedirectSession = URLSession(configuration: .default, delegate: NoRedirectDelegate(), delegateQueue: nil)
+
+        for ep in endpoints {
+            guard let url = URL(string: ep) else { continue }
+            for appId in appIds {
+                var req = URLRequest(url: url, timeoutInterval: 12)
+                req.httpMethod = "POST"
+                req.setValue(cookieString, forHTTPHeaderField: "Cookie")
+                req.setValue(cookieString, forHTTPHeaderField: "cookie")
+                req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+                req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                req.setValue("https://www.facebook.com/", forHTTPHeaderField: "Referer")
+                req.setValue("https://www.facebook.com", forHTTPHeaderField: "Origin")
+
+                let params: [String: String] = [
+                    "fb_dtsg": dtsg,
+                    "app_id": appId,
+                    "redirect_uri": "fbconnect://success",
+                    "display": "popup",
+                    "return_format": "access_token",
+                    "from_post": "1",
+                    "__CONFIRM__": "1"
+                ]
+                req.httpBody = formEncode(params)
+
+                if let (data, resp) = try? await noRedirectSession.data(for: req),
+                   let http = resp as? HTTPURLResponse {
+                    // 1. Kiểm tra 302 Location header
+                    if let loc = http.value(forHTTPHeaderField: "Location") {
+                        if let tok = FacebookTargetPostResolver.firstMatch(pattern: #"access_token=([A-Za-z0-9_\-\|=]+)"#, in: loc) {
+                            let validation = await SmartPostAPIClient.validateAccessToken(tok)
+                            if validation.isValid {
+                                return tok
+                            }
+                        }
+                    }
+                    // 2. Kiểm tra body nếu status 200
+                    if let bodyStr = String(data: data, encoding: .utf8) {
+                        if let tok = FacebookTargetPostResolver.firstMatch(pattern: #"access_token=([A-Za-z0-9_\-\|=]{20,500})"#, in: bodyStr)
+                            ?? FacebookTargetPostResolver.firstMatch(pattern: #"\"accessToken\":\"(EAA[A-Za-z0-9_\-\|=]{20,500})\""#, in: bodyStr) {
+                            let validation = await SmartPostAPIClient.validateAccessToken(tok)
+                            if validation.isValid {
+                                return tok
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Trích xuất Access Token (EAAB / EAAG / EAAA) từ Cookie phiên đã đăng nhập
     static func extractTokenFromCookieString(_ cookieString: String) async -> String? {
         let trimmed = cookieString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.contains("c_user="), trimmed.contains("xs=") else { return nil }
@@ -804,35 +891,66 @@ enum FacebookAPILoginClient {
             }
         }
 
-        // 2. Thử OAuth Dialog với redirect fbconnect://success (Lấy token EAAB qua HTTP 302 Location)
-        let oauthUrls = [
-            "https://www.facebook.com/v2.3/dialog/oauth?app_id=124024574287414&channel=https%3A%2F%2Fstaticxx.facebook.com%2Fx%2Fconnect%2Fxd_arbiter%2F&client_id=124024574287414&display=touch&domain=instagram.com&fallback_redirect_uri=https%3A%2F%2Fwww.instagram.com%2Faccounts%2Fsignup%2F&locale=en_US&origin=1&redirect_uri=fbconnect%3A%2F%2Fsuccess&response_type=token%2Csigned_request&scope=email&sdk=joey",
-            "https://m.facebook.com/dialog/oauth?client_id=124024574287414&redirect_uri=fbconnect%3A%2F%2Fsuccess&response_type=token%2Csigned_request&scope=email"
+        // 2. Tải HTML trang web Facebook để lấy fb_dtsg
+        var dtsg: String? = nil
+        let checkPages = [
+            "https://m.facebook.com/me",
+            "https://www.facebook.com/",
+            "https://m.facebook.com/"
         ]
+        for pageUrl in checkPages {
+            guard let url = URL(string: pageUrl) else { continue }
+            var req = URLRequest(url: url, timeoutInterval: 10)
+            req.httpMethod = "GET"
+            req.setValue(trimmed, forHTTPHeaderField: "Cookie")
+            req.setValue(trimmed, forHTTPHeaderField: "cookie")
+            req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+            req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+            if let (htmlData, _) = try? await URLSession.shared.data(for: req),
+               let html = String(data: htmlData, encoding: .utf8) {
+                if let found = extractDtsg(from: html) {
+                    dtsg = found
+                    break
+                }
+            }
+        }
 
-        let noRedirectSession = URLSession(configuration: .default, delegate: NoRedirectDelegate(), delegateQueue: nil)
+        // 3. Nếu tìm thấy fb_dtsg, thực hiện xác thực OAuth Confirm
+        if let dtsg, !dtsg.isEmpty {
+            if let tok = await extractTokenUsingDtsg(dtsg, cookieString: trimmed) {
+                return tok
+            }
+        }
 
-        for oauthUrlStr in oauthUrls {
-            guard let url = URL(string: oauthUrlStr) else { continue }
+        // 4. Thử Ads Manager & Business Manager endpoints
+        let adsUrls = [
+            "https://adsmanager.facebook.com/adsmanager/manage/campaigns",
+            "https://www.facebook.com/adsmanager/manage/",
+            "https://business.facebook.com/content_management"
+        ]
+        for adsUrlStr in adsUrls {
+            guard let url = URL(string: adsUrlStr) else { continue }
             var req = URLRequest(url: url, timeoutInterval: 12)
             req.httpMethod = "GET"
             req.setValue(trimmed, forHTTPHeaderField: "Cookie")
+            req.setValue(trimmed, forHTTPHeaderField: "cookie")
             req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
             req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
-            req.setValue("https://www.facebook.com/", forHTTPHeaderField: "Referer")
 
-            if let (_, resp) = try? await noRedirectSession.data(for: req),
-               let http = resp as? HTTPURLResponse {
-                if let loc = http.value(forHTTPHeaderField: "Location") {
-                    if let tok = FacebookTargetPostResolver.firstMatch(pattern: #"access_token=([A-Za-z0-9_\-\|=]+)"#, in: loc) {
-                        let validation = await SmartPostAPIClient.validateAccessToken(tok)
-                        if validation.isValid {
-                            return tok
-                        }
+            if let (data, resp) = try? await URLSession.shared.data(for: req),
+               let http = resp as? HTTPURLResponse, http.statusCode == 200,
+               let bodyStr = String(data: data, encoding: .utf8) {
+                if let tok = FacebookTargetPostResolver.firstMatch(pattern: #"\"accessToken\":\"(EAA[A-Za-z0-9_\-\|=]{20,500})\""#, in: bodyStr)
+                    ?? FacebookTargetPostResolver.firstMatch(pattern: #"accessToken:\"(EAA[A-Za-z0-9_\-\|=]{20,500})\""#, in: bodyStr)
+                    ?? FacebookTargetPostResolver.firstMatch(pattern: #"access_token=([A-Za-z0-9_\-\|=]{20,500})"#, in: bodyStr) {
+                    let validation = await SmartPostAPIClient.validateAccessToken(tok)
+                    if validation.isValid {
+                        return tok
                     }
                 }
             }
         }
+
         return nil
     }
 
@@ -1069,8 +1187,11 @@ enum FacebookAPILoginClient {
 
             let firstFactor: String = {
                 if let f = errorData["login_first_factor"] as? String, !f.isEmpty { return f }
+                if let f = errorData["first_factor"] as? String, !f.isEmpty { return f }
                 if let f = responseJson["login_first_factor"] as? String, !f.isEmpty { return f }
+                if let f = responseJson["first_factor"] as? String, !f.isEmpty { return f }
                 if let f = errorObj["login_first_factor"] as? String, !f.isEmpty { return f }
+                if let f = errorObj["first_factor"] as? String, !f.isEmpty { return f }
                 return ""
             }()
 
@@ -1094,29 +1215,70 @@ enum FacebookAPILoginClient {
                     throw SpaceLoginError.apiError("Khóa 2FA Base32 hoặc mã 6 số không hợp lệ: '\(cleanTotp)'.")
                 }
 
-                onStatusUpdate?("Đang xác thực 2FA (\(otpCode))...")
+                onStatusUpdate?("Đang xác thực 2FA (\(otpCode)) với cấu hình thiết bị Android...")
 
-                // Payload 2FA CHUẨN DUY NHẤT theo 1767528775-Login2FaConvertToken.py (dùng chung client để mang đầy đủ 100% header và session cookies)
-                let data2FA: [String: String] = [
-                    "locale": "vi_VN",
+                // 1. Payload 2FA đầy đủ GIẢ LẬP THIẾT BỊ ANDROID (FB4A) 100% đồng bộ với Request 1
+                let fullData2FA: [String: String] = [
                     "format": "json",
+                    "locale": "vi_VN",
+                    "client_country_code": "VN",
                     "email": cleanUser,
-                    "device_id": deviceId,
-                    "access_token": accessToken,
-                    "generate_session_cookies": "true",
-                    "generate_machine_id": "1",
-                    "twofactor_code": otpCode,
-                    "credentials_type": "two_factor",
-                    "error_detail_type": "button_with_disabled",
-                    "first_factor": firstFactor,
                     "password": encryptedPassword,
+                    "credentials_type": "two_factor",
+                    "twofactor_code": otpCode,
+                    "first_factor": firstFactor,
                     "userid": uidValue,
-                    "machine_id": firstFactor
+                    "machine_id": firstFactor,
+                    "access_token": accessToken,
+                    "api_key": apiKey,
+                    "generate_session_cookies": "1",
+                    "generate_machine_id": "1",
+                    "error_detail_type": "button_with_disabled",
+                    "source": "login",
+                    "cpl": "true",
+                    "try_num": "1",
+                    "device_id": deviceId,
+                    "family_device_id": deviceId,
+                    "secure_family_device_id": secureFamilyDeviceId,
+                    "adid": adid,
+                    "advertiser_id": adid,
+                    "sim_serials": "[\"\(simSerial)\"]",
+                    "jazoest": jazoest,
+                    "meta_inf_fbmeta": "V2_UNTAGGED",
+                    "currently_logged_in_userid": "0",
+                    "fb_api_req_friendly_name": "authenticate",
+                    "fb_api_caller_class": "Fb4aAuthHandler",
+                    "sig": sig
                 ]
 
-                let response2FA = try await client.post(url: apiURL, params: data2FA)
-                if let token2FA = response2FA["access_token"] as? String, !token2FA.isEmpty {
-                    let finalMachine = (response2FA["machine_id"] as? String) ?? firstFactor
+                var response2FA = try? await client.post(url: apiURL, params: fullData2FA)
+
+                // 2. Dự phòng: nếu payload đầy đủ bị từ chối tham số, fallback về payload rút gọn (chuẩn Python script)
+                if response2FA == nil || (response2FA?["access_token"] as? String)?.isEmpty != false {
+                    let minimalData2FA: [String: String] = [
+                        "locale": "vi_VN",
+                        "format": "json",
+                        "email": cleanUser,
+                        "device_id": deviceId,
+                        "access_token": accessToken,
+                        "generate_session_cookies": "true",
+                        "generate_machine_id": "1",
+                        "twofactor_code": otpCode,
+                        "credentials_type": "two_factor",
+                        "error_detail_type": "button_with_disabled",
+                        "first_factor": firstFactor,
+                        "password": encryptedPassword,
+                        "userid": uidValue,
+                        "machine_id": firstFactor
+                    ]
+                    if let retryResp = try? await client.post(url: apiURL, params: minimalData2FA),
+                       (retryResp["access_token"] as? String)?.isEmpty == false {
+                        response2FA = retryResp
+                    }
+                }
+
+                if let resp2FA = response2FA, let token2FA = resp2FA["access_token"] as? String, !token2FA.isEmpty {
+                    let finalMachine = (resp2FA["machine_id"] as? String) ?? firstFactor
                     persistLoginDeviceState(
                         spaceId: spaceId,
                         cleanUser: cleanUser,
@@ -1130,10 +1292,10 @@ enum FacebookAPILoginClient {
                         pendingUid: uidValue
                     )
                     onStatusUpdate?("Xác thực 2FA thành công! Đang convert sang 6 App Token...")
-                    return await buildVault(uid: uidValue, responseJson: response2FA, convertAll: convertAll, client: client)
+                    return await buildVault(uid: uidValue, responseJson: resp2FA, convertAll: convertAll, client: client)
                 }
 
-                if let err2FA = extractErrorInfo(from: response2FA) {
+                if let resp2FA = response2FA, let err2FA = extractErrorInfo(from: resp2FA) {
                     throw SpaceLoginError.apiError("Xác thực 2FA thất bại: \(err2FA.message)")
                 } else {
                     throw SpaceLoginError.apiError("Xác thực 2FA không trả về Access Token.")
@@ -1240,7 +1402,9 @@ enum WebCookieBridge {
     @MainActor
     static func extractTokenFromLiveWebView(_ webView: WKWebView?) async -> String? {
         guard let webView else { return nil }
-        let script = """
+
+        // 1. Kiểm tra trực tiếp các thuộc tính JS hoặc thẻ script trong DOM
+        let directScript = """
         (function() {
             if (window.__accessToken && typeof window.__accessToken === 'string' && window.__accessToken.startsWith('EAA')) {
                 return window.__accessToken;
@@ -1254,14 +1418,127 @@ enum WebCookieBridge {
             return null;
         })();
         """
-        if let token = try? await webView.evaluateJavaScript(script) as? String,
+        if let token = try? await webView.evaluateJavaScript(directScript) as? String,
            token.hasPrefix("EAA"), token.count >= 25 {
             let validation = await SmartPostAPIClient.validateAccessToken(token)
             if validation.isValid {
                 return token
             }
         }
+
+        // 2. Trích xuất fb_dtsg trực tiếp từ môi trường JavaScript của WebView
+        let dtsgScript = """
+        (function() {
+            let dtsg = '';
+            try {
+                if (window.require) {
+                    dtsg = window.require('DTSGInitialData')?.token || window.require('DTSGInitData')?.token || '';
+                }
+            } catch(e) {}
+            if (!dtsg) {
+                const input = document.querySelector('input[name="fb_dtsg"]');
+                if (input && input.value) dtsg = input.value;
+            }
+            if (!dtsg) {
+                const m = document.documentElement.innerHTML.match(/"DTSGInitialData",\\s*\\[\\],\\s*\\{"token":"([^"]+)"/);
+                if (m && m[1]) dtsg = m[1];
+            }
+            if (!dtsg) {
+                const m = document.documentElement.innerHTML.match(/"token":"(NA[A-Za-z0-9_\\-:]+|AQ[A-Za-z0-9_\\-:]+)"/);
+                if (m && m[1]) dtsg = m[1];
+            }
+            return dtsg;
+        })();
+        """
+        let extractedDtsg = (try? await webView.evaluateJavaScript(dtsgScript) as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 3. Lấy cookies từ DataStore của WebView
+        let allCookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
+        let fbCookies = allCookies.filter { $0.domain.lowercased().contains("facebook.com") }
+        let cookieItems = fbCookies.map {
+            FacebookCookieItem(name: $0.name, value: $0.value, domain: $0.domain, path: $0.path)
+        }
+        let cookieString = FacebookAppTokens.formatCookieString(cookieItems)
+
+        // 4. Nếu có fb_dtsg và cookieString, gọi /v1.0/dialog/oauth/confirm bằng URLSession
+        if let dtsg = extractedDtsg, !dtsg.isEmpty, !cookieString.isEmpty {
+            if let tok = await FacebookAPILoginClient.extractTokenUsingDtsg(dtsg, cookieString: cookieString) {
+                return tok
+            }
+        }
+
+        // 5. Thử toàn bộ pipeline cookieString (DTSG regex + Dialog OAuth + Ads Manager + Business Manager)
+        if !cookieString.isEmpty {
+            if let tok = await FacebookAPILoginClient.extractTokenFromCookieString(cookieString) {
+                return tok
+            }
+        }
+
         return nil
+    }
+
+    /// Trích xuất toàn diện Cookie + Token từ WebView của một Space và tự động lưu vào Keychain
+    @MainActor
+    static func extractTokenAndSave(for space: Space, webView: WKWebView?) async -> (success: Bool, message: String) {
+        let cookies = await extractFacebookCookies(from: space.id)
+        guard !cookies.isEmpty else {
+            return (false, "Chưa tìm thấy cookie Facebook trong trình duyệt của không gian này. Hãy mở web Facebook và đăng nhập trước.")
+        }
+        let cookieString = FacebookAppTokens.formatCookieString(cookies)
+        let cUser = cookies.first(where: { $0.name == "c_user" })?.value ?? ""
+
+        guard !cUser.isEmpty else {
+            return (false, "Chưa phát hiện phiên đăng nhập (thiếu cookie c_user). Vui lòng đăng nhập trên Facebook trước.")
+        }
+
+        let existingVault = try? SecureLoginStore.readTokenVault(space.id)
+        var resolvedToken: String? = nil
+
+        // 1. Trích xuất Token từ live webView hoặc cookieString
+        if let liveTok = await extractTokenFromLiveWebView(webView), !liveTok.isEmpty {
+            resolvedToken = liveTok
+        } else if let cookieTok = await FacebookAPILoginClient.extractTokenFromCookieString(cookieString), !cookieTok.isEmpty {
+            resolvedToken = cookieTok
+        } else if let saved = existingVault?.originalToken, !saved.isEmpty {
+            let val = await SmartPostAPIClient.validateAccessToken(saved)
+            if val.isValid {
+                resolvedToken = saved
+            }
+        }
+
+        // 2. Nếu tìm thấy Token, convert sang 6 App Token
+        var converted: [String: ConvertedTokenRecord] = existingVault?.convertedTokens ?? [:]
+        if let token = resolvedToken, !token.isEmpty {
+            let newConverted = await FacebookAPILoginClient.convertAllTokens(from: token)
+            if !newConverted.isEmpty {
+                converted = newConverted
+            }
+        }
+
+        let origToken = resolvedToken ?? ""
+        let origPrefix = FacebookAppTokens.extractTokenPrefix(origToken)
+
+        let vault = SpaceTokenVault(
+            uid: cUser,
+            originalPrefix: origPrefix,
+            originalToken: origToken,
+            cookieString: cookieString,
+            cookies: cookies,
+            convertedTokens: converted,
+            updatedAt: Date()
+        )
+
+        do {
+            try SecureLoginStore.saveTokenVault(vault, for: space.id)
+            if !origToken.isEmpty {
+                let countStr = converted.count > 0 ? " • \(converted.count) App Tokens" : ""
+                return (true, "Đã trích xuất Cookie VÀ lấy thành công Token (\(origPrefix)\(countStr)) cho UID \(cUser)!")
+            } else {
+                return (true, "Đã lưu \(cookies.count) Cookie cho UID \(cUser). (Chưa lấy được Access Token, bạn có thể bấm 'Đăng nhập API' bằng mật khẩu & 2FA để lấy trọn bộ 6 App Token).")
+            }
+        } catch {
+            return (false, error.localizedDescription)
+        }
     }
 
     @MainActor
@@ -1990,53 +2267,11 @@ struct LoginEditorSheet: View {
         busyLabel = "Đang trích xuất Cookie & lấy Access Token từ trình duyệt..."
         defer { isBusy = false }
 
-        let extracted = await WebCookieBridge.extractFacebookCookies(from: space.id)
-        guard !extracted.isEmpty else {
-            message = "Chưa có cookie Facebook nào trong trình duyệt của không gian này. Hãy mở web Facebook và đăng nhập trước."
-            return
+        let res = await WebCookieBridge.extractTokenAndSave(for: space, webView: webView)
+        if let savedVault = try? SecureLoginStore.readTokenVault(space.id) {
+            vault = savedVault
         }
-        let cookieStr = FacebookAppTokens.formatCookieString(extracted)
-        let cUser = extracted.first(where: { $0.name == "c_user" })?.value ?? username
-
-        var resolvedToken = vault?.originalToken ?? ""
-        var converted = vault?.convertedTokens ?? [:]
-
-        // 1. Thử lấy token trực tiếp từ live WebView đang mở
-        if let liveTok = await WebCookieBridge.extractTokenFromLiveWebView(webView), !liveTok.isEmpty {
-            resolvedToken = liveTok
-        } else if let webTok = await FacebookAPILoginClient.extractTokenFromCookieString(cookieStr), !webTok.isEmpty {
-            resolvedToken = webTok
-        }
-
-        if !resolvedToken.isEmpty {
-            busyLabel = "Đang convert sang 6 App Token..."
-            let newConverted = await FacebookAPILoginClient.convertAllTokens(from: resolvedToken)
-            if !newConverted.isEmpty {
-                converted = newConverted
-            }
-        }
-
-        let resolvedPrefix = FacebookAppTokens.extractTokenPrefix(resolvedToken)
-        let updated = SpaceTokenVault(
-            uid: cUser,
-            originalPrefix: resolvedPrefix,
-            originalToken: resolvedToken,
-            cookieString: cookieStr,
-            cookies: extracted,
-            convertedTokens: converted,
-            updatedAt: Date()
-        )
-        do {
-            try SecureLoginStore.saveTokenVault(updated, for: space.id)
-            vault = updated
-            if !resolvedToken.isEmpty {
-                message = "Đã trích xuất \(extracted.count) cookie VÀ lấy thành công Token (\(resolvedPrefix) • \(converted.count) App Tokens) từ trình duyệt!"
-            } else {
-                message = "Đã trích xuất và lưu \(extracted.count) cookie từ trình duyệt vào Keychain. (Chưa tìm thấy Access Token, bạn có thể bấm 'Đăng nhập API' bằng tài khoản & mật khẩu để lấy trọn bộ 6 App Token)."
-            }
-        } catch {
-            message = error.localizedDescription
-        }
+        message = res.message
     }
 
     private func copyFullMMOFormat(vault: SpaceTokenVault) {
@@ -2055,6 +2290,7 @@ struct SecureLoginControls: View {
     @State private var notice: String?
     @State private var showVaultSheet = false
     @State private var showAutoSheet = false
+    @State private var isExtracting = false
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -2070,6 +2306,17 @@ struct SecureLoginControls: View {
                 } label: {
                     Label("Nạp Cookie", systemImage: "arrow.down.circle.fill")
                 }
+                Button {
+                    Task { await extractTokenFromLiveBrowser() }
+                } label: {
+                    if isExtracting {
+                        ProgressView().controlSize(.mini)
+                        Text("Đang lấy Token...")
+                    } else {
+                        Label("Lấy Token", systemImage: "key.viewfinder")
+                    }
+                }
+                .disabled(isExtracting)
                 Button { showVaultSheet = true } label: {
                     Label("Kho Token", systemImage: "person.badge.key.fill")
                 }
@@ -2098,6 +2345,14 @@ struct SecureLoginControls: View {
         )) {
             Button("Đóng") { notice = nil }
         } message: { Text(notice ?? "") }
+    }
+
+    @MainActor
+    private func extractTokenFromLiveBrowser() async {
+        isExtracting = true
+        defer { isExtracting = false }
+        let res = await WebCookieBridge.extractTokenAndSave(for: space, webView: webView)
+        notice = res.message
     }
 
     private func autofill() {

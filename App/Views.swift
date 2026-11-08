@@ -583,7 +583,7 @@ struct IsolatedWebView: UIViewRepresentable {
     @ObservedObject var browser: BrowserState
     let launchURL: URL?
 
-    func makeCoordinator() -> Coordinator { Coordinator(spaceName: space.name, browser: browser) }
+    func makeCoordinator() -> Coordinator { Coordinator(space: space, browser: browser) }
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -626,10 +626,13 @@ struct IsolatedWebView: UIViewRepresentable {
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 
     final class Coordinator: NSObject, WKNavigationDelegate {
-        let spaceName: String
+        let space: Space
         let browser: BrowserState
-        init(spaceName: String, browser: BrowserState) {
-            self.spaceName = spaceName
+        private var lastExtractedUser: String = ""
+        private var isExtracting = false
+
+        init(space: Space, browser: BrowserState) {
+            self.space = space
             self.browser = browser
         }
 
@@ -638,15 +641,42 @@ struct IsolatedWebView: UIViewRepresentable {
         }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             browser.sync(webView)
-            AppLogger.shared.debug("WebView", "[\(spaceName)] Tải xong: \(webView.url?.host ?? "?")")
+            AppLogger.shared.debug("WebView", "[\(space.name)] Tải xong: \(webView.url?.host ?? "?")")
+
+            // Tự động trích xuất Cookie & Token khi người dùng đăng nhập Facebook thành công trong không gian
+            guard space.platform == .facebook,
+                  let host = webView.url?.host?.lowercased(),
+                  host.contains("facebook.com"),
+                  !isExtracting else { return }
+
+            Task { @MainActor [weak self, weak webView] in
+                guard let self, let webView else { return }
+                let cookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
+                if let cUser = cookies.first(where: { $0.name == "c_user" && !$0.value.isEmpty })?.value {
+                    let existingVault = try? SecureLoginStore.readTokenVault(self.space.id)
+                    let needsExtraction = existingVault == nil ||
+                        existingVault?.originalToken.isEmpty == true ||
+                        existingVault?.uid != cUser
+
+                    if needsExtraction && self.lastExtractedUser != cUser {
+                        self.isExtracting = true
+                        defer { self.isExtracting = false }
+                        self.lastExtractedUser = cUser
+                        let res = await WebCookieBridge.extractTokenAndSave(for: self.space, webView: webView)
+                        if res.success {
+                            AppLogger.shared.info("Auth", "[\(self.space.name)] Tự động lấy Token cho UID \(cUser): \(res.message)")
+                        }
+                    }
+                }
+            }
         }
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             browser.sync(webView)
-            AppLogger.shared.error("WebView", "[\(spaceName)] Lỗi điều hướng", detail: error.localizedDescription)
+            AppLogger.shared.error("WebView", "[\(space.name)] Lỗi điều hướng", detail: error.localizedDescription)
         }
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             browser.sync(webView)
-            AppLogger.shared.error("WebView", "[\(spaceName)] Lỗi tải trang", detail: error.localizedDescription)
+            AppLogger.shared.error("WebView", "[\(space.name)] Lỗi tải trang", detail: error.localizedDescription)
         }
     }
 }
