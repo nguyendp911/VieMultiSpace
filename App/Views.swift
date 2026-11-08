@@ -35,7 +35,7 @@ struct SpaceDashboard: View {
                 List {
                     Section {
                         VStack(alignment: .leading, spacing: 8) {
-                            Label("Vie MultiSpace", systemImage: "square.stack.3d.up.fill")
+                            Label("ViePN Smart+", systemImage: "square.stack.3d.up.fill")
                                 .font(.title2.bold())
                             Text("Quản lý nhiều phiên đăng nhập web độc lập, Proxy & Vân tay Anti-Detect, Kho Token và Auto AI.")
                                 .font(.subheadline)
@@ -257,7 +257,7 @@ struct SpaceDashboard: View {
                 if isLocked {
                     VStack(spacing: 20) {
                         Image(systemName: "lock.shield.fill").font(.system(size: 55))
-                        Text("Vie MultiSpace đã khóa").font(.title2.bold())
+                        Text("ViePN Smart+ đã khóa").font(.title2.bold())
                         Button("Mở khóa bằng Face ID / mã máy") { authenticate() }
                             .buttonStyle(.borderedProminent)
                     }
@@ -455,7 +455,7 @@ struct SpaceDashboard: View {
     private func authenticate() {
         let context = LAContext()
         context.evaluatePolicy(.deviceOwnerAuthentication,
-                                localizedReason: "Mở khóa Vie MultiSpace") { success, _ in
+                                localizedReason: "Mở khóa ViePN Smart+") { success, _ in
             DispatchQueue.main.async {
                 if success { isLocked = false }
             }

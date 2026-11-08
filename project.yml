@@ -16,7 +16,7 @@ targets:
     info:
       path: App/Info.plist
       properties:
-        CFBundleDisplayName: Vie MultiSpace
+        CFBundleDisplayName: ViePN Smart+
         NSFaceIDUsageDescription: Dùng Face ID để khóa các không gian đăng nhập cá nhân.
         NSPhotoLibraryUsageDescription: Cho phép ứng dụng chọn ảnh để đăng bài viết lên Facebook trong chức năng Smart Post.
         LSRequiresIPhoneOS: true

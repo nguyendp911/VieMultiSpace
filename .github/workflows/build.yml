@@ -1,4 +1,4 @@
-name: Build Vie MultiSpace IPA
+name: Build ViePN Smart+ IPA
 
 on:
   workflow_dispatch:

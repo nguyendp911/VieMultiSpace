@@ -823,6 +823,8 @@ enum FacebookAPILoginClient {
         ]
 
         let endpoints = [
+            "https://www.facebook.com/dialog/oauth/confirm",
+            "https://m.facebook.com/dialog/oauth/confirm",
             "https://www.facebook.com/v1.0/dialog/oauth/confirm",
             "https://m.facebook.com/v1.0/dialog/oauth/confirm"
         ]
@@ -892,6 +894,26 @@ enum FacebookAPILoginClient {
             }
         }
 
+        // Tạo cấu hình Session có sẵn cookie storage cho toàn bộ domain .facebook.com (giữ cookie khi redirect giữa các domain)
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 15
+        let cookieStore = HTTPCookieStorage()
+        for cookie in parseCookieString(trimmed) {
+            if let httpCookie = HTTPCookie(properties: [
+                .domain: ".facebook.com",
+                .path: "/",
+                .name: cookie.name,
+                .value: cookie.value,
+                .secure: "TRUE"
+            ]) {
+                cookieStore.setCookie(httpCookie)
+            }
+        }
+        cfg.httpCookieStorage = cookieStore
+        cfg.httpCookieAcceptPolicy = .always
+        cfg.httpShouldSetCookies = true
+        let session = URLSession(configuration: cfg)
+
         // 2. Tải HTML trang web Facebook để lấy fb_dtsg
         var dtsg: String? = nil
         let checkPages = [
@@ -907,7 +929,7 @@ enum FacebookAPILoginClient {
             req.setValue(trimmed, forHTTPHeaderField: "cookie")
             req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
             req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
-            if let (htmlData, _) = try? await URLSession.shared.data(for: req),
+            if let (htmlData, _) = try? await session.data(for: req),
                let html = String(data: htmlData, encoding: .utf8) {
                 if let found = extractDtsg(from: html) {
                     dtsg = found
@@ -923,10 +945,10 @@ enum FacebookAPILoginClient {
             }
         }
 
-        // 4. Thử Ads Manager & Business Manager endpoints
+        // 4. Thử Ads Manager & Business Manager endpoints (với session tự động lưu và gửi cookie qua redirects)
         let adsUrls = [
-            "https://adsmanager.facebook.com/adsmanager/manage/campaigns",
             "https://www.facebook.com/adsmanager/manage/",
+            "https://adsmanager.facebook.com/adsmanager/manage/campaigns",
             "https://business.facebook.com/content_management"
         ]
         for adsUrlStr in adsUrls {
@@ -938,7 +960,7 @@ enum FacebookAPILoginClient {
             req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
             req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
 
-            if let (data, resp) = try? await URLSession.shared.data(for: req),
+            if let (data, resp) = try? await session.data(for: req),
                let http = resp as? HTTPURLResponse, http.statusCode == 200,
                let bodyStr = String(data: data, encoding: .utf8) {
                 if let tok = FacebookTargetPostResolver.firstMatch(pattern: #"\"accessToken\":\"(EAA[A-Za-z0-9_\-\|=]{20,500})\""#, in: bodyStr)
@@ -1067,15 +1089,19 @@ enum FacebookAPILoginClient {
         let trimmedInputMachine = machineId?.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedSavedMachine = savedRecord?.machineId.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if let m = trimmedInputMachine, m.count >= 20 {
+        if let m = trimmedInputMachine, m.count >= 20, m != trimmedSavedMachine {
+            // Người dùng chủ động nhập/dán một Machine ID cụ thể
             resolvedMachineId = m
-        } else if let sm = trimmedSavedMachine, sm.count >= 20 {
-            resolvedMachineId = sm
         } else if let spaceId,
                   let webCookies = await WebCookieBridge.extractFacebookCookies(from: spaceId) as [FacebookCookieItem]?,
                   let datrCookie = webCookies.first(where: { $0.name == "datr" })?.value,
                   datrCookie.count >= 20 {
+            // Ưu tiên cao nhất là lấy cookie datr thực tế đang hoạt động của trình duyệt Không gian này
             resolvedMachineId = datrCookie
+        } else if let m = trimmedInputMachine, m.count >= 20 {
+            resolvedMachineId = m
+        } else if let sm = trimmedSavedMachine, sm.count >= 20 {
+            resolvedMachineId = sm
         } else {
             resolvedMachineId = generateMachineId()
         }
@@ -1349,6 +1375,8 @@ enum FacebookAPILoginClient {
             var extraTip = ""
             if errInfo.code == 400 || errInfo.subcode == 1348092 {
                 extraTip = "\n• Mẹo: Nếu mật khẩu chính xác nhưng FB báo sai, hãy lấy giá trị cookie 'datr' của tài khoản dán vào ô 'Machine ID / datr' (như gợi ý trong file script Python)."
+            } else if errInfo.code == 401 || errInfo.subcode == 1348131 {
+                extraTip = "\n• Lưu ý: Trên ứng dụng Facebook Android, FB thường chặn đăng nhập bằng dãy số UID. Hãy thử dùng Email hoặc Số điện thoại đăng ký tài khoản này để đăng nhập, hoặc đăng nhập trên Web Không gian rồi bấm 'Trích xuất Token'."
             }
             let userMsg = (errorData["error_user_msg"] as? String)
                 ?? (responseJson["error_user_msg"] as? String)
@@ -1461,10 +1489,39 @@ enum WebCookieBridge {
         }
         let cookieString = FacebookAppTokens.formatCookieString(cookieItems)
 
-        // 4. Nếu có fb_dtsg và cookieString, gọi /v1.0/dialog/oauth/confirm bằng URLSession
+        // 4. Nếu có fb_dtsg và cookieString, gọi dialog/oauth/confirm bằng URLSession
         if let dtsg = extractedDtsg, !dtsg.isEmpty, !cookieString.isEmpty {
             if let tok = await FacebookAPILoginClient.extractTokenUsingDtsg(dtsg, cookieString: cookieString) {
                 return tok
+            }
+        }
+
+        // 4b. Thực hiện fetch Ads Manager / Business Manager trực tiếp từ ngữ cảnh JS của WebView (mang đầy đủ cookie bảo mật phiên)
+        let liveFetchScript = """
+        (async function() {
+            const targets = [
+                'https://www.facebook.com/adsmanager/manage/',
+                'https://adsmanager.facebook.com/adsmanager/manage/campaigns',
+                'https://business.facebook.com/content_management'
+            ];
+            for (let url of targets) {
+                try {
+                    const r = await fetch(url, { credentials: 'include' });
+                    const text = await r.text();
+                    const m = text.match(/"accessToken"\\s*:\\s*"(EAA[A-Za-z0-9_=-]{20,500})"/)
+                           || text.match(/accessToken:\\s*"(EAA[A-Za-z0-9_=-]{20,500})"/)
+                           || text.match(/access_token=(EAA[A-Za-z0-9_=-]{20,500})/);
+                    if (m && m[1]) return m[1];
+                } catch(e) {}
+            }
+            return null;
+        })();
+        """
+        if let liveFetchTok = try? await webView.evaluateJavaScript(liveFetchScript) as? String,
+           liveFetchTok.hasPrefix("EAA"), liveFetchTok.count >= 25 {
+            let validation = await SmartPostAPIClient.validateAccessToken(liveFetchTok)
+            if validation.isValid {
+                return liveFetchTok
             }
         }
 
@@ -1841,10 +1898,21 @@ struct LoginEditorSheet: View {
                     TextField("Khóa 2FA Base32 (hoặc mã 6 số)", text: $seed)
                         .textInputAutocapitalization(.characters)
                         .autocorrectionDisabled()
-                    TextField("Machine ID / datr (tùy chọn)", text: $machineId)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .font(.caption.monospaced())
+                    HStack {
+                        TextField("Machine ID / datr (tùy chọn)", text: $machineId)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.caption.monospaced())
+                        if !machineId.isEmpty {
+                            Button {
+                                machineId = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
 
                     HStack(spacing: 10) {
                         Button {
