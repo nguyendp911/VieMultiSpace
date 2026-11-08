@@ -2173,9 +2173,10 @@ struct LoginEditorSheet: View {
         }
     }
 
-    private func handleFileImportResult(_ result: Result<URL, Error>) {
+    private func handleFileImportResult(_ result: Result<[URL], Error>) {
         switch result {
-        case .success(let url):
+        case .success(let urls):
+            guard let url = urls.first else { return }
             let canAccess = url.startAccessingSecurityScopedResource()
             defer {
                 if canAccess {
