@@ -2158,63 +2158,9 @@ struct LoginEditorSheet: View {
             .fileImporter(
                 isPresented: $showFilePicker,
                 allowedContentTypes: [.plainText, .text, .utf8PlainText, .commaSeparatedText, .data],
-                allowsMultipleSelection: false
-            ) { result in
-                switch result {
-                case .success(let url):
-                    let canAccess = url.startAccessingSecurityScopedResource()
-                    defer {
-                        if canAccess {
-                            url.stopAccessingSecurityScopedResource()
-                        }
-                    }
-
-                    var loadedData: Data? = try? Data(contentsOf: url)
-                    if loadedData == nil {
-                        var coordinatorError: NSError?
-                        let coordinator = NSFileCoordinator()
-                        coordinator.coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinatorError) { readURL in
-                            loadedData = try? Data(contentsOf: readURL)
-                        }
-                    }
-
-                    guard let data = loadedData, !data.isEmpty else {
-                        message = "⚠️ Không thể đọc nội dung file (file trống hoặc chưa được tải về)."
-                        return
-                    }
-
-                    let decodedText: String? = {
-                        if let s = String(data: data, encoding: .utf8) { return s }
-                        if let s = String(data: data, encoding: .utf16) { return s }
-                        if let s = String(data: data, encoding: .unicode) { return s }
-                        if let s = String(data: data, encoding: .windowsCP1252) { return s }
-                        if let s = String(data: data, encoding: .isoLatin1) { return s }
-                        if let s = String(data: data, encoding: .ascii) { return s }
-                        return nil
-                    }()
-
-                    guard let rawText = decodedText, !rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                        message = "⚠️ Không thể giải mã bảng mã của file văn bản."
-                        return
-                    }
-
-                    let accounts = parseTxtAccounts(rawText)
-                    if accounts.isEmpty {
-                        message = "Không tìm thấy dòng tài khoản hợp lệ trong file.\nĐịnh dạng hỗ trợ: UID|Pass|2FA (hoặc phân tách bằng :, tab, ;)."
-                    } else if accounts.count == 1, let single = accounts.first {
-                        username = single.uid
-                        password = single.password
-                        seed = single.twoFA
-                        message = "✅ Đã nạp tài khoản: \(single.uid)"
-                    } else {
-                        parsedTxtAccounts = accounts
-                        showTxtAccountPicker = true
-                    }
-
-                case .failure(let err):
-                    message = "Lỗi khi chọn file: \(err.localizedDescription)"
-                }
-            }
+                allowsMultipleSelection: false,
+                onCompletion: handleFileImportResult
+            )
             .sheet(isPresented: $showTxtAccountPicker) {
                 TxtAccountPickerSheet(accounts: parsedTxtAccounts) { acc in
                     username = acc.uid
@@ -2224,6 +2170,63 @@ struct LoginEditorSheet: View {
                 }
                 .presentationDetents([.medium, .large])
             }
+        }
+    }
+
+    private func handleFileImportResult(_ result: Result<URL, Error>) {
+        switch result {
+        case .success(let url):
+            let canAccess = url.startAccessingSecurityScopedResource()
+            defer {
+                if canAccess {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+
+            var loadedData: Data? = try? Data(contentsOf: url)
+            if loadedData == nil {
+                var coordinatorError: NSError?
+                let coordinator = NSFileCoordinator()
+                coordinator.coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinatorError) { readURL in
+                    loadedData = try? Data(contentsOf: readURL)
+                }
+            }
+
+            guard let data = loadedData, !data.isEmpty else {
+                message = "⚠️ Không thể đọc nội dung file (file trống hoặc chưa được tải về)."
+                return
+            }
+
+            let decodedText: String? = {
+                if let s = String(data: data, encoding: .utf8) { return s }
+                if let s = String(data: data, encoding: .utf16) { return s }
+                if let s = String(data: data, encoding: .unicode) { return s }
+                if let s = String(data: data, encoding: .windowsCP1252) { return s }
+                if let s = String(data: data, encoding: .isoLatin1) { return s }
+                if let s = String(data: data, encoding: .ascii) { return s }
+                return nil
+            }()
+
+            guard let rawText = decodedText, !rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                message = "⚠️ Không thể giải mã bảng mã của file văn bản."
+                return
+            }
+
+            let accounts = parseTxtAccounts(rawText)
+            if accounts.isEmpty {
+                message = "Không tìm thấy dòng tài khoản hợp lệ trong file.\nĐịnh dạng hỗ trợ: UID|Pass|2FA (hoặc phân tách bằng :, tab, ;)."
+            } else if accounts.count == 1, let single = accounts.first {
+                username = single.uid
+                password = single.password
+                seed = single.twoFA
+                message = "✅ Đã nạp tài khoản: \(single.uid)"
+            } else {
+                parsedTxtAccounts = accounts
+                showTxtAccountPicker = true
+            }
+
+        case .failure(let err):
+            message = "Lỗi khi chọn file: \(err.localizedDescription)"
         }
     }
 
