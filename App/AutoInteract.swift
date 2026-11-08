@@ -664,8 +664,33 @@ enum FacebookTargetPostResolver {
             // Nếu lỗi mạng khi tải HTML nhưng đã có ID số trên URL thì vẫn dùng ID đó
         }
 
+        // Bóc tách og:url nếu có (đặc biệt hữu hiệu cho link share/p/..., share/r/...)
+        if let ogUrl = firstMatch(pattern: #"<meta\s+property=[\"']og:url[\"']\s+content=[\"']([^\"']+)[\"']"#, in: html)
+            ?? firstMatch(pattern: #"<meta\s+content=[\"']([^\"']+)[\"']\s+property=[\"']og:url[\"']"#, in: html) {
+            if let ogId = extractNumericIdFromURL(ogUrl) {
+                extractedId = ogId
+                if let u = URL(string: ogUrl) {
+                    finalURL = u
+                }
+            }
+        }
+
+        // Bóc tách al:ios:url graphqlid nếu có
+        if extractedId == nil,
+           let alGraphId = firstMatch(pattern: #"property=[\"']al:(?:ios|android):url[\"']\s+content=[\"'][^\"']*graphqlid=([A-Za-z0-9+/=]+)"#, in: html) {
+            if let decData = Data(base64Encoded: alGraphId),
+               let decStr = String(data: decData, encoding: .utf8) {
+                let nums = decStr.components(separatedBy: CharacterSet.decimalDigits.inverted).filter { $0.count >= 8 }
+                if let lastNum = nums.last {
+                    extractedId = lastNum
+                }
+            }
+        }
+
         if extractedId == nil, !html.isEmpty {
             let idPatterns = [
+                #"/groups/[^/?#]+/posts/(\d{5,25})"#,
+                #"/groups/[^/?#]+/permalink/(\d{5,25})"#,
                 #""post_id":"(\d+)""#,
                 #""top_level_post_id":"(\d+)""#,
                 #""story_fbid":"(\d+)""#,
@@ -734,6 +759,11 @@ enum FacebookTargetPostResolver {
 
         AppLogger.shared.info("TargetResolver", "✅ Giải mã thành công: [\(kind)] ID: \(finalPostId) (Tác giả: \(authorName))", detail: postText.isEmpty ? "Không có trích đoạn văn bản" : "Trích: \(postText.prefix(60))...")
 
+        let canonicalOut: URL? = {
+            let canonStr = buildCanonicalURL(id: finalPostId, kind: kind, originalURL: finalURL?.absoluteString ?? trimmed)
+            return URL(string: canonStr) ?? finalURL
+        }()
+
         return ResolvedTargetPost(
             rawInput: trimmed,
             targetKind: kind,
@@ -741,28 +771,33 @@ enum FacebookTargetPostResolver {
             feedbackId: resolvedFeedbackId,
             authorName: authorName,
             postText: postText,
-            canonicalURL: finalURL
+            canonicalURL: canonicalOut
         )
     }
 
     static func extractNumericIdFromURL(_ urlStr: String) -> String? {
+        let decoded = urlStr.removingPercentEncoding ?? urlStr
         let patterns = [
-            #"/groups/(\d{5,25})"#,
+            #"/groups/[^/?#]+/posts/(\d{5,25})"#,
+            #"/groups/[^/?#]+/permalink/(\d{5,25})"#,
+            #"/groups/[^/?#]+/multi_permalinks=(\d{5,25})"#,
+            #"multi_permalinks=(\d{5,25})"#,
+            #"story_fbid=(\d{5,25})"#,
+            #"[?&]fbid=(\d{5,25})"#,
+            #"/posts/(\d{5,25})"#,
+            #"/permalink/(\d{5,25})"#,
+            #"/activity/(\d{5,25})"#,
+            #"/reel/(\d{5,25})"#,
+            #"/reels/(\d{5,25})"#,
+            #"/videos/(\d{5,25})"#,
+            #"watch/\?v=(\d{5,25})"#,
+            #"[?&]v=(\d{5,25})"#,
+            #"pfbid0([A-Za-z0-9]+)"#,
             #"/share/g/(\d{5,25})"#,
-            #"/reel/(\d+)"#,
-            #"/reels/(\d+)"#,
-            #"/videos/(\d+)"#,
-            #"watch/\?v=(\d+)"#,
-            #"[?&]v=(\d+)"#,
-            #"story_fbid=(\d+)"#,
-            #"[?&]fbid=(\d+)"#,
-            #"/posts/(\d+)"#,
-            #"/permalink/(\d+)"#,
-            #"/activity/(\d+)"#,
-            #"multi_permalinks=(\d+)"#
+            #"/groups/(\d{5,25})"#
         ]
         for pat in patterns {
-            if let found = firstMatch(pattern: pat, in: urlStr) {
+            if let found = firstMatch(pattern: pat, in: decoded) {
                 return found
             }
         }
@@ -806,16 +841,30 @@ enum FacebookTargetPostResolver {
         }
         guard let url = URL(string: urlStr) else { return nil }
 
-        // Nếu URL đã có ID số ngay trên path, không cần fetch
-        if let directId = extractNumericIdFromURL(urlStr) {
+        // Nếu URL đã có ID bài viết rõ ràng trên path (ví dụ /posts/123, /permalink/123), không phải link rút gọn share/...
+        let lower = urlStr.lowercased()
+        let isShareLink = lower.contains("/share/") || lower.contains("pfbid") || lower.contains("fb.me") || lower.contains("fb.watch")
+        if !isShareLink, let directId = extractNumericIdFromURL(urlStr) {
             let kind = detectKind(from: urlStr)
             let canonical = buildCanonicalURL(id: directId, kind: kind, originalURL: urlStr)
             return (canonical, directId, kind)
         }
 
+        // Tạo danh sách URLs để thử: ưu tiên URL gốc, sau đó thử mbasic nếu là link share
+        var candidateURLs = [url]
+        if isShareLink {
+            let mbasicStr = urlStr
+                .replacingOccurrences(of: "https://www.facebook.com", with: "https://mbasic.facebook.com")
+                .replacingOccurrences(of: "https://web.facebook.com", with: "https://mbasic.facebook.com")
+                .replacingOccurrences(of: "https://m.facebook.com", with: "https://mbasic.facebook.com")
+            if let mbURL = URL(string: mbasicStr), mbURL != url {
+                candidateURLs.append(mbURL)
+            }
+        }
+
         // Follow redirects để lấy final URL (kèm Cookie nếu có để giải mã share/p, share/r, pfbid...)
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 16
+        config.timeoutIntervalForRequest = 15
         if !cookieString.isEmpty {
             let cookieStorage = HTTPCookieStorage()
             for c in FacebookGraphQLAutoClient.parseCookies(from: cookieString) {
@@ -835,85 +884,114 @@ enum FacebookTargetPostResolver {
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
         ]
 
-        for ua in uas {
-            var request = URLRequest(url: url)
-            request.httpMethod = "GET"
-            request.setValue(ua, forHTTPHeaderField: "User-Agent")
-            request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
-            request.setValue("vi,en-US;q=0.8,en;q=0.6", forHTTPHeaderField: "Accept-Language")
-            if !cookieString.isEmpty {
-                request.setValue(cookieString, forHTTPHeaderField: "Cookie")
-            }
-
-            do {
-                let (data, response) = try await session.data(for: request)
-                var finalURLStr = urlStr
-                if let httpResp = response as? HTTPURLResponse, let respURL = httpResp.url {
-                    finalURLStr = respURL.absoluteString
+        for candURL in candidateURLs {
+            for ua in uas {
+                var request = URLRequest(url: candURL)
+                request.httpMethod = "GET"
+                request.setValue(ua, forHTTPHeaderField: "User-Agent")
+                request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+                request.setValue("vi,en-US;q=0.8,en;q=0.6", forHTTPHeaderField: "Accept-Language")
+                if !cookieString.isEmpty {
+                    request.setValue(cookieString, forHTTPHeaderField: "Cookie")
                 }
 
-                // Thử lấy ID từ final URL sau redirect
-                var extractedId = extractNumericIdFromURL(finalURLStr)
-                let kind = detectKind(from: finalURLStr)
+                do {
+                    let (data, response) = try await session.data(for: request)
+                    var finalURLStr = candURL.absoluteString
+                    if let httpResp = response as? HTTPURLResponse, let respURL = httpResp.url {
+                        finalURLStr = respURL.absoluteString
+                    }
 
-                // Nếu chưa có ID, parse HTML
-                if extractedId == nil {
+                    // 1. Thử lấy ID từ final URL sau redirect
+                    var extractedId = extractNumericIdFromURL(finalURLStr)
+                    var resolvedFinalURL = finalURLStr
+
                     let html = String(data: data, encoding: .utf8) ?? ""
-                    let idPatterns = [
-                        #""post_id"\s*:\s*"?(\d{8,25})"?"#,
-                        #""top_level_post_id"\s*:\s*"?(\d{8,25})"?"#,
-                        #""story_fbid"\s*:\s*"?(\d{8,25})"?"#,
-                        #""video_id"\s*:\s*"?(\d{8,25})"?"#,
-                        #"story_fbid=(\d{8,25})"#,
-                        #"fbid=(\d{8,25})"#,
-                        #"/reel/(\d{8,25})"#,
-                        #"/posts/(\d{8,25})"#,
-                        #"/videos/(\d{8,25})"#,
-                        #"content="fb://post/(\d{8,25})""#,
-                        #"content="fb://photo/(\d{8,25})""#
-                    ]
-                    for pat in idPatterns {
-                        if let m = firstMatch(pattern: pat, in: html) {
-                            extractedId = m
-                            break
+
+                    // 2. Thử bóc tách meta og:url hoặc link canonical
+                    if let ogUrl = firstMatch(pattern: #"<meta\s+property=[\"']og:url[\"']\s+content=[\"']([^\"']+)[\"']"#, in: html)
+                        ?? firstMatch(pattern: #"<meta\s+content=[\"']([^\"']+)[\"']\s+property=[\"']og:url[\"']"#, in: html)
+                        ?? firstMatch(pattern: #"<link\s+rel=[\"']canonical[\"']\s+href=[\"']([^\"']+)[\"']"#, in: html) {
+                        if let ogId = extractNumericIdFromURL(ogUrl) {
+                            extractedId = ogId
+                            resolvedFinalURL = ogUrl
                         }
                     }
 
-                    if extractedId == nil {
-                        let fbPatterns = [
-                            #""feedback":\{"id":"([A-Za-z0-9+/=]+)""#,
-                            #""feedback_id":"([A-Za-z0-9+/=]+)""#
-                        ]
-                        for pat in fbPatterns {
-                            if let fb = firstMatch(pattern: pat, in: html),
-                               let decodedData = Data(base64Encoded: fb),
-                               let decodedStr = String(data: decodedData, encoding: .utf8),
-                               let idPart = firstMatch(pattern: #"(\d{8,25})"#, in: decodedStr) {
-                                extractedId = idPart
-                                break
+                    // 3. Thử bóc tách al:ios:url graphqlid
+                    if extractedId == nil,
+                       let alGraphId = firstMatch(pattern: #"property=[\"']al:(?:ios|android):url[\"']\s+content=[\"'][^\"']*graphqlid=([A-Za-z0-9+/=]+)"#, in: html) {
+                        if let decData = Data(base64Encoded: alGraphId),
+                           let decStr = String(data: decData, encoding: .utf8) {
+                            let nums = decStr.components(separatedBy: CharacterSet.decimalDigits.inverted).filter { $0.count >= 8 }
+                            if let lastNum = nums.last {
+                                extractedId = lastNum
                             }
                         }
                     }
-                }
 
-                if let postId = extractedId, !postId.isEmpty {
-                    let canonical = buildCanonicalURL(id: postId, kind: kind, originalURL: finalURLStr)
-                    return (canonical, postId, kind)
+                    // 4. Nếu chưa có ID, tìm các idPatterns trong HTML
+                    if extractedId == nil, !html.isEmpty {
+                        let idPatterns = [
+                            #"/groups/[^/?#]+/posts/(\d{5,25})"#,
+                            #"/groups/[^/?#]+/permalink/(\d{5,25})"#,
+                            #""post_id"\s*:\s*"?(\d{8,25})"?"#,
+                            #""top_level_post_id"\s*:\s*"?(\d{8,25})"?"#,
+                            #""story_fbid"\s*:\s*"?(\d{8,25})"?"#,
+                            #""video_id"\s*:\s*"?(\d{8,25})"?"#,
+                            #"story_fbid=(\d{8,25})"#,
+                            #"fbid=(\d{8,25})"#,
+                            #"/reel/(\d{8,25})"#,
+                            #"/posts/(\d{8,25})"#,
+                            #"/videos/(\d{8,25})"#,
+                            #"content="fb://post/(\d{8,25})""#,
+                            #"content="fb://photo/(\d{8,25})""#
+                        ]
+                        for pat in idPatterns {
+                            if let m = firstMatch(pattern: pat, in: html) {
+                                extractedId = m
+                                break
+                            }
+                        }
+
+                        if extractedId == nil {
+                            let fbPatterns = [
+                                #""feedback":\{"id":"([A-Za-z0-9+/=]+)""#,
+                                #""feedback_id":"([A-Za-z0-9+/=]+)""#
+                            ]
+                            for pat in fbPatterns {
+                                if let fb = firstMatch(pattern: pat, in: html),
+                                   let decodedData = Data(base64Encoded: fb),
+                                   let decodedStr = String(data: decodedData, encoding: .utf8),
+                                   let idPart = firstMatch(pattern: #"(\d{8,25})"#, in: decodedStr) {
+                                    extractedId = idPart
+                                    break
+                                }
+                            }
+                        }
+                    }
+
+                    if let postId = extractedId, !postId.isEmpty {
+                        let kind = detectKind(from: resolvedFinalURL)
+                        let canonical = buildCanonicalURL(id: postId, kind: kind, originalURL: resolvedFinalURL)
+                        return (canonical, postId, kind)
+                    }
+                } catch {
+                    continue
                 }
-            } catch {
-                continue
             }
         }
         return nil
     }
 
     static func buildCanonicalURL(id: String, kind: String, originalURL: String) -> String {
-        let lower = originalURL.lowercased()
+        let decoded = originalURL.removingPercentEncoding ?? originalURL
+        let lower = decoded.lowercased()
         if lower.contains("/reel/") || lower.contains("/reels/") || lower.contains("/share/r/") || lower.contains("fb.watch") || lower.contains("/watch") {
             return "https://www.facebook.com/reel/\(id)"
         }
         if lower.contains("/groups/") {
-            if let groupId = FacebookTargetPostResolver.firstMatch(pattern: #"/groups/([^/?#]+)"#, in: originalURL) {
+            if let groupId = FacebookTargetPostResolver.firstMatch(pattern: #"/groups/([^/?#]+)"#, in: decoded) {
                 return "https://www.facebook.com/groups/\(groupId)/posts/\(id)"
             }
         }

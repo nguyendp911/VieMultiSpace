@@ -3,6 +3,7 @@ import Security
 import CryptoKit
 import WebKit
 import UIKit
+import UniformTypeIdentifiers
 
 // MARK: - Models
 
@@ -1602,12 +1603,15 @@ struct TxtAccount: Identifiable {
 
 struct TxtDocumentPicker: UIViewControllerRepresentable {
     var onPicked: (String) -> Void
+    var onDismiss: (() -> Void)? = nil
 
-    func makeCoordinator() -> Coordinator { Coordinator(onPicked: onPicked) }
+    func makeCoordinator() -> Coordinator { Coordinator(onPicked: onPicked, onDismiss: onDismiss) }
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let vc = UIDocumentPickerViewController(forOpeningContentTypes: [.plainText], asCopy: true)
+        let types: [UTType] = [.plainText, .text, .utf8PlainText, .commaSeparatedText, .data]
+        let vc = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true)
         vc.delegate = context.coordinator
+        vc.allowsMultipleSelection = false
         return vc
     }
 
@@ -1615,10 +1619,59 @@ struct TxtDocumentPicker: UIViewControllerRepresentable {
 
     class Coordinator: NSObject, UIDocumentPickerDelegate {
         var onPicked: (String) -> Void
-        init(onPicked: @escaping (String) -> Void) { self.onPicked = onPicked }
+        var onDismiss: (() -> Void)?
+
+        init(onPicked: @escaping (String) -> Void, onDismiss: (() -> Void)?) {
+            self.onPicked = onPicked
+            self.onDismiss = onDismiss
+        }
+
         func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-            guard let url = urls.first, let text = try? String(contentsOf: url, encoding: .utf8) else { return }
-            onPicked(text)
+            guard let url = urls.first else {
+                onDismiss?()
+                return
+            }
+
+            let canAccess = url.startAccessingSecurityScopedResource()
+            defer {
+                if canAccess {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+
+            var loadedData: Data? = try? Data(contentsOf: url)
+            if loadedData == nil {
+                var coordinatorError: NSError?
+                let coordinator = NSFileCoordinator()
+                coordinator.coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinatorError) { readURL in
+                    loadedData = try? Data(contentsOf: readURL)
+                }
+            }
+
+            guard let data = loadedData, !data.isEmpty else {
+                onDismiss?()
+                return
+            }
+
+            let decodedText: String? = {
+                if let s = String(data: data, encoding: .utf8) { return s }
+                if let s = String(data: data, encoding: .utf16) { return s }
+                if let s = String(data: data, encoding: .unicode) { return s }
+                if let s = String(data: data, encoding: .windowsCP1252) { return s }
+                if let s = String(data: data, encoding: .isoLatin1) { return s }
+                if let s = String(data: data, encoding: .ascii) { return s }
+                return nil
+            }()
+
+            if let text = decodedText, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                onPicked(text)
+            } else {
+                onDismiss?()
+            }
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            onDismiss?()
         }
     }
 }
@@ -2009,15 +2062,32 @@ struct LoginEditorSheet: View {
                 Button("OK") { message = nil }
             } message: { Text(message ?? "") }
             .sheet(isPresented: $showFilePicker) {
-                TxtDocumentPicker { text in
-                    let accounts = parseTxtAccounts(text)
-                    if accounts.isEmpty {
-                        message = "File không có dòng hợp lệ.\nĐịnh dạng: uid|matkhau|2fa"
-                    } else {
-                        parsedTxtAccounts = accounts
-                        showTxtAccountPicker = true
+                TxtDocumentPicker(
+                    onPicked: { text in
+                        showFilePicker = false
+                        let accounts = parseTxtAccounts(text)
+                        if accounts.isEmpty {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                                message = "Không tìm thấy dòng tài khoản hợp lệ trong file.\nĐịnh dạng hỗ trợ: UID|Pass|2FA (hoặc phân tách bằng :, tab, ;)."
+                            }
+                        } else if accounts.count == 1, let single = accounts.first {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                                username = single.uid
+                                password = single.password
+                                seed = single.twoFA
+                                message = "✅ Đã nạp tài khoản: \(single.uid)"
+                            }
+                        } else {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                                parsedTxtAccounts = accounts
+                                showTxtAccountPicker = true
+                            }
+                        }
+                    },
+                    onDismiss: {
+                        showFilePicker = false
                     }
-                }
+                )
             }
             .sheet(isPresented: $showTxtAccountPicker) {
                 TxtAccountPickerSheet(accounts: parsedTxtAccounts) { acc in
@@ -2046,11 +2116,17 @@ struct LoginEditorSheet: View {
 
     private func applyPipeFormatString(_ raw: String) {
         let firstLine = raw
-            .components(separatedBy: .newlines)
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .first(where: { !$0.isEmpty && !$0.hasPrefix("#") }) ?? raw
-        let parts = firstLine.components(separatedBy: "|").map {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            .first(where: { !$0.isEmpty && !$0.hasPrefix("#") && !$0.hasPrefix("//") }) ?? raw
+        
+        let delimiter: Character = firstLine.contains("|") ? "|" :
+                                  (firstLine.contains("\t") ? "\t" :
+                                  (firstLine.contains(";") ? ";" : ":"))
+        let parts = firstLine.split(separator: delimiter, omittingEmptySubsequences: false).map {
+            String($0).trimmingCharacters(in: .whitespacesAndNewlines)
         }
         guard parts.count >= 2 else { return }
         username = parts[0]
@@ -2069,18 +2145,49 @@ struct LoginEditorSheet: View {
     }
 
     private func parseTxtAccounts(_ text: String) -> [TxtAccount] {
-        text.components(separatedBy: .newlines)
-            .compactMap { line -> TxtAccount? in
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return nil }
-                let parts = trimmed.components(separatedBy: "|")
-                guard parts.count >= 2 else { return nil }
-                let uid = parts[0].trimmingCharacters(in: .whitespaces)
-                let pass = parts[1].trimmingCharacters(in: .whitespaces)
-                let fa = parts.count >= 3 ? parts[2].trimmingCharacters(in: .whitespaces) : ""
-                guard !pass.isEmpty else { return nil }
-                return TxtAccount(uid: uid, password: pass, twoFA: fa)
+        let lines = text.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+
+        return lines.compactMap { line -> TxtAccount? in
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#"), !trimmed.hasPrefix("//") else { return nil }
+
+            let delimiter: Character? = {
+                if trimmed.contains("|") { return "|" }
+                if trimmed.contains("\t") { return "\t" }
+                if trimmed.contains(";") { return ";" }
+                if trimmed.contains(":") { return ":" }
+                return nil
+            }()
+
+            guard let delim = delimiter else { return nil }
+            let parts = trimmed.split(separator: delim, omittingEmptySubsequences: false)
+                .map { String($0).trimmingCharacters(in: .whitespaces) }
+            guard parts.count >= 2 else { return nil }
+
+            let uid = parts[0]
+            let pass = parts[1]
+            var fa = ""
+
+            if parts.count >= 3 {
+                for i in 2..<parts.count {
+                    let candidate = parts[i].replacingOccurrences(of: " ", with: "")
+                    let clean = candidate.uppercased()
+                    let isBase32 = clean.count >= 16 && clean.count <= 64 && clean.allSatisfy { "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains($0) }
+                    if isBase32 && fa.isEmpty {
+                        fa = clean
+                        break
+                    }
+                }
+                if fa.isEmpty {
+                    fa = parts[2]
+                }
             }
+
+            guard !uid.isEmpty, !pass.isEmpty else { return nil }
+            return TxtAccount(uid: uid, password: pass, twoFA: fa)
+        }
     }
 
     private func saveCredentialsOnly() {
