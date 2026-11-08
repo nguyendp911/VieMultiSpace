@@ -1160,11 +1160,24 @@ enum FacebookAPILoginClient {
 
         let client = SessionClient(initialDatr: resolvedMachineId.count >= 20 ? resolvedMachineId : nil)
 
-        // 2. Chuẩn bị định danh thiết bị
-        let deviceId = (savedRecord?.deviceId?.isEmpty == false) ? savedRecord!.deviceId! : UUID().uuidString.lowercased()
-        let adid = (savedRecord?.adid?.isEmpty == false) ? savedRecord!.adid! : UUID().uuidString.lowercased()
+        // 2. Chuẩn bị định danh thiết bị (Đồng bộ theo Dấu vân tay của Không gian)
+        let spaceFP = spaceId.flatMap { sid in SpaceLibrary.findSpace(id: sid)?.fingerprint }
+        let deviceId: String = {
+            if let d = savedRecord?.deviceId, !d.isEmpty { return d }
+            if let s = spaceFP?.androidDeviceId, !s.isEmpty { return s }
+            return UUID().uuidString.lowercased()
+        }()
+        let adid: String = {
+            if let a = savedRecord?.adid, !a.isEmpty { return a }
+            if let s = spaceFP?.androidAdid, !s.isEmpty { return s }
+            return UUID().uuidString.lowercased()
+        }()
         let secureFamilyDeviceId = UUID().uuidString.lowercased()
-        let simSerial = (savedRecord?.simSerial?.isEmpty == false) ? savedRecord!.simSerial! : generateSimSerial()
+        let simSerial: String = {
+            if let sim = savedRecord?.simSerial, !sim.isEmpty { return sim }
+            if let s = spaceFP?.androidSimSerial, !s.isEmpty { return s }
+            return generateSimSerial()
+        }()
         let jazoest = randomDigits(5)
 
         // 3. Mã hóa mật khẩu chuẩn #PWD_FB4A:2 theo 1767528775-Login2FaConvertToken.py

@@ -366,6 +366,38 @@ struct BatchProxyManagerView: View {
     @ViewBuilder
     private var batchFingerprintSection: some View {
         Section {
+            // Header hiển thị Độ Trust Vân tay trung bình
+            let scores = selectedSpaces.compactMap { $0.fingerprint?.trustReport.score }
+            let avgScore = scores.isEmpty ? 98 : (scores.reduce(0, +) / scores.count)
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Độ Trust Vân tay Trung bình")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        Image(systemName: avgScore >= 90 ? "shield.checkmark.fill" : "shield.fill")
+                            .foregroundStyle(avgScore >= 90 ? .green : .orange)
+                        Text("\(avgScore)/100")
+                            .font(.title3.bold().monospacedDigit())
+                            .foregroundStyle(.primary)
+                        Text(avgScore >= 95 ? "• Tuyệt đối an toàn" : (avgScore >= 85 ? "• Rất cao" : "• Khá"))
+                            .font(.caption2.bold())
+                            .foregroundStyle(avgScore >= 90 ? .green : .orange)
+                    }
+                }
+                Spacer()
+                Button {
+                    applyBatchFingerprints()
+                } label: {
+                    Label("Nâng 100% Trust", systemImage: "sparkles")
+                        .font(.caption.bold())
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+                .controlSize(.small)
+            }
+            .padding(.vertical, 4)
+
             Picker("Mẫu thiết bị", selection: $fingerprintPresetChoice) {
                 Text("🎲 Ngẫu nhiên đa dạng (Khuyên dùng)").tag("random")
                 ForEach(DeviceModelPreset.allCases) { preset in
@@ -374,26 +406,32 @@ struct BatchProxyManagerView: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Mỗi không gian sẽ được tạo một bộ thông số phần cứng, hạt giống Canvas Seed, Audio Seed và WebGL độc nhất vô nhị.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("Đảm bảo các trang web (Facebook, Google, TikTok) không thể đối chiếu hay nhận diện các tài khoản thuộc cùng một người dùng.")
-                    .font(.caption2)
-                    .foregroundStyle(.blue)
+                Text("🛡️ 6 Lớp bảo vệ chống nhận diện & tăng độ Trust:")
+                    .font(.caption.bold())
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("• Canvas 2D + Font Subpixel (Hạt giống Seed độc nhất)")
+                    Text("• AudioContext & AnalyserNode Micro-noise")
+                    Text("• WebGL GPU Mask & readPixels Shield")
+                    Text("• Chống rò rỉ IP qua WebRTC STUN Candidates")
+                    Text("• MediaDevices ảo riêng (Mic, Cam, Loa)")
+                    Text("• Định danh Android FB4A riêng (ADID, SIM, Device ID)")
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             }
             .padding(.vertical, 4)
 
             Button {
                 applyBatchFingerprints()
             } label: {
-                Label("🎲 Sinh dấu vân tay mới cho \(selectedSpaces.count) không gian", systemImage: "sparkles")
+                Label("🚀 Tạo vân tay Siêu Sạch cho \(selectedSpaces.count) không gian", systemImage: "wand.and.stars")
                     .fontWeight(.bold)
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
             }
             .disabled(selectedSpaces.isEmpty)
         } header: {
-            Text("3. Dấu vân tay Anti-Detect")
+            Text("3. Dấu vân tay Anti-Detect Cao Cấp")
         } footer: {
             Text("Dấu vân tay mới sẽ được áp dụng ngay lập tức ở lần tải tiếp theo của mỗi không gian.")
         }
@@ -523,18 +561,70 @@ struct SpaceProxyFingerprintSheet: View {
     @State private var testResult: ProxyTester.TestResult?
 
     // Fingerprint State
-    @State private var selectedPreset: DeviceModelPreset = .iPhone15Pro
+    @State private var selectedPreset: DeviceModelPreset = .iPhone16Pro
     @State private var userAgent = ""
     @State private var screenW = "393"
     @State private var screenH = "852"
     @State private var cpuCores = "6"
     @State private var ramGB = "8"
-    @State private var webGLRenderer = "Apple GPU (Apple A17 Pro)"
+    @State private var webGLRenderer = "Apple GPU (Apple A18 Pro)"
     @State private var canvasSeedText = "12345"
     @State private var audioSeedText = "67890"
+    @State private var fontSeedText = "13579"
+    @State private var webglSeedText = "24680"
     @State private var webrtcProtection = true
     @State private var canvasProtection = true
+    @State private var fontProtection = true
     @State private var audioProtection = true
+    @State private var webglNoiseProtection = true
+    @State private var mediaDevicesProtection = true
+    @State private var androidDeviceId = ""
+    @State private var androidAdid = ""
+    @State private var androidSimSerial = ""
+    @State private var timeZone = "Asia/Ho_Chi_Minh"
+
+    private var currentPreviewFP: SpaceFingerprint {
+        let seedC = UInt32(canvasSeedText) ?? 12345
+        let seedA = UInt32(audioSeedText) ?? 67890
+        let seedF = UInt32(fontSeedText) ?? 13579
+        let seedW = UInt32(webglSeedText) ?? 24680
+        let w = Int(screenW) ?? 393
+        let h = Int(screenH) ?? 852
+        let cores = Int(cpuCores) ?? 6
+        let ram = Int(ramGB) ?? 8
+
+        return SpaceFingerprint(
+            id: space.id,
+            preset: selectedPreset,
+            userAgent: userAgent.isEmpty ? "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15" : userAgent,
+            appVersion: "5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15",
+            platform: selectedPreset.isAndroid ? "Linux armv8l" : (selectedPreset == .macBookProM3 ? "MacIntel" : "iPhone"),
+            vendor: selectedPreset.isAndroid ? "Google Inc." : "Apple Computer, Inc.",
+            screenWidth: w,
+            screenHeight: h,
+            screenScale: selectedPreset == .iPadProM4 || selectedPreset == .iPadPro129 || selectedPreset == .macBookProM3 ? 2.0 : 3.0,
+            hardwareConcurrency: cores,
+            deviceMemory: ram,
+            maxTouchPoints: selectedPreset == .macBookProM3 ? 0 : 5,
+            webGLVendor: selectedPreset.isAndroid ? "Qualcomm" : "Apple Inc.",
+            webGLRenderer: webGLRenderer,
+            canvasSeed: seedC,
+            audioSeed: seedA,
+            fontSeed: seedF,
+            webglSeed: seedW,
+            androidDeviceId: androidDeviceId.isEmpty ? nil : androidDeviceId,
+            androidAdid: androidAdid.isEmpty ? nil : androidAdid,
+            androidSimSerial: androidSimSerial.isEmpty ? nil : androidSimSerial,
+            timeZone: timeZone,
+            canvasNoiseEnabled: canvasProtection,
+            audioNoiseEnabled: audioProtection,
+            fontNoiseEnabled: fontProtection,
+            webGLSpoofingEnabled: true,
+            webGLNoiseEnabled: webglNoiseProtection,
+            webrtcProtectionEnabled: webrtcProtection,
+            mediaDevicesProtectionEnabled: mediaDevicesProtection
+        )
+    }
 
     var body: some View {
         Form {
@@ -607,7 +697,51 @@ struct SpaceProxyFingerprintSheet: View {
                 }
             }
 
-            Section("2. Dấu vân tay Anti-Detect") {
+            Section("2. Điểm Tin Cậy & Vân Tay Anti-Detect") {
+                let report = currentPreviewFP.trustReport
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Image(systemName: report.score >= 90 ? "shield.checkmark.fill" : "shield.fill")
+                            .foregroundStyle(report.score >= 90 ? .green : .orange)
+                            .font(.title3)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Độ Trust Vân tay: \(report.score)/100")
+                                .font(.subheadline.bold())
+                            Text(report.level)
+                                .font(.caption2)
+                                .foregroundStyle(report.score >= 90 ? .green : .orange)
+                        }
+                        Spacer()
+                        Button {
+                            optimizeTo100Percent()
+                        } label: {
+                            Label("Tối ưu 100%", systemImage: "sparkles")
+                                .font(.caption.bold())
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.green)
+                        .controlSize(.small)
+                    }
+
+                    Divider()
+
+                    ForEach(report.checks) { chk in
+                        HStack(spacing: 6) {
+                            Image(systemName: chk.passed ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                .foregroundStyle(chk.passed ? .green : .orange)
+                                .font(.caption)
+                            Text(chk.name)
+                                .font(.caption.bold())
+                            Spacer()
+                            Text(chk.detail)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+
                 Picker("Mẫu thiết bị", selection: $selectedPreset) {
                     ForEach(DeviceModelPreset.allCases) { p in
                         Text(p.rawValue).tag(p)
@@ -631,15 +765,32 @@ struct SpaceProxyFingerprintSheet: View {
                     LabeledContent("Card đồ họa", value: webGLRenderer)
                     LabeledContent("Hạt giống Canvas Seed", value: "#\(canvasSeedText)")
                     LabeledContent("Hạt giống Audio Seed", value: "#\(audioSeedText)")
+                    LabeledContent("Hạt giống Font Seed", value: "#\(fontSeedText)")
+                    LabeledContent("Hạt giống WebGL Seed", value: "#\(webglSeedText)")
                 }
                 .font(.caption)
 
                 Toggle("Chống rò rỉ IP qua WebRTC", isOn: $webrtcProtection)
                     .font(.caption)
-                Toggle("Nhiễu Canvas Fingerprint", isOn: $canvasProtection)
+                Toggle("Nhiễu Canvas 2D Fingerprint", isOn: $canvasProtection)
                     .font(.caption)
-                Toggle("Nhiễu Audio Fingerprint", isOn: $audioProtection)
+                Toggle("Khử vết đo chữ Font Subpixel", isOn: $fontProtection)
                     .font(.caption)
+                Toggle("Nhiễu AudioContext & Analyser", isOn: $audioProtection)
+                    .font(.caption)
+                Toggle("Mặt nạ WebGL readPixels", isOn: $webglNoiseProtection)
+                    .font(.caption)
+                Toggle("Ngoại vi Ảo (Mic, Cam, Loa)", isOn: $mediaDevicesProtection)
+                    .font(.caption)
+            }
+
+            Section("3. Định danh Android FB4A (Meta API / 2FA)") {
+                LabeledContent("Android Device ID", value: androidDeviceId.isEmpty ? "Tự động sinh" : String(androidDeviceId.prefix(16)))
+                    .font(.caption.monospaced())
+                LabeledContent("Advertising ID (ADID)", value: androidAdid.isEmpty ? "Tự động sinh" : String(androidAdid.prefix(18)) + "...")
+                    .font(.caption.monospaced())
+                LabeledContent("SIM Serial (ICCID)", value: androidSimSerial.isEmpty ? "Tự động sinh" : androidSimSerial)
+                    .font(.caption.monospaced())
             }
         }
         .navigationTitle("Proxy & Vân tay • \(space.name)")
@@ -683,18 +834,35 @@ struct SpaceProxyFingerprintSheet: View {
         webGLRenderer = fp.webGLRenderer
         canvasSeedText = String(fp.canvasSeed)
         audioSeedText = String(fp.audioSeed)
+        fontSeedText = String(fp.fontSeed)
+        webglSeedText = String(fp.webglSeed)
         webrtcProtection = fp.webrtcProtectionEnabled
         canvasProtection = fp.canvasNoiseEnabled
+        fontProtection = fp.fontNoiseEnabled
         audioProtection = fp.audioNoiseEnabled
+        webglNoiseProtection = fp.webGLNoiseEnabled
+        mediaDevicesProtection = fp.mediaDevicesProtectionEnabled
+        androidDeviceId = fp.androidDeviceId
+        androidAdid = fp.androidAdid
+        androidSimSerial = fp.androidSimSerial
+        timeZone = fp.timeZone
     }
 
     private func applyPresetValues(_ preset: DeviceModelPreset) {
         let dummy = SpaceFingerprint.makePreset(
             preset: preset,
             canvasSeed: UInt32(canvasSeedText) ?? 12345,
-            audioSeed: UInt32(audioSeedText) ?? 67890
+            audioSeed: UInt32(audioSeedText) ?? 67890,
+            fontSeed: UInt32(fontSeedText) ?? 13579,
+            webglSeed: UInt32(webglSeedText) ?? 24680,
+            spaceId: space.id
         )
         loadFingerprint(dummy)
+    }
+
+    private func optimizeTo100Percent() {
+        let superFp = SpaceFingerprint.generateSuperTrust(spaceId: space.id, preset: selectedPreset)
+        loadFingerprint(superFp)
     }
 
     private func parseQuickInput() {
@@ -749,6 +917,8 @@ struct SpaceProxyFingerprintSheet: View {
         // Lưu Dấu vân tay
         let seedC = UInt32(canvasSeedText) ?? UInt32.random(in: 10_000...999_999)
         let seedA = UInt32(audioSeedText) ?? UInt32.random(in: 10_000...999_999)
+        let seedF = UInt32(fontSeedText) ?? UInt32.random(in: 10_000...999_999)
+        let seedW = UInt32(webglSeedText) ?? UInt32.random(in: 10_000...999_999)
         let w = Int(screenW) ?? 393
         let h = Int(screenH) ?? 852
         let cores = Int(cpuCores) ?? 6
@@ -757,23 +927,33 @@ struct SpaceProxyFingerprintSheet: View {
         let fp = SpaceFingerprint(
             id: space.fingerprint?.id ?? UUID(),
             preset: selectedPreset,
-            userAgent: userAgent.isEmpty ? "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1" : userAgent,
-            appVersion: "5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15",
-            platform: "iPhone",
-            vendor: "Apple Computer, Inc.",
+            userAgent: userAgent.isEmpty ? "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15" : userAgent,
+            appVersion: "5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15",
+            platform: selectedPreset.isAndroid ? "Linux armv8l" : (selectedPreset == .macBookProM3 ? "MacIntel" : "iPhone"),
+            vendor: selectedPreset.isAndroid ? "Google Inc." : "Apple Computer, Inc.",
             screenWidth: w,
             screenHeight: h,
-            screenScale: 3.0,
+            screenScale: selectedPreset == .iPadProM4 || selectedPreset == .iPadPro129 || selectedPreset == .macBookProM3 ? 2.0 : 3.0,
             hardwareConcurrency: cores,
             deviceMemory: ram,
-            webGLVendor: "Apple Inc.",
+            maxTouchPoints: selectedPreset == .macBookProM3 ? 0 : 5,
+            webGLVendor: selectedPreset.isAndroid ? "Qualcomm" : "Apple Inc.",
             webGLRenderer: webGLRenderer,
             canvasSeed: seedC,
             audioSeed: seedA,
+            fontSeed: seedF,
+            webglSeed: seedW,
+            androidDeviceId: androidDeviceId.isEmpty ? nil : androidDeviceId,
+            androidAdid: androidAdid.isEmpty ? nil : androidAdid,
+            androidSimSerial: androidSimSerial.isEmpty ? nil : androidSimSerial,
+            timeZone: timeZone,
             canvasNoiseEnabled: canvasProtection,
             audioNoiseEnabled: audioProtection,
+            fontNoiseEnabled: fontProtection,
             webGLSpoofingEnabled: true,
-            webrtcProtectionEnabled: webrtcProtection
+            webGLNoiseEnabled: webglNoiseProtection,
+            webrtcProtectionEnabled: webrtcProtection,
+            mediaDevicesProtectionEnabled: mediaDevicesProtection
         )
         library.updateSpaceFingerprint(space.id, fingerprint: fp)
     }

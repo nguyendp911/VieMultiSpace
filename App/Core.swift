@@ -97,10 +97,12 @@ enum SpaceError: LocalizedError {
 
 @MainActor
 final class SpaceLibrary: ObservableObject {
+    static weak var shared: SpaceLibrary?
     @Published private(set) var spaces: [Space] = []
     private let saveKey = "vie.multispace.profiles.v1"
 
     init() {
+        Self.shared = self
         if let data = UserDefaults.standard.data(forKey: saveKey),
            let profiles = try? JSONDecoder().decode([Space].self, from: data) {
             // Tự động gán Dấu vân tay riêng cho bất kỳ không gian nào chưa có
@@ -117,6 +119,17 @@ final class SpaceLibrary: ObservableObject {
                 persist()
             }
         }
+    }
+
+    static func findSpace(id: UUID) -> Space? {
+        if let sp = shared?.spaces.first(where: { $0.id == id }) {
+            return sp
+        }
+        if let data = UserDefaults.standard.data(forKey: "vie.multispace.profiles.v1"),
+           let profiles = try? JSONDecoder().decode([Space].self, from: data) {
+            return profiles.first(where: { $0.id == id })
+        }
+        return nil
     }
 
     func add(name: String, platform: SpacePlatform, url: String) throws {
@@ -233,13 +246,17 @@ final class SpaceLibrary: ObservableObject {
         var didChange = false
         for sid in spaceIds {
             if let index = spaces.firstIndex(where: { $0.id == sid }) {
-                spaces[index].fingerprint = SpaceFingerprint.generateRandom(preset: preset)
+                spaces[index].fingerprint = SpaceFingerprint.generateSuperTrust(spaceId: sid, preset: preset)
                 didChange = true
             }
         }
         if didChange {
             persist()
         }
+    }
+
+    func batchOptimizeTrustFingerprints(for spaceIds: Set<UUID>, preset: DeviceModelPreset? = nil) {
+        batchRegenerateFingerprints(for: spaceIds, preset: preset)
     }
 
     func move(from source: IndexSet, to destination: Int) {

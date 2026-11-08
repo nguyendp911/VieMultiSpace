@@ -164,6 +164,16 @@ struct SpaceDashboard: View {
                                                     .foregroundStyle(.blue)
                                                     .lineLimit(1)
                                             }
+
+                                            let fp = space.fingerprint ?? SpaceFingerprint.defaultFor(spaceId: space.id)
+                                            HStack(spacing: 3) {
+                                                Image(systemName: "shield.fill")
+                                                    .font(.system(size: 8))
+                                                Text("\(fp.trustReport.score)% Trust • \(fp.preset.shortName)")
+                                                    .font(.caption2)
+                                            }
+                                            .foregroundStyle(Color(uiColor: .systemGreen))
+                                            .lineLimit(1)
                                         }
                                         Spacer(minLength: 4)
                                     }
