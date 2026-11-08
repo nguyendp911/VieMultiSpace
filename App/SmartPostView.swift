@@ -602,8 +602,28 @@ enum SmartPostAPIClient {
         }
         let session = URLSession(configuration: config)
 
-        // Ưu tiên clean numeric post ID trước, chỉ thử postId gốc nếu khác biệt
-        let targets: [String] = (cleanPostId != postId) ? [cleanPostId, postId] : [cleanPostId]
+        // 1. Ưu tiên postId gốc trước (rất quan trọng đối với Page Post dạng {pageId}_{postId}), rồi mới thử cleanPostId
+        var targets: [String] = []
+        if !postId.isEmpty { targets.append(postId) }
+        if !cleanPostId.isEmpty && cleanPostId != postId { targets.append(cleanPostId) }
+
+        // 2. Chuẩn bị danh sách Token (nếu là bài viết trên Page, tự động lấy Page Access Token để có đủ quyền bình luận)
+        var tokensToTry: [String] = [cleanToken]
+        if let underIdx = postId.firstIndex(of: "_") {
+            let pageOrOwnerId = String(postId[..<underIdx])
+            if let pUrl = URL(string: "https://graph.facebook.com/\(pageOrOwnerId)?fields=access_token") {
+                var pReq = URLRequest(url: pUrl, timeoutInterval: 10)
+                pReq.setValue("OAuth \(cleanToken)", forHTTPHeaderField: "authorization")
+                for (k, v) in fbHeaders { pReq.setValue(v, forHTTPHeaderField: k) }
+                if let (pData, _) = try? await session.data(for: pReq),
+                   let pJson = try? JSONSerialization.jsonObject(with: pData) as? [String: Any],
+                   let pageToken = pJson["access_token"] as? String, !pageToken.isEmpty,
+                   !tokensToTry.contains(pageToken) {
+                    tokensToTry.insert(pageToken, at: 0) // Page Access Token được ưu tiên số 1
+                }
+            }
+        }
+
         let endpoints = [
             "https://graph.facebook.com",
             "https://b-graph.facebook.com"
@@ -611,32 +631,39 @@ enum SmartPostAPIClient {
 
         let allowed = CharacterSet.alphanumerics
         let encMsg = cleanText.addingPercentEncoding(withAllowedCharacters: allowed) ?? cleanText
-        let encTok = cleanToken.addingPercentEncoding(withAllowedCharacters: allowed) ?? cleanToken
-        let postBody = "message=\(encMsg)&access_token=\(encTok)".data(using: .utf8)
+        var lastErrorMsg = "Không thể bình luận qua Graph API"
 
-        for target in targets {
-            for base in endpoints {
-                guard let url = URL(string: "\(base)/\(target)/comments") else { continue }
-                var req = URLRequest(url: url, timeoutInterval: 15)
-                req.httpMethod = "POST"
-                req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-                req.setValue("OAuth \(cleanToken)", forHTTPHeaderField: "authorization")
-                for (k, v) in fbHeaders { req.setValue(v, forHTTPHeaderField: k) }
-                req.httpBody = postBody
+        for tok in tokensToTry {
+            let encTok = tok.addingPercentEncoding(withAllowedCharacters: allowed) ?? tok
+            let postBody = "message=\(encMsg)&access_token=\(encTok)".data(using: .utf8)
 
-                if let (data, resp) = try? await session.data(for: req),
-                   let http = resp as? HTTPURLResponse {
-                    // Nếu status 200...299 thì Facebook đã tiếp nhận và tạo bình luận thành công!
-                    // Dừng ngay lập tức để không bị double comment trên Facebook
-                    if (200...299).contains(http.statusCode) {
-                        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-                        let cid = (json?["id"] as? String) ?? (json?["id"] as? Int).map(String.init) ?? "ok"
-                        return (true, "Đã bình luận ID: \(cid)")
+            for target in targets {
+                for base in endpoints {
+                    guard let url = URL(string: "\(base)/\(target)/comments") else { continue }
+                    var req = URLRequest(url: url, timeoutInterval: 15)
+                    req.httpMethod = "POST"
+                    req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                    req.setValue("OAuth \(tok)", forHTTPHeaderField: "authorization")
+                    for (k, v) in fbHeaders { req.setValue(v, forHTTPHeaderField: k) }
+                    req.httpBody = postBody
+
+                    if let (data, resp) = try? await session.data(for: req),
+                       let http = resp as? HTTPURLResponse {
+                        // Nếu status 200...299 thì Facebook đã tiếp nhận và tạo bình luận thành công!
+                        if (200...299).contains(http.statusCode) {
+                            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                            let cid = (json?["id"] as? String) ?? (json?["id"] as? Int).map(String.init) ?? "ok"
+                            return (true, "Đã bình luận ID: \(cid)")
+                        } else if let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                                  let err = json["error"] as? [String: Any],
+                                  let msg = err["message"] as? String {
+                            lastErrorMsg = msg
+                        }
                     }
                 }
             }
         }
-        return (false, "Không thể bình luận qua Graph API")
+        return (false, lastErrorMsg)
     }
 
     /// Lấy danh sách Trang (Fanpage) do tài khoản quản trị (kèm Page Access Token riêng)

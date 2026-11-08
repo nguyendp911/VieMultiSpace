@@ -1724,8 +1724,13 @@ enum PostTrackingAPIClient {
         let targetPageUrl: String
         if let cid = commentId, !cid.isEmpty {
             targetPageUrl = "https://mbasic.facebook.com/comment/reply/?ctoken=\(cid)&p=\(cleanPostId)"
+        } else if postId.contains("_"),
+                  let underIdx = postId.firstIndex(of: "_") {
+            let ownerId = String(postId[..<underIdx])
+            let fbid = String(postId[postId.index(after: underIdx)...])
+            targetPageUrl = "https://mbasic.facebook.com/story.php?story_fbid=\(fbid)&id=\(ownerId)"
         } else {
-            targetPageUrl = "https://mbasic.facebook.com/\(cleanPostId)"
+            targetPageUrl = "https://mbasic.facebook.com/story.php?story_fbid=\(cleanPostId)&id=\(cleanPostId)"
         }
 
         guard let pageUrl = URL(string: targetPageUrl) else {
@@ -1810,9 +1815,10 @@ enum PostTrackingAPIClient {
         userAgent: String?
     ) async -> (success: Bool, message: String) {
         let cleanPostId = postId.components(separatedBy: "_").last ?? postId
-        let targetObjectId = (commentId?.isEmpty == false) ? commentId! : cleanPostId
+        // Nếu có commentId thì trả lời bình luận đó, nếu không thì gửi vào postId gốc đầy đủ như SmartPost
+        let targetObjectId = (commentId?.isEmpty == false) ? commentId! : postId
 
-        // ── 1. Ưu tiên cao nhất: Gửi qua Facebook Graph API chuẩn FB4A Android (kèm access_token & OAuth header) ──
+        // ── 1. Ưu tiên cao nhất: Gửi qua Facebook Graph API chuẩn SmartPost (hỗ trợ Page Token & FB4A) ──
         if !accessToken.isEmpty {
             let res = await SmartPostAPIClient.commentOnPost(
                 postId: targetObjectId,
@@ -1822,19 +1828,6 @@ enum PostTrackingAPIClient {
             )
             if res.success {
                 return (true, "Đã gửi phản hồi thành công (\(res.message))")
-            }
-
-            // Nếu postId gốc khác cleanPostId và commentId rỗng, thử thêm 1 lần với postId gốc
-            if commentId == nil && cleanPostId != postId {
-                let res2 = await SmartPostAPIClient.commentOnPost(
-                    postId: postId,
-                    commentText: replyText,
-                    accessToken: accessToken,
-                    proxy: proxy
-                )
-                if res2.success {
-                    return (true, "Đã gửi phản hồi thành công (\(res2.message))")
-                }
             }
         }
 
