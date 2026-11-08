@@ -2780,28 +2780,36 @@ struct PostTrackerView: View {
                 }
             }
 
-            // Dòng 3: Thống kê tương tác dạng Pill gọn đẹp (#8FBC8F và trắng)
+            // Dòng 3: Thống kê tương tác hiển thị bằng Icon + Số gọn gàng, chống tràn chữ (#8FBC8F và trắng)
             HStack(spacing: 8) {
                 engagementPill(icon: "hand.thumbsup.fill", text: reactionSummaryText(for: post))
-                engagementPill(icon: "bubble.left.fill", text: "\(post.commentCount) bình luận")
-                engagementPill(icon: "arrowshape.turn.up.right.fill", text: "\(post.shareCount) chia sẻ")
+                engagementPill(icon: "bubble.left.fill", text: "\(post.commentCount)")
+                engagementPill(icon: "arrowshape.turn.up.right.fill", text: "\(post.shareCount)")
 
                 Spacer(minLength: 0)
 
                 if post.unrepliedCommentsCount > 0 {
-                    Text("\(post.unrepliedCommentsCount) chưa trả lời")
-                        .font(.caption2.bold())
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(Color.trackerPrimaryDark, in: Capsule())
+                    HStack(spacing: 4) {
+                        Image(systemName: "clock.badge.exclamationmark")
+                            .font(.system(size: 10, weight: .bold))
+                        Text("\(post.unrepliedCommentsCount)")
+                            .font(.caption2.bold())
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.orange.opacity(0.9), in: Capsule())
                 } else if !post.comments.isEmpty {
-                    Text("Đã trả lời hết")
-                        .font(.caption2.bold())
-                        .foregroundStyle(Color.trackerPrimaryDark)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(Color.trackerSoft, in: Capsule())
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 10, weight: .bold))
+                        Text("\(post.comments.count)")
+                            .font(.caption2.bold())
+                    }
+                    .foregroundStyle(Color.trackerPrimaryDark)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.trackerSoft, in: Capsule())
                 }
             }
 
@@ -2984,7 +2992,7 @@ struct PostTrackerView: View {
     }
 
     private func reactionSummaryText(for post: TrackedPostItem) -> String {
-        guard !post.reactionBreakdown.isEmpty else { return "\(post.reactionCount) cảm xúc" }
+        guard !post.reactionBreakdown.isEmpty else { return "\(post.reactionCount)" }
         let mapEmoji = [
             "Like": "👍",
             "Love": "❤️",
@@ -2995,9 +3003,9 @@ struct PostTrackerView: View {
             "Angry": "😡"
         ]
         let nonZero = post.reactionBreakdown.filter { $0.value > 0 }.sorted(by: { $0.value > $1.value })
-        if nonZero.isEmpty { return "\(post.reactionCount) cảm xúc" }
-        let emojis = nonZero.prefix(2).map { k, v in "\(mapEmoji[k] ?? "")\(v)" }.joined(separator: " ")
-        return "\(emojis) (\(post.reactionCount))"
+        if nonZero.isEmpty { return "\(post.reactionCount)" }
+        let emojis = nonZero.prefix(2).map { k, _ in mapEmoji[k] ?? "" }.joined()
+        return emojis.isEmpty ? "\(post.reactionCount)" : "\(emojis) \(post.reactionCount)"
     }
 
     private func engagementPill(icon: String, text: String) -> some View {
@@ -3143,7 +3151,7 @@ struct AddTrackedPostSheet: View {
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                             if let st = previewStats {
-                                Text("📊 Thống kê: ❤️ \(st.reactionCount) cảm xúc • 💬 \(max(st.commentCount, st.comments.count)) bình luận • 🔄 \(st.shareCount) chia sẻ")
+                                Text("📊 ❤️ \(st.reactionCount) • 💬 \(max(st.commentCount, st.comments.count)) • 🔄 \(st.shareCount)")
                                     .font(.caption2.bold())
                                     .foregroundStyle(Color.trackerPrimaryDark)
                             }
