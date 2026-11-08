@@ -361,6 +361,7 @@ enum FacebookPasswordEncryptor {
                 var request = URLRequest(url: url)
                 request.httpMethod = "POST"
                 request.timeoutInterval = 15
+                FacebookAPILoginClient.applyFullHeaders(to: &request, url: url)
                 let (data, response) = try await URLSession.shared.data(for: request)
                 guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let pubKey = json["public_key"] as? String, !pubKey.isEmpty else {
@@ -476,7 +477,10 @@ enum FacebookAPILoginClient {
     private static let apiSecret = "62f8ce9f74b12f84c123cc23437a4a32"
     private static let sig = "214049b9f17c38bd767de53752b53946"
 
-    private static let baseHeaders: [String: String] = [
+    static let userAgent = "Dalvik/2.1.0 (Linux; U; Android 9; 23113RKC6C Build/PQ3A.190705.08211809) [FBAN/FB4A;FBAV/417.0.0.33.65;FBPN/com.facebook.katana;FBLC/vi_VN;FBBV/480086274;FBCR/MobiFone;FBMF/Redmi;FBBD/Redmi;FBDV/23113RKC6C;FBSV/9;FBCA/x86:armeabi-v7a;FBDM/{density=1.5,width=1280,height=720};FB_FW/1;FBRV/0;]"
+
+    /// Toàn bộ 17 header CHUẨN ĐÚNG TỪNG KÝ TỰ theo 1767528775-Login2FaConvertToken.py
+    static let baseHeaders: [String: String] = [
         "content-type": "application/x-www-form-urlencoded",
         "x-fb-net-hni": "45201",
         "zero-rated": "0",
@@ -495,6 +499,152 @@ enum FacebookAPILoginClient {
         "x-fb-request-analytics-tags": "{\"network_tags\":{\"product\":\"350685531728\",\"retry_attempt\":\"0\"},\"application_tags\":\"unknown\"}",
         "user-agent": "Dalvik/2.1.0 (Linux; U; Android 9; 23113RKC6C Build/PQ3A.190705.08211809) [FBAN/FB4A;FBAV/417.0.0.33.65;FBPN/com.facebook.katana;FBLC/vi_VN;FBBV/480086274;FBCR/MobiFone;FBMF/Redmi;FBBD/Redmi;FBDV/23113RKC6C;FBSV/9;FBCA/x86:armeabi-v7a;FBDM/{density=1.5,width=1280,height=720};FB_FW/1;FBRV/0;]"
     ]
+
+    static func applyFullHeaders(
+        to request: inout URLRequest,
+        url: URL,
+        bodyLength: Int? = nil,
+        cookieString: String? = nil,
+        extraHeaders: [String: String] = [:]
+    ) {
+        // 1. Toàn bộ 17 header chữ thường y hệt 1767528775-Login2FaConvertToken.py
+        for (k, v) in baseHeaders {
+            request.setValue(v, forHTTPHeaderField: k)
+        }
+
+        // 2. Bổ sung các header HTTP tiêu chuẩn (Title-Case) như requests.Session() của Python
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("OAuth null", forHTTPHeaderField: "Authorization")
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
+        request.setValue("gzip, deflate", forHTTPHeaderField: "Accept-Encoding")
+        request.setValue("keep-alive", forHTTPHeaderField: "Connection")
+
+        if let host = url.host {
+            request.setValue(host, forHTTPHeaderField: "Host")
+        }
+
+        if let len = bodyLength {
+            request.setValue("\(len)", forHTTPHeaderField: "Content-Length")
+        }
+
+        // 3. Header Cookie phiên (tự động mang datr, fr và cookie từ request 1 sang 2FA)
+        if let cookieStr = cookieString, !cookieStr.isEmpty {
+            request.setValue(cookieStr, forHTTPHeaderField: "Cookie")
+            request.setValue(cookieStr, forHTTPHeaderField: "cookie")
+        }
+
+        // 4. Header bổ sung nếu có
+        for (k, v) in extraHeaders {
+            request.setValue(v, forHTTPHeaderField: k)
+        }
+    }
+
+    /// Bộ điều khiển HTTP Session tương đương `requests.Session()` trong 1767528775-Login2FaConvertToken.py:
+    /// - Lưu trữ toàn bộ cookie xuyên suốt giữa request đăng nhập lần 1 và request 2FA.
+    /// - Thu thập cookie từ response headers (kể cả khi Facebook trả mã lỗi HTTP 400 Bad Request / 401 Unauthorized khi yêu cầu 2FA).
+    /// - Tự động đính kèm đầy đủ 100% header vào TẤT CẢ các request (đặc biệt là 2FA).
+    final class SessionClient {
+        let session: URLSession
+        var cookies: [String: String] = [:]
+
+        init(initialDatr: String? = nil) {
+            let config = URLSessionConfiguration.default
+            config.timeoutIntervalForRequest = 30
+            config.timeoutIntervalForResource = 60
+            config.httpAdditionalHeaders = [
+                "User-Agent": FacebookAPILoginClient.userAgent,
+                "Accept": "*/*",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive"
+            ]
+            self.session = URLSession(configuration: config)
+            if let datr = initialDatr, !datr.isEmpty {
+                self.cookies["datr"] = datr
+            }
+        }
+
+        func cookieHeaderString() -> String {
+            cookies.map { "\($0.key)=\($0.value)" }.joined(separator: "; ")
+        }
+
+        func post(
+            url: URL,
+            params: [String: String],
+            extraHeaders: [String: String] = [:]
+        ) async throws -> [String: Any] {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 30
+
+            let bodyData = FacebookAPILoginClient.formEncode(params)
+            request.httpBody = bodyData
+
+            FacebookAPILoginClient.applyFullHeaders(
+                to: &request,
+                url: url,
+                bodyLength: bodyData.count,
+                cookieString: cookieHeaderString(),
+                extraHeaders: extraHeaders
+            )
+
+            let (respData, rawResponse) = try await session.data(for: request)
+
+            // Trích xuất Set-Cookie từ response headers kể cả khi Facebook trả về lỗi 400/401 (cực kỳ quan trọng cho 2FA)
+            if let http = rawResponse as? HTTPURLResponse {
+                var headerMap: [String: String] = [:]
+                for (k, v) in http.allHeaderFields {
+                    if let ks = k as? String, let vs = v as? String {
+                        headerMap[ks] = vs
+                    }
+                }
+                if let targetURL = http.url {
+                    let parsed = HTTPCookie.cookies(withResponseHeaderFields: headerMap, for: targetURL)
+                    for c in parsed {
+                        self.cookies[c.name] = c.value
+                    }
+                }
+                if let setCookieHeader = headerMap["Set-Cookie"] ?? headerMap["set-cookie"] {
+                    extractCookiesFromRawHeader(setCookieHeader)
+                }
+            }
+
+            guard let json = try? JSONSerialization.jsonObject(with: respData) as? [String: Any] else {
+                let text = String(data: respData, encoding: .utf8) ?? ""
+                let code = (rawResponse as? HTTPURLResponse)?.statusCode ?? 0
+                throw SpaceLoginError.apiError("Phản hồi máy chủ (HTTP \(code)) không phải JSON hợp lệ: \(text.prefix(200))")
+            }
+
+            // Thu thập thêm session_cookies nếu phản hồi JSON chứa sẵn
+            if let rawCookies = json["session_cookies"] as? [[String: Any]] {
+                for c in rawCookies {
+                    if let name = c["name"] as? String, let val = c["value"] as? String {
+                        self.cookies[name] = val
+                    }
+                }
+            }
+
+            return json
+        }
+
+        private func extractCookiesFromRawHeader(_ header: String) {
+            let parts = header.components(separatedBy: ",")
+            for part in parts {
+                let pairs = part.components(separatedBy: ";")
+                if let first = pairs.first {
+                    let kv = first.split(separator: "=", maxSplits: 1).map(String.init)
+                    if kv.count == 2 {
+                        let k = kv[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                        let v = kv[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                        let lower = k.lowercased()
+                        if !k.isEmpty && !v.isEmpty && lower != "path" && lower != "domain" && lower != "expires" && lower != "max-age" && lower != "samesite" {
+                            self.cookies[k] = v
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     static func generateMachineId() -> String {
         let chars = Array("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
@@ -573,7 +723,11 @@ enum FacebookAPILoginClient {
         return (items, FacebookAppTokens.formatCookieString(items))
     }
 
-    static func convertToken(_ accessToken: String, app: FacebookAppTokens.AppInfo, session: URLSession = .shared) async -> ConvertedTokenRecord? {
+    static func convertToken(
+        _ accessToken: String,
+        app: FacebookAppTokens.AppInfo,
+        client: SessionClient? = nil
+    ) async -> ConvertedTokenRecord? {
         let endpoints = [
             "https://api.facebook.com/method/auth.getSessionforApp",
             "https://b-api.facebook.com/method/auth.getSessionforApp"
@@ -584,20 +738,14 @@ enum FacebookAPILoginClient {
             "new_app_id": app.appId,
             "generate_session_cookies": "1"
         ]
-        let bodyData = formEncode(bodyParams)
+
+        let sessionClient = client ?? SessionClient()
 
         for ep in endpoints {
             guard let url = URL(string: ep) else { continue }
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "content-type")
-            request.setValue("Dalvik/2.1.0 (Linux; U; Android 9; 23113RKC6C Build/PQ3A.190705.08211809) [FBAN/FB4A;FBAV/417.0.0.33.65;FBPN/com.facebook.katana;FBLC/vi_VN;FBBV/480086274;FBCR/MobiFone;FBMF/Redmi;FBBD/Redmi;FBDV/23113RKC6C;FBSV/9;FBCA/x86:armeabi-v7a;FBDM/{density=1.5,width=1280,height=720};FB_FW/1;FBRV/0;]", forHTTPHeaderField: "user-agent")
-            request.httpBody = bodyData
-
             do {
-                let (data, _) = try await session.data(for: request)
-                guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let token = json["access_token"] as? String, !token.isEmpty else {
+                let json = try await sessionClient.post(url: url, params: bodyParams)
+                guard let token = json["access_token"] as? String, !token.isEmpty else {
                     continue
                 }
                 let prefix = FacebookAppTokens.extractTokenPrefix(token)
@@ -618,10 +766,13 @@ enum FacebookAPILoginClient {
         return nil
     }
 
-    static func convertAllTokens(from originalToken: String, session: URLSession = .shared) async -> [String: ConvertedTokenRecord] {
+    static func convertAllTokens(
+        from originalToken: String,
+        client: SessionClient? = nil
+    ) async -> [String: ConvertedTokenRecord] {
         var converted: [String: ConvertedTokenRecord] = [:]
         for app in FacebookAppTokens.allApps {
-            if let record = await convertToken(originalToken, app: app, session: session) {
+            if let record = await convertToken(originalToken, app: app, client: client) {
                 converted[app.key] = record
             }
         }
@@ -791,23 +942,9 @@ enum FacebookAPILoginClient {
             throw SpaceLoginError.invalid
         }
 
-        // 1. Tạo session riêng biệt lưu cookie xuyên suốt các request (chuẩn requests.Session() của 1767528775-Login2FaConvertToken.py)
-        let sessionConfig = URLSessionConfiguration.default
-        let cookieJar = HTTPCookieStorage()
-        sessionConfig.httpCookieStorage = cookieJar
-        sessionConfig.httpCookieAcceptPolicy = .always
-        sessionConfig.httpShouldSetCookies = true
-        let authSession = URLSession(configuration: sessionConfig)
-
-        // 2. Chuẩn bị định danh thiết bị & Machine ID
-        let savedRecord = spaceId.flatMap { try? SecureLoginStore.read($0) }
-        let deviceId = (savedRecord?.deviceId?.isEmpty == false) ? savedRecord!.deviceId! : UUID().uuidString.lowercased()
-        let adid = (savedRecord?.adid?.isEmpty == false) ? savedRecord!.adid! : UUID().uuidString.lowercased()
-        let secureFamilyDeviceId = UUID().uuidString.lowercased()
-        let simSerial = (savedRecord?.simSerial?.isEmpty == false) ? savedRecord!.simSerial! : generateSimSerial()
-        let jazoest = randomDigits(5)
-
+        // 1. Tạo session riêng biệt lưu cookie và mang đầy đủ 100% header (chuẩn requests.Session() của 1767528775-Login2FaConvertToken.py)
         let resolvedMachineId: String
+        let savedRecord = spaceId.flatMap { try? SecureLoginStore.read($0) }
         let trimmedInputMachine = machineId?.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedSavedMachine = savedRecord?.machineId.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -824,18 +961,14 @@ enum FacebookAPILoginClient {
             resolvedMachineId = generateMachineId()
         }
 
-        // Nếu có datr, pre-seed vào cookie jar để FB nhận diện trình duyệt
-        if resolvedMachineId.count >= 20 {
-            if let datrCookie = HTTPCookie(properties: [
-                .name: "datr",
-                .value: resolvedMachineId,
-                .domain: ".facebook.com",
-                .path: "/",
-                .secure: "TRUE"
-            ]) {
-                cookieJar.setCookie(datrCookie)
-            }
-        }
+        let client = SessionClient(initialDatr: resolvedMachineId.count >= 20 ? resolvedMachineId : nil)
+
+        // 2. Chuẩn bị định danh thiết bị
+        let deviceId = (savedRecord?.deviceId?.isEmpty == false) ? savedRecord!.deviceId! : UUID().uuidString.lowercased()
+        let adid = (savedRecord?.adid?.isEmpty == false) ? savedRecord!.adid! : UUID().uuidString.lowercased()
+        let secureFamilyDeviceId = UUID().uuidString.lowercased()
+        let simSerial = (savedRecord?.simSerial?.isEmpty == false) ? savedRecord!.simSerial! : generateSimSerial()
+        let jazoest = randomDigits(5)
 
         // 3. Mã hóa mật khẩu chuẩn #PWD_FB4A:2 theo 1767528775-Login2FaConvertToken.py
         let encryptedPassword: String
@@ -889,7 +1022,7 @@ enum FacebookAPILoginClient {
         ]
 
         onStatusUpdate?("Đang gửi yêu cầu đăng nhập...")
-        let responseJson = try await sendAuthRequest(url: apiURL, params: loginParams, session: authSession)
+        let responseJson = try await client.post(url: apiURL, params: loginParams)
 
         // 5. Nếu đăng nhập thành công ngay (không có 2FA)
         if let token = responseJson["access_token"] as? String, !token.isEmpty {
@@ -907,7 +1040,7 @@ enum FacebookAPILoginClient {
                 pendingUid: cleanUser
             )
             onStatusUpdate?("Đăng nhập thành công! Đang convert sang 6 App Token...")
-            return await buildVault(uid: cleanUser, responseJson: responseJson, convertAll: convertAll, session: authSession)
+            return await buildVault(uid: cleanUser, responseJson: responseJson, convertAll: convertAll, client: client)
         }
 
         // 6. Xử lý phản hồi lỗi hoặc yêu cầu 2FA
@@ -963,7 +1096,7 @@ enum FacebookAPILoginClient {
 
                 onStatusUpdate?("Đang xác thực 2FA (\(otpCode))...")
 
-                // Payload 2FA CHUẨN DUY NHẤT theo 1767528775-Login2FaConvertToken.py (dùng chung authSession để giữ datr/fr cookie)
+                // Payload 2FA CHUẨN DUY NHẤT theo 1767528775-Login2FaConvertToken.py (dùng chung client để mang đầy đủ 100% header và session cookies)
                 let data2FA: [String: String] = [
                     "locale": "vi_VN",
                     "format": "json",
@@ -981,7 +1114,7 @@ enum FacebookAPILoginClient {
                     "machine_id": firstFactor
                 ]
 
-                let response2FA = try await sendAuthRequest(url: apiURL, params: data2FA, session: authSession)
+                let response2FA = try await client.post(url: apiURL, params: data2FA)
                 if let token2FA = response2FA["access_token"] as? String, !token2FA.isEmpty {
                     let finalMachine = (response2FA["machine_id"] as? String) ?? firstFactor
                     persistLoginDeviceState(
@@ -997,7 +1130,7 @@ enum FacebookAPILoginClient {
                         pendingUid: uidValue
                     )
                     onStatusUpdate?("Xác thực 2FA thành công! Đang convert sang 6 App Token...")
-                    return await buildVault(uid: uidValue, responseJson: response2FA, convertAll: convertAll, session: authSession)
+                    return await buildVault(uid: uidValue, responseJson: response2FA, convertAll: convertAll, client: client)
                 }
 
                 if let err2FA = extractErrorInfo(from: response2FA) {
@@ -1030,7 +1163,7 @@ enum FacebookAPILoginClient {
                     "fb_api_req_friendly_name": "authenticate",
                     "fb_api_caller_class": "com.facebook.account.login.protocol.Fb4aAuthHandler"
                 ]
-                if let jsonApp = try? await sendAuthRequest(url: apiURL, params: approvalParams, session: authSession),
+                if let jsonApp = try? await client.post(url: apiURL, params: approvalParams),
                    let tok = jsonApp["access_token"] as? String, !tok.isEmpty {
                     persistLoginDeviceState(
                         spaceId: spaceId,
@@ -1044,7 +1177,7 @@ enum FacebookAPILoginClient {
                         pendingFirstFactor: "",
                         pendingUid: uidValue
                     )
-                    return await buildVault(uid: uidValue, responseJson: jsonApp, convertAll: convertAll, session: authSession)
+                    return await buildVault(uid: uidValue, responseJson: jsonApp, convertAll: convertAll, client: client)
                 }
 
                 throw SpaceLoginError.apiError("Facebook yêu cầu phê duyệt trên ứng dụng đã đăng nhập trước đó (Login Approvals).\n• Hãy mở app Facebook trên điện thoại hoặc trình duyệt để bấm 'Phê duyệt'.\n• Sau đó bấm 'Đăng nhập API' lại.")
@@ -1068,12 +1201,21 @@ enum FacebookAPILoginClient {
         uid: String,
         responseJson: [String: Any],
         convertAll: Bool,
-        session: URLSession = .shared
+        client: SessionClient? = nil
     ) async -> SpaceTokenVault {
         let originalToken = (responseJson["access_token"] as? String) ?? ""
         let originalPrefix = FacebookAppTokens.extractTokenPrefix(originalToken)
-        let parsedCookies = extractCookies(from: responseJson)
-        let converted = convertAll ? await convertAllTokens(from: originalToken, session: session) : [:]
+        var parsedCookies = extractCookies(from: responseJson)
+
+        if parsedCookies.items.isEmpty, let clientCookies = client?.cookies, !clientCookies.isEmpty {
+            var items: [FacebookCookieItem] = []
+            for (name, val) in clientCookies {
+                items.append(FacebookCookieItem(name: name, value: val, domain: ".facebook.com", path: "/"))
+            }
+            parsedCookies = (items, FacebookAppTokens.formatCookieString(items))
+        }
+
+        let converted = convertAll ? await convertAllTokens(from: originalToken, client: client) : [:]
 
         var resolvedUID = uid
         if let cUser = parsedCookies.items.first(where: { $0.name == "c_user" })?.value, !cUser.isEmpty {
