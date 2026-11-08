@@ -86,3 +86,26 @@ Bất kể token gốc lấy được là `EAAB...` (Web/Ads) hay `EAAAAU...` (A
   - Luôn đi qua hàm làm sạch chuỗi `cleanAccessToken`.
   - Luôn sử dụng `SmartPostAPIClient.validateAccessToken` để kiểm tra tính hợp lệ trước khi gửi dữ liệu.
   - Ưu tiên chọn `FB_ANDROID` hoặc User Token có quyền hạn đăng bài.
+
+---
+
+## 6. Quy chuẩn UI/UX & Đăng bài Smart Post, Lên lịch & Theo dõi tương tác
+
+1. **Chuẩn Trạng thái Thông báo Lịch đăng (`ScheduledTaskStatus`)**:
+   - Nếu toàn bộ tài khoản đăng thành công: trạng thái là `.completed` ("Hoàn thành").
+   - Nếu ít nhất 1 tài khoản/nhóm thành công (ví dụ 1/2 thành công): trạng thái là `.partial` ("Thành công 1 phần"), badge màu `#8FBC8F` (không được hiển thị badge đỏ "Thất bại" gây nhầm lẫn).
+   - Chỉ khi 0 tài khoản thành công: trạng thái mới là `.failed` ("Thất bại").
+   - Cung cấp nút trực tiếp "Theo dõi bài này" trên mỗi thẻ lịch đăng để bóc tách ID bài viết và đăng ký sang `TrackedPostManager` chỉ với 1 chạm.
+
+2. **Tương tác Tự động (Auto Reaction & Bình luận mồi)**:
+   - Hỗ trợ chọn cảm xúc (`LIKE`, `LOVE`, `CARE`, `HAHA`, `WOW`, `SAD`, `ANGER`).
+   - Tỷ lệ thả Reaction ngẫu nhiên (% xác suất từ 10% đến 100%).
+   - Tự động gắn 1 bình luận đầu tiên ngay sau khi xuất bản bài viết thành công (áp dụng cho cả đăng trực tiếp và lên lịch tự động).
+
+3. **Giao diện & Tone Màu Chủ Đạo**:
+   - Toàn bộ app sử dụng tone màu `#8FBC8F` (Dark Sea Green, RGB: 143, 188, 143) và màu trắng làm chủ đạo, kết hợp điểm nhấn đậm `#75A075` (RGB: 117, 160, 117) và nền pastel mờ 14%.
+   - Loại bỏ hoàn toàn các màu cam/xanh/tím chói mắt gây xung đột giao diện.
+   - Các nút thao tác ("Thống kê", "Trả lời nhanh", "DS Cmt", "AI Reply") được bố trí trong `ScrollView(.horizontal)` với `.lineLimit(1)` và `.fixedSize()` chống tràn/xuống dòng trên mọi kích thước màn hình iPhone.
+   - Bộ chọn Quyền riêng tư dạng 3-Card/Pill selector hiện đại (🌐 Công khai, 👥 Bạn bè, 🔒 Chỉ mình tôi).
+   - Bộ tìm kiếm nhanh Nhóm và Fanpage (`destinationSearchText`) lọc theo tên và ID.
+

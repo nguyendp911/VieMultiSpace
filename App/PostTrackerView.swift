@@ -2130,42 +2130,54 @@ struct PostTrackerView: View {
                 .buttonStyle(.plain)
 
                 // Menu phụ gọn gàng
-                Menu {
-                    if let url = URL(string: post.postUrl) {
-                        Link(destination: url) {
-                            Label("Mở bài viết trên trình duyệt", systemImage: "safari")
-                        }
-                    }
-                    Button {
-                        Task {
-                            await tracker.convertPostURL(id: post.id, space: space)
-                        }
-                    } label: {
-                        Label("Chuyển đổi URL chuẩn (MultiSpace)", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    Button {
-                        UIPasteboard.general.string = post.postUrl
-                        tracker.statusBanner = "📋 Đã sao chép URL bài viết!"
-                    } label: {
-                        Label("Sao chép URL bài viết", systemImage: "doc.on.doc")
-                    }
-                    Button {
-                        UIPasteboard.general.string = post.postId
-                        tracker.statusBanner = "📋 Đã sao chép ID: \(post.postId)"
-                    } label: {
-                        Label("Sao chép Post ID", systemImage: "number")
-                    }
-                    Divider()
+                HStack(spacing: 6) {
                     Button(role: .destructive) {
                         tracker.removePost(post)
                     } label: {
-                        Label("Xóa khỏi danh sách theo dõi", systemImage: "trash")
+                        Image(systemName: "trash")
+                            .font(.caption)
+                            .foregroundStyle(.red.opacity(0.75))
+                            .padding(2)
                     }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .padding(2)
+                    .buttonStyle(.plain)
+
+                    Menu {
+                        if let url = URL(string: post.postUrl) {
+                            Link(destination: url) {
+                                Label("Mở bài viết trên trình duyệt", systemImage: "safari")
+                            }
+                        }
+                        Button {
+                            Task {
+                                await tracker.convertPostURL(id: post.id, space: space)
+                            }
+                        } label: {
+                            Label("Chuyển đổi URL chuẩn (MultiSpace)", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        Button {
+                            UIPasteboard.general.string = post.postUrl
+                            tracker.statusBanner = "📋 Đã sao chép URL bài viết!"
+                        } label: {
+                            Label("Sao chép URL bài viết", systemImage: "doc.on.doc")
+                        }
+                        Button {
+                            UIPasteboard.general.string = post.postId
+                            tracker.statusBanner = "📋 Đã sao chép ID: \(post.postId)"
+                        } label: {
+                            Label("Sao chép Post ID", systemImage: "number")
+                        }
+                        Divider()
+                        Button(role: .destructive) {
+                            tracker.removePost(post)
+                        } label: {
+                            Label("Xóa khỏi danh sách theo dõi", systemImage: "trash")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .padding(2)
+                    }
                 }
             }
 
@@ -2301,87 +2313,96 @@ struct PostTrackerView: View {
 
             Divider()
 
-            // Dòng 4: Các Button thao tác được trang trí gọn gàng (#8FBC8F và trắng)
-            HStack(spacing: 8) {
-                // 1. Nút Làm mới thống kê
-                Button {
-                    Task {
-                        await tracker.syncSinglePost(id: post.id, space: space)
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        if isSyncing {
-                            ProgressView().controlSize(.mini)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                        Text("Thống kê")
-                    }
-                }
-                .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
-                .disabled(isSyncing)
-
-                // 2. Nút Trả lời nhanh trực tiếp
-                Button {
-                    withAnimation(.spring(response: 0.25)) {
-                        if quickReplyPostId == post.id {
-                            quickReplyPostId = nil
-                        } else {
-                            quickReplyPostId = post.id
-                            quickReplyText = ""
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "text.bubble.fill")
-                        Text("Trả lời nhanh")
-                    }
-                }
-                .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
-
-                // 3. Nút Xem DS Bình luận & Tick chọn trả lời chi tiết
-                Button {
-                    activeReplyPost = post
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "list.bullet.indent")
-                        Text("DS Cmt (\(post.comments.count))")
-                    }
-                }
-                .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
-
-                Spacer(minLength: 0)
-
-                // 4. Nút Chạy AI trả lời ngay cho bài viết này
-                Button {
-                    let key = geminiApiKey.isEmpty ? SecureGeminiStore.readKey() : geminiApiKey
-                    if key.isEmpty {
-                        showAISettingsSheet = true
-                    } else {
+            // Dòng 4: Các Button thao tác thiết kế chống tràn dòng (#8FBC8F và trắng)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    // 1. Nút Làm mới thống kê
+                    Button {
                         Task {
-                            _ = await tracker.runAIReplyForPost(
-                                postItemId: post.id,
-                                specificCommentIds: nil,
-                                replyDirectlyToPostIfNoComments: true,
-                                actingSpace: space,
-                                geminiApiKey: key,
-                                geminiModel: geminiModel,
-                                globalStylePrompt: aiStylePrompt
-                            )
+                            await tracker.syncSinglePost(id: post.id, space: space)
                         }
+                    } label: {
+                        HStack(spacing: 5) {
+                            if isSyncing {
+                                ProgressView().controlSize(.mini)
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                            }
+                            Text("Thống kê")
+                                .lineLimit(1)
+                        }
+                        .fixedSize(horizontal: true, vertical: false)
                     }
-                } label: {
-                    HStack(spacing: 4) {
-                        if isAIRunning {
-                            ProgressView().tint(.white).controlSize(.mini)
+                    .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
+                    .disabled(isSyncing)
+
+                    // 2. Nút Trả lời nhanh trực tiếp
+                    Button {
+                        withAnimation(.spring(response: 0.25)) {
+                            if quickReplyPostId == post.id {
+                                quickReplyPostId = nil
+                            } else {
+                                quickReplyPostId = post.id
+                                quickReplyText = ""
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "text.bubble.fill")
+                            Text("Trả lời nhanh")
+                                .lineLimit(1)
+                        }
+                        .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
+
+                    // 3. Nút Xem DS Bình luận & Tick chọn trả lời chi tiết
+                    Button {
+                        activeReplyPost = post
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "list.bullet.indent")
+                            Text("DS Cmt (\(post.comments.count))")
+                                .lineLimit(1)
+                        }
+                        .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
+
+                    // 4. Nút Chạy AI trả lời ngay cho bài viết này
+                    Button {
+                        let key = geminiApiKey.isEmpty ? SecureGeminiStore.readKey() : geminiApiKey
+                        if key.isEmpty {
+                            showAISettingsSheet = true
                         } else {
-                            Image(systemName: "sparkles")
+                            Task {
+                                _ = await tracker.runAIReplyForPost(
+                                    postItemId: post.id,
+                                    specificCommentIds: nil,
+                                    replyDirectlyToPostIfNoComments: true,
+                                    actingSpace: space,
+                                    geminiApiKey: key,
+                                    geminiModel: geminiModel,
+                                    globalStylePrompt: aiStylePrompt
+                                )
+                            }
                         }
-                        Text("AI Reply")
+                    } label: {
+                        HStack(spacing: 5) {
+                            if isAIRunning {
+                                ProgressView().tint(.white).controlSize(.mini)
+                            } else {
+                                Image(systemName: "sparkles")
+                            }
+                            Text("AI Reply")
+                                .lineLimit(1)
+                        }
+                        .fixedSize(horizontal: true, vertical: false)
                     }
+                    .buttonStyle(GradientPillButtonStyle(colors: [.trackerPrimary, .trackerPrimaryDark], isCompact: true))
+                    .disabled(isAIRunning)
                 }
-                .buttonStyle(GradientPillButtonStyle(colors: [.trackerPrimary, .trackerPrimaryDark], isCompact: true))
-                .disabled(isAIRunning)
+                .padding(.vertical, 2)
             }
         }
         .padding(12)

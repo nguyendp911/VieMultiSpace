@@ -51,12 +51,28 @@ struct FacebookDestinationItem: Identifiable, Codable, Hashable {
     }
 }
 
+// MARK: - Smart Post Theme Colors (#8FBC8F & Trắng làm chủ đạo)
+
+extension Color {
+    static let themePrimary = Color(red: 143/255, green: 188/255, blue: 143/255)
+    static let themePrimaryDark = Color(red: 117/255, green: 160/255, blue: 117/255)
+    static let themeBackgroundPastel = Color(red: 143/255, green: 188/255, blue: 143/255).opacity(0.14)
+}
+
 enum SmartPostPrivacy: String, CaseIterable, Identifiable, Codable {
     case everyone = "Công khai (EVERYONE)"
     case friends = "Bạn bè (FRIENDS)"
     case onlyMe = "Chỉ mình tôi (ONLY_ME)"
 
     var id: String { rawValue }
+
+    var shortName: String {
+        switch self {
+        case .everyone: return "Công khai"
+        case .friends: return "Bạn bè"
+        case .onlyMe: return "Chỉ mình tôi"
+        }
+    }
 
     var apiKey: String {
         switch self {
@@ -98,13 +114,15 @@ enum ScheduledTaskStatus: String, Codable {
     case pending = "Chờ đăng"
     case running = "Đang chạy"
     case completed = "Hoàn thành"
+    case partial = "Thành công 1 phần"
     case failed = "Thất bại"
 
     var badgeColor: Color {
         switch self {
         case .pending: return .blue
         case .running: return .orange
-        case .completed: return .green
+        case .completed: return Color.themePrimary
+        case .partial: return Color.themePrimary
         case .failed: return .red
         }
     }
@@ -124,6 +142,10 @@ struct ScheduledPostTask: Identifiable, Codable {
     var videoFileName: String?
     var createdAt: Date = Date()
     var executionLog: String?
+    var autoReact: Bool? = false
+    var reactionType: String? = "LIKE"
+    var reactionRate: Double? = 100.0
+    var firstComment: String? = nil
 }
 
 // MARK: - Scheduled Post Storage Manager
@@ -162,7 +184,11 @@ final class ScheduledPostManager: ObservableObject {
         targetDestinations: [FacebookDestinationItem] = [],
         scheduledDate: Date,
         images: [UIImage],
-        videoData: Data?
+        videoData: Data?,
+        autoReact: Bool = false,
+        reactionType: String = "LIKE",
+        reactionRate: Double = 100.0,
+        firstComment: String? = nil
     ) {
         var savedImageNames: [String] = []
         let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -199,10 +225,20 @@ final class ScheduledPostManager: ObservableObject {
             scheduledDate: scheduledDate,
             status: .pending,
             imageFileNames: savedImageNames,
-            videoFileName: savedVideoName
+            videoFileName: savedVideoName,
+            autoReact: autoReact,
+            reactionType: reactionType,
+            reactionRate: reactionRate,
+            firstComment: firstComment
         )
 
         tasks.append(newTask)
+        saveTasks()
+    }
+
+    func updateTask(_ task: ScheduledPostTask) {
+        guard let idx = tasks.firstIndex(where: { $0.id == task.id }) else { return }
+        tasks[idx] = task
         saveTasks()
     }
 
@@ -247,14 +283,20 @@ final class ScheduledPostManager: ObservableObject {
                 saveTasks()
 
                 let resultLog = await executeTask(task)
-                tasks[idx].status = resultLog.allSuccess ? .completed : .failed
+                if resultLog.successCount == resultLog.totalCount && resultLog.totalCount > 0 {
+                    tasks[idx].status = .completed
+                } else if resultLog.successCount > 0 {
+                    tasks[idx].status = .partial
+                } else {
+                    tasks[idx].status = .failed
+                }
                 tasks[idx].executionLog = resultLog.summary
                 saveTasks()
             }
         }
     }
 
-    private func executeTask(_ task: ScheduledPostTask) async -> (allSuccess: Bool, summary: String) {
+    private func executeTask(_ task: ScheduledPostTask) async -> (successCount: Int, totalCount: Int, summary: String) {
         let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         var loadedImages: [UIImage] = []
         for name in task.imageFileNames {
@@ -315,6 +357,9 @@ final class ScheduledPostManager: ObservableObject {
                             caption: task.caption,
                             enableAIAutoReply: true
                         )
+
+                        // Thả cảm xúc & bình luận đầu tiên
+                        await triggerPostReactionAndComment(postId: vid, task: task, token: token, logs: &logs)
                     } else {
                         var pids: [String] = []
                         for img in loadedImages {
@@ -334,6 +379,9 @@ final class ScheduledPostManager: ObservableObject {
                             caption: task.caption,
                             enableAIAutoReply: true
                         )
+
+                        // Thả cảm xúc & bình luận đầu tiên
+                        await triggerPostReactionAndComment(postId: res.postId, task: task, token: token, logs: &logs)
                     }
                 } catch {
                     let cleanErr = SmartPostAPIClient.formatFacebookAPIError(error.localizedDescription)
@@ -360,6 +408,9 @@ final class ScheduledPostManager: ObservableObject {
                                 caption: task.caption,
                                 enableAIAutoReply: true
                             )
+
+                            // Thả cảm xúc & bình luận đầu tiên
+                            await triggerPostReactionAndComment(postId: vid, task: task, token: effectiveToken, logs: &logs)
                         } else {
                             var pids: [String] = []
                             for img in loadedImages {
@@ -388,6 +439,9 @@ final class ScheduledPostManager: ObservableObject {
                                 caption: task.caption,
                                 enableAIAutoReply: true
                             )
+
+                            // Thả cảm xúc & bình luận đầu tiên
+                            await triggerPostReactionAndComment(postId: res.postId, task: task, token: effectiveToken, logs: &logs)
                         }
                     } catch {
                         let cleanErr = SmartPostAPIClient.formatFacebookAPIError(error.localizedDescription)
@@ -400,11 +454,44 @@ final class ScheduledPostManager: ObservableObject {
         let df = DateFormatter()
         df.dateFormat = "dd/MM/yyyy, HH:mm"
         let timestamp = df.string(from: Date())
-        let summary = "Kết quả: \(successCount)/\(totalCount) thành công lúc \(timestamp)\n" + logs.joined(separator: "\n")
-        return (allSuccess: successCount > 0 && successCount == totalCount, summary: summary)
+        let statusText = successCount == totalCount ? "Hoàn thành" : (successCount > 0 ? "Thành công \(successCount)/\(totalCount)" : "Thất bại")
+        let summary = "Kết quả: \(successCount)/\(totalCount) thành công (\(statusText)) lúc \(timestamp)\n" + logs.joined(separator: "\n")
+        return (successCount: successCount, totalCount: totalCount, summary: summary)
+    }
+
+    private func triggerPostReactionAndComment(
+        postId: String,
+        task: ScheduledPostTask,
+        token: String,
+        logs: inout [String]
+    ) async {
+        // 1. Thả Reaction theo tỷ lệ %
+        if task.autoReact == true {
+            let rate = task.reactionRate ?? 100.0
+            let roll = Double.random(in: 0...100)
+            if roll <= rate {
+                let rType = FacebookReactionType(rawValue: task.reactionType ?? "LIKE") ?? .like
+                let reactRes = await SmartPostAPIClient.reactToPost(postId: postId, reaction: rType, accessToken: token)
+                if reactRes.success {
+                    logs.append("👍 Đã thả cảm xúc \(rType.displayName) (\(Int(rate))%)")
+                }
+            }
+        }
+
+        // 2. Gắn bình luận đầu tiên
+        if let fc = task.firstComment?.trimmingCharacters(in: .whitespacesAndNewlines), !fc.isEmpty {
+            let cmtRes = await SmartPostAPIClient.commentOnPost(postId: postId, commentText: fc, accessToken: token)
+            if cmtRes.success {
+                logs.append("💬 Đã gắn bình luận đầu tiên: \"\(fc)\"")
+            }
+        }
     }
 }
 
+
+extension FacebookReactionType {
+    var displayName: String { label }
+}
 
 // MARK: - Smart Post API Engine
 
@@ -426,6 +513,92 @@ enum SmartPostAPIClient {
         "x-fb-server-cluster": "True"
     ]
 
+    /// Thả Reaction vào bài viết Facebook qua Graph API
+    static func reactToPost(
+        postId: String,
+        reaction: FacebookReactionType,
+        accessToken: String
+    ) async -> (success: Bool, message: String) {
+        let cleanToken = cleanAccessToken(accessToken)
+        guard !cleanToken.isEmpty else { return (false, "Token rỗng") }
+        let reactionValue: String = {
+            switch reaction {
+            case .like: return "LIKE"
+            case .love: return "LOVE"
+            case .care: return "CARE"
+            case .haha: return "HAHA"
+            case .wow: return "WOW"
+            case .sad: return "SAD"
+            case .anger: return "ANGRY"
+            case .random, .geminiAuto:
+                return ["LIKE", "LOVE", "CARE", "HAHA", "WOW"].randomElement() ?? "LIKE"
+            }
+        }()
+
+        let cleanPostId = postId.components(separatedBy: "_").last ?? postId
+        let targets = [postId, cleanPostId]
+        let endpoints = [
+            "https://graph.facebook.com",
+            "https://b-graph.facebook.com"
+        ]
+
+        for base in endpoints {
+            for target in targets {
+                guard let url = URL(string: "\(base)/\(target)/reactions") else { continue }
+                var req = URLRequest(url: url, timeoutInterval: 12)
+                req.httpMethod = "POST"
+                req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                req.setValue("OAuth \(cleanToken)", forHTTPHeaderField: "authorization")
+                for (k, v) in fbHeaders { req.setValue(v, forHTTPHeaderField: k) }
+                req.httpBody = "type=\(reactionValue)".data(using: .utf8)
+                if let (_, resp) = try? await URLSession.shared.data(for: req),
+                   let http = resp as? HTTPURLResponse, (http.statusCode == 200 || http.statusCode == 201) {
+                    return (true, "Thả cảm xúc \(reaction.displayName) thành công")
+                }
+            }
+        }
+        return (false, "Không thể thả cảm xúc")
+    }
+
+    /// Đăng bình luận đầu tiên vào bài viết Facebook qua Graph API
+    static func commentOnPost(
+        postId: String,
+        commentText: String,
+        accessToken: String
+    ) async -> (success: Bool, message: String) {
+        let cleanText = commentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanText.isEmpty else { return (false, "Nội dung rỗng") }
+        let cleanToken = cleanAccessToken(accessToken)
+        guard !cleanToken.isEmpty else { return (false, "Token rỗng") }
+
+        let cleanPostId = postId.components(separatedBy: "_").last ?? postId
+        let targets = [postId, cleanPostId]
+        let endpoints = [
+            "https://graph.facebook.com",
+            "https://b-graph.facebook.com"
+        ]
+
+        for base in endpoints {
+            for target in targets {
+                guard let url = URL(string: "\(base)/\(target)/comments") else { continue }
+                var req = URLRequest(url: url, timeoutInterval: 15)
+                req.httpMethod = "POST"
+                req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                req.setValue("OAuth \(cleanToken)", forHTTPHeaderField: "authorization")
+                for (k, v) in fbHeaders { req.setValue(v, forHTTPHeaderField: k) }
+                let enc = cleanText.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? cleanText
+                req.httpBody = "message=\(enc)".data(using: .utf8)
+                if let (data, resp) = try? await URLSession.shared.data(for: req),
+                   let http = resp as? HTTPURLResponse, (http.statusCode == 200 || http.statusCode == 201),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let cid = json["id"] as? String, !cid.isEmpty {
+                    return (true, "Đã bình luận ID: \(cid)")
+                }
+            }
+        }
+        return (false, "Không thể bình luận")
+    }
+
     /// Lấy danh sách Trang (Fanpage) do tài khoản quản trị (kèm Page Access Token riêng)
     static func fetchManagedPages(
         accessToken: String,
@@ -433,32 +606,45 @@ enum SmartPostAPIClient {
         spaceName: String
     ) async -> [FacebookDestinationItem] {
         var items: [FacebookDestinationItem] = []
-        guard let url = URL(string: "https://graph.facebook.com/me/accounts?fields=id,name,access_token,category&limit=100") else {
-            return items
-        }
+        var seenIds = Set<String>()
+        let cleanToken = cleanAccessToken(accessToken)
+        guard !cleanToken.isEmpty else { return items }
 
-        var request = URLRequest(url: url, timeoutInterval: 18)
-        request.httpMethod = "GET"
-        for (k, v) in fbHeaders { request.setValue(v, forHTTPHeaderField: k) }
-        request.setValue("OAuth \(accessToken)", forHTTPHeaderField: "authorization")
+        let pageEndpoints = [
+            "https://b-graph.facebook.com/me/accounts?fields=id,name,access_token,category&limit=200",
+            "https://graph.facebook.com/v19.0/me/accounts?fields=id,name,access_token,category&limit=200",
+            "https://graph.facebook.com/me/accounts?fields=id,name,access_token,category&limit=200"
+        ]
 
-        if let (data, _) = try? await URLSession.shared.data(for: request),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let dataArr = json["data"] as? [[String: Any]] {
-            for row in dataArr {
-                guard let id = row["id"] as? String, !id.isEmpty else { continue }
-                let name = (row["name"] as? String) ?? "Fanpage \(id)"
-                let pageToken = row["access_token"] as? String
-                let category = (row["category"] as? String) ?? "Trang Fanpage"
-                items.append(FacebookDestinationItem(
-                    id: id,
-                    name: name,
-                    kind: .fanpage,
-                    pageAccessToken: pageToken,
-                    subtitle: "\(category) • \(spaceName)",
-                    ownerSpaceId: spaceId,
-                    ownerSpaceName: spaceName
-                ))
+        for ep in pageEndpoints {
+            guard let url = URL(string: ep) else { continue }
+            var request = URLRequest(url: url, timeoutInterval: 18)
+            request.httpMethod = "GET"
+            for (k, v) in fbHeaders { request.setValue(v, forHTTPHeaderField: k) }
+            request.setValue("OAuth \(cleanToken)", forHTTPHeaderField: "authorization")
+
+            if let (data, _) = try? await URLSession.shared.data(for: request),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let dataArr = json["data"] as? [[String: Any]], !dataArr.isEmpty {
+                for row in dataArr {
+                    guard let id = row["id"] as? String, !id.isEmpty, !seenIds.contains(id) else { continue }
+                    seenIds.insert(id)
+                    let name = (row["name"] as? String) ?? "Fanpage \(id)"
+                    let pageToken = row["access_token"] as? String
+                    let category = (row["category"] as? String) ?? "Trang Fanpage"
+                    items.append(FacebookDestinationItem(
+                        id: id,
+                        name: name,
+                        kind: .fanpage,
+                        pageAccessToken: pageToken,
+                        subtitle: "\(category) • \(spaceName)",
+                        ownerSpaceId: spaceId,
+                        ownerSpaceName: spaceName
+                    ))
+                }
+                if !items.isEmpty {
+                    break
+                }
             }
         }
         return items
@@ -473,17 +659,30 @@ enum SmartPostAPIClient {
     ) async -> [FacebookDestinationItem] {
         var items: [FacebookDestinationItem] = []
         var seenIds = Set<String>()
+        let cleanToken = cleanAccessToken(accessToken)
 
-        // Tầng 1: Graph API /me/groups
-        if let url = URL(string: "https://graph.facebook.com/me/groups?fields=id,name,privacy,administrator&limit=100") {
-            var request = URLRequest(url: url, timeoutInterval: 18)
+        // Tầng 1: Thử các endpoint Graph API (v19.0, b-graph, graph.facebook.com)
+        let graphURLs = [
+            "https://b-graph.facebook.com/me/groups?fields=id,name,privacy,administrator,icon&limit=200",
+            "https://graph.facebook.com/v19.0/me/groups?fields=id,name,privacy,administrator,icon&limit=200",
+            "https://graph.facebook.com/me/groups?fields=id,name,privacy,administrator&limit=200"
+        ]
+
+        for urlStr in graphURLs {
+            guard let url = URL(string: urlStr) else { continue }
+            var request = URLRequest(url: url, timeoutInterval: 15)
             request.httpMethod = "GET"
             for (k, v) in fbHeaders { request.setValue(v, forHTTPHeaderField: k) }
-            request.setValue("OAuth \(accessToken)", forHTTPHeaderField: "authorization")
+            if !cleanToken.isEmpty {
+                request.setValue("OAuth \(cleanToken)", forHTTPHeaderField: "authorization")
+            }
+            if let c = cookieString, !c.isEmpty {
+                request.setValue(c, forHTTPHeaderField: "Cookie")
+            }
 
             if let (data, _) = try? await URLSession.shared.data(for: request),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let dataArr = json["data"] as? [[String: Any]] {
+               let dataArr = json["data"] as? [[String: Any]], !dataArr.isEmpty {
                 for row in dataArr {
                     guard let id = row["id"] as? String, !id.isEmpty, !seenIds.contains(id) else { continue }
                     seenIds.insert(id)
@@ -500,26 +699,31 @@ enum SmartPostAPIClient {
                         ownerSpaceName: spaceName
                     ))
                 }
+                if !items.isEmpty {
+                    break
+                }
             }
         }
 
-        // Tầng 2: Nếu /me/groups bị giới hạn quyền hoặc trả về rỗng, quét qua mbasic/www bằng Cookie
+        // Tầng 2: Nếu Graph API rỗng, quét qua Mobile/Web bằng Cookie
         if items.isEmpty, let cookie = cookieString, !cookie.isEmpty {
             let groupListURLs = [
-                "https://mbasic.facebook.com/groups/?seemore&refid=27",
+                "https://www.facebook.com/groups/joins/",
+                "https://m.facebook.com/groups/joins/?seemore",
                 "https://m.facebook.com/groups_browse/your_groups/",
-                "https://www.facebook.com/groups/joins/"
+                "https://m.facebook.com/groups/?seemore"
             ]
             for rawUrl in groupListURLs {
                 guard let gUrl = URL(string: rawUrl) else { continue }
                 var req = URLRequest(url: gUrl, timeoutInterval: 15)
                 req.setValue(cookie, forHTTPHeaderField: "Cookie")
-                req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
+                req.setValue(cookie, forHTTPHeaderField: "cookie")
+                req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
                 guard let (data, _) = try? await URLSession.shared.data(for: req),
                       let html = String(data: data, encoding: .utf8) else { continue }
 
-                // Bắt mẫu JSON "id":"123456","name":"Tên Nhóm" hoặc href="/groups/123456..."
-                if let regex = try? NSRegularExpression(pattern: #""Group"[^\}]{0,120}"id"\s*:\s*"(\d{5,25})"[^\}]{0,160}"name"\s*:\s*"([^"]+)""#) {
+                // Bắt pattern 1: "Group", [ ],"id":"123","name":"ABC"
+                if let regex = try? NSRegularExpression(pattern: #"\"Group\"[^\}]{0,150}\"id\"\s*:\s*\"(\d{5,25})\"[^\}]{0,200}\"name\"\s*:\s*\"([^\"]+)\""#) {
                     let nsRange = NSRange(html.startIndex..<html.endIndex, in: html)
                     for match in regex.matches(in: html, range: nsRange) {
                         if let idRange = Range(match.range(at: 1), in: html),
@@ -542,8 +746,8 @@ enum SmartPostAPIClient {
                     }
                 }
 
-                // Bắt mẫu thẻ <a href="/groups/123456789...">Tên nhóm</a> trên mbasic
-                if let aRegex = try? NSRegularExpression(pattern: #"href="/groups/(\d{5,25})(?:\?|/|" )[^>]*>([^<]{2,100})<"#) {
+                // Bắt pattern 2: href="/groups/123456789..."
+                if let aRegex = try? NSRegularExpression(pattern: #"href=[\"']/groups/(\d{5,25})[^\"']*[\"'][^>]*>([^<]{2,120})<"#) {
                     let nsRange = NSRange(html.startIndex..<html.endIndex, in: html)
                     for match in aRegex.matches(in: html, range: nsRange) {
                         if let idRange = Range(match.range(at: 1), in: html),
@@ -551,23 +755,27 @@ enum SmartPostAPIClient {
                             let gid = String(html[idRange])
                             guard !seenIds.contains(gid) else { continue }
                             seenIds.insert(gid)
-                            let gname = String(html[nameRange]).trimmingCharacters(in: .whitespacesAndNewlines)
-                            items.append(FacebookDestinationItem(
-                                id: gid,
-                                name: gname.isEmpty ? "Nhóm \(gid)" : gname,
-                                kind: .group,
-                                pageAccessToken: nil,
-                                subtitle: "Nhóm thành viên • \(spaceName)",
-                                ownerSpaceId: spaceId,
-                                ownerSpaceName: spaceName
-                            ))
+                            let rawName = String(html[nameRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                            let decodedName = FacebookTargetPostResolver.decodeJSONEscapes(rawName)
+                            if !decodedName.isEmpty && !decodedName.contains("http") && decodedName.count > 1 {
+                                items.append(FacebookDestinationItem(
+                                    id: gid,
+                                    name: decodedName,
+                                    kind: .group,
+                                    pageAccessToken: nil,
+                                    subtitle: "Nhóm đã tham gia • \(spaceName)",
+                                    ownerSpaceId: spaceId,
+                                    ownerSpaceName: spaceName
+                                ))
+                            }
                         }
                     }
                 }
-                if !items.isEmpty { break }
+                if !items.isEmpty {
+                    break
+                }
             }
         }
-
         return items
     }
 
@@ -1401,6 +1609,19 @@ struct SmartPostView: View {
     @State private var privacyOption: SmartPostPrivacy = .everyone
     @State private var autoTrackAndAIReply = true
 
+    // Tương tác tự động: Reaction & Bình luận mồi
+    @State private var enableAutoReact = false
+    @State private var selectedReaction: String = "LIKE"
+    @State private var reactionPercentage: Double = 100.0
+    @State private var enableFirstComment = false
+    @State private var firstCommentText = ""
+
+    // Bộ tìm kiếm Nhóm & Trang
+    @State private var destinationSearchText = ""
+
+    // Quản lý sửa lịch đăng
+    @State private var editingTask: ScheduledPostTask? = nil
+
     init(initialTab: Int = 0) {
         _selectedTab = State(initialValue: initialTab)
     }
@@ -1436,28 +1657,28 @@ struct SmartPostView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // Custom Modern 3-Tab Switcher (Gọn gàng & Trang trí đẹp mắt)
+                // Custom Modern 3-Tab Switcher (Gọn gàng & Trang trí đẹp mắt với tone #8FBC8F)
                 HStack(spacing: 6) {
                     smartTabButton(
                         index: 0,
                         title: "Soạn & Đăng",
                         icon: "square.and.pencil",
                         badgeCount: 0,
-                        activeColors: [.blue, .indigo]
+                        activeColors: [Color.themePrimary, Color.themePrimaryDark]
                     )
                     smartTabButton(
                         index: 1,
                         title: "Lịch đăng",
                         icon: "calendar.badge.clock",
                         badgeCount: scheduler.tasks.count,
-                        activeColors: [.orange, .red]
+                        activeColors: [Color.themePrimary, Color.themePrimaryDark]
                     )
                     smartTabButton(
                         index: 2,
                         title: "Theo dõi & AI",
                         icon: "chart.bar.doc.horizontal.fill",
                         badgeCount: tracker.posts.count,
-                        activeColors: [Color(red: 143/255, green: 188/255, blue: 143/255), Color(red: 118/255, green: 163/255, blue: 118/255)]
+                        activeColors: [Color.themePrimary, Color.themePrimaryDark]
                     )
                 }
                 .padding(.horizontal, 12)
@@ -1498,6 +1719,9 @@ struct SmartPostView: View {
                     },
                     filterType: .videos
                 )
+            }
+            .sheet(item: $editingTask) { task in
+                EditScheduleSheet(task: task)
             }
             .alert("Thông báo", isPresented: Binding(
                 get: { alertMessage != nil },
@@ -1565,7 +1789,7 @@ struct SmartPostView: View {
     @ViewBuilder
     private var composeForm: some View {
         Form {
-            // Chế độ thao tác với Icon & Card chuyên nghiệp
+            // Chế độ thao tác với Icon & Card chuyên nghiệp (#8FBC8F và Trắng chủ đạo)
             Section("Loại thao tác") {
                 HStack(spacing: 12) {
                     Button {
@@ -1575,7 +1799,7 @@ struct SmartPostView: View {
                             ZStack {
                                 Circle()
                                     .fill(LinearGradient(
-                                        colors: isPrivacyOnlyMode ? [Color.gray.opacity(0.3), Color.gray.opacity(0.2)] : [Color.orange, Color.red],
+                                        colors: isPrivacyOnlyMode ? [Color.gray.opacity(0.3), Color.gray.opacity(0.2)] : [Color.themePrimary, Color.themePrimaryDark],
                                         startPoint: .topLeading,
                                         endPoint: .bottomTrailing
                                     ))
@@ -1584,23 +1808,23 @@ struct SmartPostView: View {
                                     .font(.subheadline.bold())
                                     .foregroundStyle(.white)
                             }
-                            Text("Đăng")
+                            Text("Đăng bài")
                                 .font(.subheadline.bold())
-                                .foregroundStyle(isPrivacyOnlyMode ? Color.primary : Color.orange)
+                                .foregroundStyle(isPrivacyOnlyMode ? Color.primary : Color.themePrimaryDark)
                             Spacer(minLength: 0)
                             if !isPrivacyOnlyMode {
                                 Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(.orange)
+                                    .foregroundStyle(Color.themePrimary)
                             }
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 10)
                         .background(
                             RoundedRectangle(cornerRadius: 12)
-                                .fill(!isPrivacyOnlyMode ? Color.orange.opacity(0.12) : Color(uiColor: .secondarySystemGroupedBackground))
+                                .fill(!isPrivacyOnlyMode ? Color.themeBackgroundPastel : Color(uiColor: .secondarySystemGroupedBackground))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 12)
-                                        .stroke(!isPrivacyOnlyMode ? Color.orange : Color.gray.opacity(0.2), lineWidth: 1.2)
+                                        .stroke(!isPrivacyOnlyMode ? Color.themePrimary : Color.gray.opacity(0.2), lineWidth: 1.2)
                                 )
                         )
                     }
@@ -1614,7 +1838,7 @@ struct SmartPostView: View {
                             ZStack {
                                 Circle()
                                     .fill(LinearGradient(
-                                        colors: !isPrivacyOnlyMode ? [Color.gray.opacity(0.3), Color.gray.opacity(0.2)] : [Color.indigo, Color.purple],
+                                        colors: !isPrivacyOnlyMode ? [Color.gray.opacity(0.3), Color.gray.opacity(0.2)] : [Color.themePrimary, Color.themePrimaryDark],
                                         startPoint: .topLeading,
                                         endPoint: .bottomTrailing
                                     ))
@@ -1625,21 +1849,21 @@ struct SmartPostView: View {
                             }
                             Text("Đổi quyền")
                                 .font(.subheadline.bold())
-                                .foregroundStyle(!isPrivacyOnlyMode ? Color.primary : Color.purple)
+                                .foregroundStyle(!isPrivacyOnlyMode ? Color.primary : Color.themePrimaryDark)
                             Spacer(minLength: 0)
                             if isPrivacyOnlyMode {
                                 Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(.purple)
+                                    .foregroundStyle(Color.themePrimary)
                             }
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 10)
                         .background(
                             RoundedRectangle(cornerRadius: 12)
-                                .fill(isPrivacyOnlyMode ? Color.purple.opacity(0.12) : Color(uiColor: .secondarySystemGroupedBackground))
+                                .fill(isPrivacyOnlyMode ? Color.themeBackgroundPastel : Color(uiColor: .secondarySystemGroupedBackground))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 12)
-                                        .stroke(isPrivacyOnlyMode ? Color.purple : Color.gray.opacity(0.2), lineWidth: 1.2)
+                                        .stroke(isPrivacyOnlyMode ? Color.themePrimary : Color.gray.opacity(0.2), lineWidth: 1.2)
                                 )
                         )
                     }
@@ -1668,7 +1892,7 @@ struct SmartPostView: View {
                     } label: {
                         HStack {
                             Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(isSelected ? Color.blue : Color.secondary)
+                                .foregroundStyle(isSelected ? Color.themePrimary : Color.secondary)
                             Image(systemName: sp.platform.icon)
                                 .foregroundStyle(sp.platform.color)
                             VStack(alignment: .leading, spacing: 2) {
@@ -1736,12 +1960,46 @@ struct SmartPostView: View {
                     .padding(.vertical, 2)
 
                     if destinationType == .personalProfile {
-                        Picker("Quyền riêng tư (Trang cá nhân)", selection: $privacyOption) {
-                            ForEach(SmartPostPrivacy.allCases) { opt in
-                                Label(opt.rawValue, systemImage: opt.icon).tag(opt)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Quyền riêng tư bài đăng (Trang cá nhân)")
+                                .font(.caption.bold())
+                                .foregroundStyle(.secondary)
+
+                            HStack(spacing: 8) {
+                                ForEach(SmartPostPrivacy.allCases) { opt in
+                                    let isSelected = privacyOption == opt
+                                    Button {
+                                        withAnimation(.spring(response: 0.28)) { privacyOption = opt }
+                                    } label: {
+                                        HStack(spacing: 6) {
+                                            Image(systemName: opt.icon)
+                                                .font(.caption.bold())
+                                            Text(opt.shortName)
+                                                .font(.caption.bold())
+                                        }
+                                        .foregroundStyle(isSelected ? Color.white : Color.primary)
+                                        .padding(.vertical, 8)
+                                        .frame(maxWidth: .infinity)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 10)
+                                                .fill(
+                                                    isSelected
+                                                        ? AnyShapeStyle(LinearGradient(colors: [Color.themePrimary, Color.themePrimaryDark], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                                        : AnyShapeStyle(Color(uiColor: .secondarySystemGroupedBackground))
+                                                )
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 10)
+                                                        .stroke(isSelected ? Color.clear : Color.gray.opacity(0.22), lineWidth: 1)
+                                                )
+                                                .shadow(color: isSelected ? Color.themePrimary.opacity(0.25) : .clear, radius: 2, x: 0, y: 1)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(isPublishing)
+                                }
                             }
                         }
-                        .disabled(isPublishing)
+                        .padding(.vertical, 3)
                     } else {
                         destinationSelectorPanel(for: destinationType)
                     }
@@ -1909,21 +2167,90 @@ struct SmartPostView: View {
                     .padding(.vertical, 4)
                 }
 
+                // Tương tác tự động: Reaction & Bình luận đầu tiên
+                Section("4. Tương tác tự động (Reaction & Bình luận đầu tiên)") {
+                    Toggle(isOn: $enableAutoReact) {
+                        Label("Tự động thả Reaction bài viết", systemImage: "hand.thumbsup.fill")
+                            .font(.subheadline)
+                    }
+                    .tint(Color.themePrimary)
+                    .disabled(isPublishing)
+
+                    if enableAutoReact {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Loại cảm xúc:")
+                                .font(.caption.bold())
+                                .foregroundStyle(.secondary)
+
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 8) {
+                                    ForEach(FacebookReactionType.concreteReactions) { rType in
+                                        let isSel = selectedReaction == rType.rawValue
+                                        Button {
+                                            selectedReaction = rType.rawValue
+                                        } label: {
+                                            Text(rType.label)
+                                                .font(.caption.bold())
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 6)
+                                                .background(
+                                                    RoundedRectangle(cornerRadius: 8)
+                                                        .fill(isSel ? Color.themePrimary : Color(uiColor: .secondarySystemGroupedBackground))
+                                                )
+                                                .foregroundStyle(isSel ? Color.white : Color.primary)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                            }
+
+                            HStack {
+                                Text("Tỷ lệ thả:")
+                                    .font(.caption.bold())
+                                Spacer()
+                                Text("\(Int(reactionPercentage))%")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(Color.themePrimary)
+                            }
+
+                            Slider(value: $reactionPercentage, in: 10...100, step: 10)
+                                .tint(Color.themePrimary)
+                        }
+                        .padding(.vertical, 2)
+                    }
+
+                    Toggle(isOn: $enableFirstComment) {
+                        Label("Gắn 1 bình luận đầu tiên ngay khi đăng", systemImage: "bubble.left.fill")
+                            .font(.subheadline)
+                    }
+                    .tint(Color.themePrimary)
+                    .disabled(isPublishing)
+
+                    if enableFirstComment {
+                        TextField("Nhập nội dung bình luận mồi...", text: $firstCommentText, axis: .vertical)
+                            .lineLimit(2...4)
+                            .font(.subheadline)
+                            .disabled(isPublishing)
+                    }
+                }
+
                 // Lên lịch đăng & Theo dõi tự động
-                Section("4. Hẹn giờ & Theo dõi tương tác AI") {
+                Section("5. Hẹn giờ & Theo dõi tương tác AI") {
                     Toggle(isOn: $autoTrackAndAIReply) {
                         Label("Tự động theo dõi & tick AI trả lời sau khi đăng", systemImage: "sparkles")
                             .font(.subheadline)
                     }
+                    .tint(Color.themePrimary)
                     .disabled(isPublishing)
 
                     Toggle("Bật lên lịch đăng tự động", isOn: $isScheduling)
+                        .tint(Color.themePrimary)
                         .disabled(isPublishing)
 
                     if isScheduling {
                         DatePicker("Thời gian đăng", selection: $scheduledDate, in: Date()..., displayedComponents: [.date, .hourAndMinute])
                             .datePickerStyle(.compact)
-                        Text("Hệ thống sẽ tự động đăng bài theo đúng giờ đã hẹn và thêm vào mục Theo dõi.")
+                        Text("Hệ thống sẽ tự động đăng bài theo đúng giờ đã hẹn, áp dụng tỷ lệ reaction, bình luận mồi và thêm vào mục Theo dõi.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -1935,16 +2262,49 @@ struct SmartPostView: View {
                         .textInputAutocapitalization(.never)
                         .disabled(isPublishing)
 
-                    Picker("Quyền mới", selection: $privacyOption) {
-                        ForEach(SmartPostPrivacy.allCases) { opt in
-                            Label(opt.rawValue, systemImage: opt.icon).tag(opt)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Quyền mới:")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+
+                        HStack(spacing: 8) {
+                            ForEach(SmartPostPrivacy.allCases) { opt in
+                                let isSelected = privacyOption == opt
+                                Button {
+                                    withAnimation(.spring(response: 0.28)) { privacyOption = opt }
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: opt.icon)
+                                            .font(.caption.bold())
+                                        Text(opt.shortName)
+                                            .font(.caption.bold())
+                                    }
+                                    .foregroundStyle(isSelected ? Color.white : Color.primary)
+                                    .padding(.vertical, 8)
+                                    .frame(maxWidth: .infinity)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 10)
+                                            .fill(
+                                                isSelected
+                                                    ? AnyShapeStyle(LinearGradient(colors: [Color.themePrimary, Color.themePrimaryDark], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                                    : AnyShapeStyle(Color(uiColor: .secondarySystemGroupedBackground))
+                                            )
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 10)
+                                                    .stroke(isSelected ? Color.clear : Color.gray.opacity(0.22), lineWidth: 1)
+                                            )
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(isPublishing)
+                            }
                         }
                     }
-                    .disabled(isPublishing)
+                    .padding(.vertical, 2)
                 }
             }
 
-            // Nút thực hiện
+            // Nút thực hiện (#8FBC8F và Trắng chủ đạo)
             Section {
                 if isPublishing {
                     HStack(spacing: 12) {
@@ -1977,7 +2337,7 @@ struct SmartPostView: View {
                     }
                     .padding(.vertical, 6)
                 }
-                .listRowBackground(canSubmit ? (isScheduling ? Color.blue : Color.orange) : Color.gray.opacity(0.3))
+                .listRowBackground(canSubmit ? Color.themePrimary : Color.gray.opacity(0.3))
                 .disabled(!canSubmit)
             }
 
@@ -2056,7 +2416,7 @@ struct SmartPostView: View {
                     }
                     .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(GradientPillButtonStyle(colors: kind.gradientColors, isCompact: true))
+                .buttonStyle(GradientPillButtonStyle(colors: [Color.themePrimary, Color.themePrimaryDark], isCompact: true))
                 .disabled(isLoadingDestinations || isPublishing || selectedSpaces.isEmpty)
             }
 
@@ -2102,12 +2462,12 @@ struct SmartPostView: View {
                             Text("Thêm")
                         }
                     }
-                    .buttonStyle(GradientPillButtonStyle(colors: [.blue, .indigo], isCompact: true))
+                    .buttonStyle(GradientPillButtonStyle(colors: [Color.themePrimary, Color.themePrimaryDark], isCompact: true))
                     .disabled(manualDestinationInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isResolvingManualDestination)
                 }
             }
 
-            // Danh sách Nhóm / Fanpage để tick chọn
+            // Danh sách Nhóm / Fanpage để tick chọn kèm Bộ tìm kiếm
             let list = currentDestinationList
             if list.isEmpty {
                 Text(isGroup
@@ -2117,69 +2477,106 @@ struct SmartPostView: View {
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 2)
             } else {
+                // Thanh tìm kiếm nhanh danh sách Nhóm / Fanpage
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+                    TextField("Tìm kiếm tên hoặc ID \(isGroup ? "nhóm" : "trang")...", text: $destinationSearchText)
+                        .font(.caption)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                    if !destinationSearchText.isEmpty {
+                        Button {
+                            destinationSearchText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+
+                let filteredList = list.filter { item in
+                    let q = destinationSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    if q.isEmpty { return true }
+                    return item.name.lowercased().contains(q) || item.id.contains(q) || item.subtitle.lowercased().contains(q)
+                }
+
                 HStack {
                     Text("Đã chọn \(activeSelectedDestinations.count)/\(list.count) \(isGroup ? "Nhóm" : "Fanpage")")
                         .font(.caption.bold())
-                        .foregroundStyle(kind.gradientColors.first ?? .blue)
+                        .foregroundStyle(Color.themePrimary)
                     Spacer()
                     Button("Chọn hết") {
-                        for item in list { selectedDestinationKeys.insert(item.uniqueSelectionKey) }
+                        for item in filteredList { selectedDestinationKeys.insert(item.uniqueSelectionKey) }
                     }
                     .font(.caption2.bold())
                     Text("•").foregroundStyle(.secondary)
                     Button("Bỏ chọn") {
-                        for item in list { selectedDestinationKeys.remove(item.uniqueSelectionKey) }
+                        for item in filteredList { selectedDestinationKeys.remove(item.uniqueSelectionKey) }
                     }
                     .font(.caption2.bold())
                 }
 
-                ForEach(list, id: \.uniqueSelectionKey) { item in
-                    let isChecked = selectedDestinationKeys.contains(item.uniqueSelectionKey)
-                    Button {
-                        if isChecked {
-                            selectedDestinationKeys.remove(item.uniqueSelectionKey)
-                        } else {
-                            selectedDestinationKeys.insert(item.uniqueSelectionKey)
-                        }
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: isChecked ? "checkmark.square.fill" : "square")
-                                .foregroundStyle(isChecked ? (kind.gradientColors.first ?? .blue) : .secondary)
-                                .font(.subheadline)
-                            Image(systemName: item.kind.icon)
-                                .font(.caption)
-                                .foregroundStyle(kind.gradientColors.first ?? .blue)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(item.name)
-                                    .font(.caption.bold())
-                                    .foregroundStyle(.primary)
-                                    .lineLimit(1)
-                                HStack(spacing: 4) {
-                                    Text("ID: \(item.id)")
-                                        .font(.system(size: 10, design: .monospaced))
-                                        .foregroundStyle(.secondary)
-                                    Text("•")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                    Text(item.subtitle)
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(.secondary)
+                if filteredList.isEmpty {
+                    Text("Không tìm thấy kết quả phù hợp với \"\(destinationSearchText)\"")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 4)
+                } else {
+                    ForEach(filteredList, id: \.uniqueSelectionKey) { item in
+                        let isChecked = selectedDestinationKeys.contains(item.uniqueSelectionKey)
+                        Button {
+                            if isChecked {
+                                selectedDestinationKeys.remove(item.uniqueSelectionKey)
+                            } else {
+                                selectedDestinationKeys.insert(item.uniqueSelectionKey)
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: isChecked ? "checkmark.square.fill" : "square")
+                                    .foregroundStyle(isChecked ? Color.themePrimary : .secondary)
+                                    .font(.subheadline)
+                                Image(systemName: item.kind.icon)
+                                    .font(.caption)
+                                    .foregroundStyle(Color.themePrimary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.name)
+                                        .font(.caption.bold())
+                                        .foregroundStyle(.primary)
                                         .lineLimit(1)
+                                    HStack(spacing: 4) {
+                                        Text("ID: \(item.id)")
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .foregroundStyle(.secondary)
+                                        Text("•")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                        Text(item.subtitle)
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                }
+                                Spacer()
+                                if item.pageAccessToken != nil {
+                                    Text("Page Token")
+                                        .font(.system(size: 9, weight: .bold))
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 2)
+                                        .background(Color.themeBackgroundPastel, in: Capsule())
+                                        .foregroundStyle(Color.themePrimaryDark)
                                 }
                             }
-                            Spacer()
-                            if item.pageAccessToken != nil {
-                                Text("Page Token")
-                                    .font(.system(size: 9, weight: .bold))
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 2)
-                                    .background(Color.green.opacity(0.15), in: Capsule())
-                                    .foregroundStyle(.green)
-                            }
+                            .padding(.vertical, 3)
                         }
-                        .padding(.vertical, 3)
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
         }
@@ -2318,18 +2715,18 @@ struct SmartPostView: View {
                                 .font(.caption2.bold())
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 3)
-                                .background(task.status.badgeColor.opacity(0.15), in: Capsule())
+                                .background(task.status.badgeColor.opacity(0.18), in: Capsule())
                                 .foregroundStyle(task.status.badgeColor)
                         }
 
                         HStack(spacing: 8) {
                             Label(task.scheduledDate.formatted(date: .numeric, time: .shortened), systemImage: "clock")
                                 .font(.caption)
-                                .foregroundStyle(.blue)
+                                .foregroundStyle(Color.themePrimary)
                             Text("•")
                             Text("\((task.destinationType ?? .personalProfile).rawValue)")
                                 .font(.caption.bold())
-                                .foregroundStyle(.indigo)
+                                .foregroundStyle(Color.themePrimaryDark)
                             Text("•")
                             Text("\(task.targetSpaceIds.count) TK")
                                 .font(.caption)
@@ -2337,7 +2734,29 @@ struct SmartPostView: View {
                             if task.videoFileName != nil {
                                 Text("• Video MP4").font(.caption).foregroundStyle(.purple)
                             } else if !task.imageFileNames.isEmpty {
-                                Text("• \(task.imageFileNames.count) ảnh").font(.caption).foregroundStyle(.orange)
+                                Text("• \(task.imageFileNames.count) ảnh").font(.caption).foregroundStyle(Color.themePrimary)
+                            }
+                        }
+
+                        // Tags cho Reaction & Bình luận mồi
+                        if task.autoReact == true || !(task.firstComment?.isEmpty ?? true) {
+                            HStack(spacing: 6) {
+                                if task.autoReact == true {
+                                    Text("👍 \(task.reactionType ?? "LIKE") (\(Int(task.reactionRate ?? 100))%)")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.themeBackgroundPastel, in: Capsule())
+                                        .foregroundStyle(Color.themePrimaryDark)
+                                }
+                                if let cmt = task.firstComment, !cmt.isEmpty {
+                                    Text("💬 Bình luận mồi")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.teal.opacity(0.15), in: Capsule())
+                                        .foregroundStyle(.teal)
+                                }
                             }
                         }
 
@@ -2356,22 +2775,64 @@ struct SmartPostView: View {
                                 .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 6))
                         }
 
-                        if task.status == .failed {
-                            HStack {
+                        // Hàng nút thao tác nhanh: Theo dõi, Sửa, Thử lại, Xóa
+                        HStack(spacing: 8) {
+                            if let log = task.executionLog, log.contains("ID: ") {
                                 Button {
-                                    scheduler.retryTask(task)
+                                    extractAndTrackPost(from: task)
+                                    selectedTab = 2
                                 } label: {
-                                    Label("Thử lại bài đăng này", systemImage: "arrow.clockwise")
-                                        .font(.caption.bold())
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "chart.line.uptrend.xyaxis")
+                                        Text("Theo dõi bài này")
+                                    }
+                                    .font(.caption.bold())
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .controlSize(.mini)
-                                .tint(.blue)
-
-                                Spacer()
+                                .tint(Color.themePrimary)
                             }
-                            .padding(.top, 2)
+
+                            Button {
+                                editingTask = task
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "pencil")
+                                    Text("Sửa")
+                                }
+                                .font(.caption.bold())
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+
+                            if task.status == .failed || task.status == .partial {
+                                Button {
+                                    scheduler.retryTask(task)
+                                } label: {
+                                    HStack(spacing: 3) {
+                                        Image(systemName: "arrow.clockwise")
+                                        Text("Thử lại")
+                                    }
+                                    .font(.caption.bold())
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.mini)
+                                .tint(Color.themePrimary)
+                            }
+
+                            Button(role: .destructive) {
+                                scheduler.deleteTask(task)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .tint(.red)
+
+                            Spacer()
                         }
+                        .padding(.top, 2)
                     }
                     .padding(.vertical, 4)
                     .swipeActions(edge: .trailing) {
@@ -2380,17 +2841,49 @@ struct SmartPostView: View {
                         } label: {
                             Label("Xóa", systemImage: "trash")
                         }
+
+                        Button {
+                            editingTask = task
+                        } label: {
+                            Label("Sửa", systemImage: "pencil")
+                        }
+                        .tint(Color.themePrimary)
                     }
                     .swipeActions(edge: .leading) {
-                        if task.status == .failed {
+                        if task.status == .failed || task.status == .partial {
                             Button {
                                 scheduler.retryTask(task)
                             } label: {
                                 Label("Thử lại", systemImage: "arrow.clockwise")
                             }
-                            .tint(.blue)
+                            .tint(Color.themePrimary)
                         }
                     }
+                }
+            }
+        }
+    }
+
+    private func extractAndTrackPost(from task: ScheduledPostTask) {
+        guard let log = task.executionLog else { return }
+        let pattern = #"ID:\s*([0-9_]{5,35})"#
+        if let regex = try? NSRegularExpression(pattern: pattern) {
+            let nsRange = NSRange(log.startIndex..<log.endIndex, in: log)
+            for match in regex.matches(in: log, range: nsRange) {
+                if let idRange = Range(match.range(at: 1), in: log) {
+                    let pid = String(log[idRange])
+                    let firstSpace = selectedSpaces.first(where: { task.targetSpaceIds.contains($0.id) }) ?? availableSpaces.first
+                    let spaceId = firstSpace?.id ?? UUID()
+                    let spaceName = firstSpace?.name ?? "Lịch đăng"
+                    let postUrl = "https://www.facebook.com/\(pid)"
+                    TrackedPostManager.shared.registerPublishedPost(
+                        spaceId: spaceId,
+                        spaceName: spaceName,
+                        postId: pid,
+                        postUrl: postUrl,
+                        caption: task.caption,
+                        enableAIAutoReply: true
+                    )
                 }
             }
         }
@@ -2420,7 +2913,11 @@ struct SmartPostView: View {
             targetDestinations: activeSelectedDestinations,
             scheduledDate: scheduledDate,
             images: selectedImages,
-            videoData: selectedVideoData
+            videoData: selectedVideoData,
+            autoReact: enableAutoReact,
+            reactionType: selectedReaction,
+            reactionRate: reactionPercentage,
+            firstComment: enableFirstComment ? firstCommentText : nil
         )
         alertMessage = "Đã lên lịch đăng (\(destinationType.rawValue)) thành công vào lúc \(scheduledDate.formatted(date: .numeric, time: .shortened))!"
         selectedTab = 1 // Chuyển sang xem danh sách lịch
@@ -2514,6 +3011,7 @@ struct SmartPostView: View {
                             caption: postCaption,
                             enableAIAutoReply: autoTrackAndAIReply
                         )
+                        await triggerPostReactionAndCommentDirect(postId: videoId, token: token)
                         results.append(SmartPostResult(
                             spaceName: "\(space.name) (Cá nhân)",
                             isSuccess: true,
@@ -2559,6 +3057,7 @@ struct SmartPostView: View {
                             caption: postCaption,
                             enableAIAutoReply: autoTrackAndAIReply
                         )
+                        await triggerPostReactionAndCommentDirect(postId: res.postId, token: token)
 
                         results.append(SmartPostResult(
                             spaceName: "\(space.name) (Cá nhân)",
@@ -2614,6 +3113,8 @@ struct SmartPostView: View {
                                 caption: postCaption,
                                 enableAIAutoReply: autoTrackAndAIReply
                             )
+                            await triggerPostReactionAndCommentDirect(postId: videoId, token: effectiveUploadToken)
+
                             results.append(SmartPostResult(
                                 spaceName: label,
                                 isSuccess: true,
@@ -2665,6 +3166,7 @@ struct SmartPostView: View {
                                 caption: postCaption,
                                 enableAIAutoReply: autoTrackAndAIReply
                             )
+                            await triggerPostReactionAndCommentDirect(postId: res.postId, token: effectiveUploadToken)
 
                             results.append(SmartPostResult(
                                 spaceName: label,
@@ -2688,4 +3190,152 @@ struct SmartPostView: View {
         }
         progressMessage = "Hoàn tất!"
     }
+
+    private func triggerPostReactionAndCommentDirect(postId: String, token: String) async {
+        if enableAutoReact {
+            let roll = Double.random(in: 0...100)
+            if roll <= reactionPercentage {
+                let rType = FacebookReactionType(rawValue: selectedReaction) ?? .like
+                _ = await SmartPostAPIClient.reactToPost(postId: postId, reaction: rType, accessToken: token)
+            }
+        }
+        if enableFirstComment && !firstCommentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            _ = await SmartPostAPIClient.commentOnPost(postId: postId, commentText: firstCommentText, accessToken: token)
+        }
+    }
+}
+
+// MARK: - Edit Scheduled Post Sheet
+
+struct EditScheduleSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var scheduler = ScheduledPostManager.shared
+    @State var task: ScheduledPostTask
+
+    @State private var caption: String
+    @State private var scheduledDate: Date
+    @State private var autoReact: Bool
+    @State private var reactionType: String
+    @State private var reactionRate: Double
+    @State private var enableFirstComment: Bool
+    @State private var firstComment: String
+
+    init(task: ScheduledPostTask) {
+        self._task = State(initialValue: task)
+        self._caption = State(initialValue: task.caption)
+        self._scheduledDate = State(initialValue: task.scheduledDate)
+        self._autoReact = State(initialValue: task.autoReact ?? false)
+        self._reactionType = State(initialValue: task.reactionType ?? "LIKE")
+        self._reactionRate = State(initialValue: task.reactionRate ?? 100.0)
+        let hasComment = !(task.firstComment?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        self._enableFirstComment = State(initialValue: hasComment)
+        self._firstComment = State(initialValue: task.firstComment ?? "")
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Nội dung bài viết") {
+                    TextField("Nhập nội dung chia sẻ...", text: $caption, axis: .vertical)
+                        .lineLimit(3...6)
+                }
+
+                Section("Thời gian đăng") {
+                    DatePicker("Hẹn giờ", selection: $scheduledDate, in: Date()..., displayedComponents: [.date, .hourAndMinute])
+                        .datePickerStyle(.compact)
+                }
+
+                Section("Tương tác tự động (Reaction & Bình luận mồi)") {
+                    Toggle("Tự động thả Reaction", isOn: $autoReact)
+                        .tint(Color.themePrimary)
+
+                    if autoReact {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Loại cảm xúc:")
+                                .font(.caption.bold())
+                                .foregroundStyle(.secondary)
+
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 8) {
+                                    ForEach(FacebookReactionType.concreteReactions) { rType in
+                                        let isSel = reactionType == rType.rawValue
+                                        Button {
+                                            reactionType = rType.rawValue
+                                        } label: {
+                                            Text(rType.label)
+                                                .font(.caption.bold())
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 6)
+                                                .background(
+                                                    RoundedRectangle(cornerRadius: 8)
+                                                        .fill(isSel ? Color.themePrimary : Color(uiColor: .secondarySystemGroupedBackground))
+                                                )
+                                                .foregroundStyle(isSel ? Color.white : Color.primary)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                            }
+
+                            HStack {
+                                Text("Tỷ lệ thả:")
+                                    .font(.caption.bold())
+                                Spacer()
+                                Text("\(Int(reactionRate))%")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(Color.themePrimary)
+                            }
+
+                            Slider(value: $reactionRate, in: 10...100, step: 10)
+                                .tint(Color.themePrimary)
+                        }
+                        .padding(.vertical, 2)
+                    }
+
+                    Toggle("Gắn 1 bình luận đầu tiên", isOn: $enableFirstComment)
+                        .tint(Color.themePrimary)
+
+                    if enableFirstComment {
+                        TextField("Nội dung bình luận mồi...", text: $firstComment, axis: .vertical)
+                            .lineLimit(2...4)
+                    }
+                }
+
+                Section {
+                    Button {
+                        var updated = task
+                        updated.caption = caption
+                        updated.scheduledDate = scheduledDate
+                        updated.autoReact = autoReact
+                        updated.reactionType = reactionType
+                        updated.reactionRate = reactionRate
+                        updated.firstComment = enableFirstComment ? firstComment : nil
+                        if updated.status == .failed || updated.status == .partial {
+                            updated.status = .pending
+                        }
+                        scheduler.updateTask(updated)
+                        dismiss()
+                    } label: {
+                        HStack {
+                            Spacer()
+                            Label("Lưu thay đổi", systemImage: "checkmark.circle.fill")
+                                .font(.headline)
+                                .foregroundStyle(.white)
+                            Spacer()
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .listRowBackground(Color.themePrimary)
+                }
+            }
+            .navigationTitle("Sửa lịch đăng")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Hủy") { dismiss() }
+                }
+            }
+        }
+    }
+}
 }
