@@ -563,7 +563,10 @@ enum SmartPostAPIClient {
         return (false, "Không thể thả cảm xúc")
     }
 
-    /// Đăng bình luận đầu tiên vào bài viết Facebook qua Graph API
+    private static var activeCommentLock = Set<String>()
+    private static let commentLockQueue = DispatchQueue(label: "vie.smartpost.comment.lock")
+
+    /// Đăng bình luận đầu tiên vào bài viết Facebook qua Graph API (có cơ chế chống gửi double/lặp)
     static func commentOnPost(
         postId: String,
         commentText: String,
@@ -575,14 +578,32 @@ enum SmartPostAPIClient {
         guard !cleanToken.isEmpty else { return (false, "Token rỗng") }
 
         let cleanPostId = postId.components(separatedBy: "_").last ?? postId
-        let targets = [postId, cleanPostId]
+        let lockKey = "\(cleanPostId)_\(cleanText.hashValue)"
+
+        // Chống gửi trùng/double trong cùng một thời điểm
+        let canProceed = commentLockQueue.sync { () -> Bool in
+            if activeCommentLock.contains(lockKey) { return false }
+            activeCommentLock.insert(lockKey)
+            return true
+        }
+        guard canProceed else {
+            return (true, "Bình luận đang được xử lý, đã chặn gửi lặp.")
+        }
+        defer {
+            _ = commentLockQueue.sync {
+                activeCommentLock.remove(lockKey)
+            }
+        }
+
+        // Ưu tiên clean numeric post ID trước, chỉ thử postId gốc nếu khác biệt
+        let targets: [String] = (cleanPostId != postId) ? [cleanPostId, postId] : [cleanPostId]
         let endpoints = [
             "https://graph.facebook.com",
             "https://b-graph.facebook.com"
         ]
 
-        for base in endpoints {
-            for target in targets {
+        for target in targets {
+            for base in endpoints {
                 guard let url = URL(string: "\(base)/\(target)/comments") else { continue }
                 var req = URLRequest(url: url, timeoutInterval: 15)
                 req.httpMethod = "POST"
@@ -592,10 +613,14 @@ enum SmartPostAPIClient {
                 let enc = cleanText.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? cleanText
                 req.httpBody = "message=\(enc)".data(using: .utf8)
                 if let (data, resp) = try? await URLSession.shared.data(for: req),
-                   let http = resp as? HTTPURLResponse, (http.statusCode == 200 || http.statusCode == 201),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let cid = json["id"] as? String, !cid.isEmpty {
-                    return (true, "Đã bình luận ID: \(cid)")
+                   let http = resp as? HTTPURLResponse {
+                    // Nếu status 200...299 thì Facebook đã tiếp nhận và tạo bình luận thành công!
+                    // Dừng ngay lập tức để không bị double comment trên Facebook
+                    if (200...299).contains(http.statusCode) {
+                        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                        let cid = (json?["id"] as? String) ?? (json?["id"] as? Int).map(String.init) ?? "ok"
+                        return (true, "Đã bình luận ID: \(cid)")
+                    }
                 }
             }
         }
@@ -3202,6 +3227,7 @@ struct SmartPostView: View {
 
     @MainActor
     private func executeSmartPost() async {
+        guard !isPublishing else { return }
         isPublishing = true
         results.removeAll()
         defer { isPublishing = false }

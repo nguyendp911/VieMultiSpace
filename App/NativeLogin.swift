@@ -1394,47 +1394,22 @@ enum FacebookAPILoginClient {
                 }
             }
 
-            // Trường hợp Facebook báo yêu cầu phê duyệt thiết bị (Login Approvals 406/405) nhưng không cấp first_factor
-            if errInfo.code == 406 || errInfo.code == 405 {
-                let approvalParams: [String: String] = [
-                    "locale": "vi_VN",
-                    "client_country_code": "VN",
-                    "format": "json",
-                    "email": cleanUser,
-                    "userid": uidValue,
-                    "password": encryptedPassword,
-                    "device_id": deviceId,
-                    "family_device_id": deviceId,
-                    "adid": adid,
-                    "access_token": accessToken,
-                    "api_key": apiKey,
-                    "generate_session_cookies": "1",
-                    "generate_machine_id": "1",
-                    "credentials_type": "check_approved_machine",
-                    "source": "login",
-                    "error_detail_type": "button_with_disabled",
-                    "machine_id": resolvedMachineId,
-                    "fb_api_req_friendly_name": "authenticate",
-                    "fb_api_caller_class": "com.facebook.account.login.protocol.Fb4aAuthHandler"
-                ]
-                if let jsonApp = try? await client.post(url: apiURL, params: approvalParams),
-                   let tok = jsonApp["access_token"] as? String, !tok.isEmpty {
-                    persistLoginDeviceState(
-                        spaceId: spaceId,
-                        cleanUser: cleanUser,
-                        cleanPass: cleanPass,
-                        cleanTotp: cleanTotp,
-                        machineId: (jsonApp["machine_id"] as? String) ?? resolvedMachineId,
-                        deviceId: deviceId,
-                        adid: adid,
-                        simSerial: simSerial,
-                        pendingFirstFactor: "",
-                        pendingUid: uidValue
-                    )
-                    return await buildVault(uid: uidValue, responseJson: jsonApp, convertAll: convertAll, client: client)
-                }
+            // Trường hợp Facebook kích hoạt quy trình kiểm tra bảo mật (Checkpoint / Pre-authentication 405 / 1348023)
+            if errInfo.code == 405 || errInfo.code == 406 || errInfo.subcode == 1348023 {
+                let cpUrl = (errorData["url"] as? String) ?? ""
+                let reason = (errorData["error_message_string"] as? String)
+                    ?? (errorData["error_user_msg"] as? String)
+                    ?? "Hãy hoàn tất quá trình kiểm tra bảo mật để đăng nhập."
 
-                throw SpaceLoginError.apiError("Facebook yêu cầu phê duyệt trên ứng dụng đã đăng nhập trước đó (Login Approvals).\n• Hãy mở app Facebook trên điện thoại hoặc trình duyệt để bấm 'Phê duyệt'.\n• Sau đó bấm 'Đăng nhập API' lại.")
+                throw SpaceLoginError.apiError("""
+                🔒 \(reason) (Mã: \(errInfo.code)/\(errInfo.subcode))
+
+                Facebook hiện đang chặn đăng nhập API tự động từ thiết bị mới.
+                👉 HƯỚNG DẪN XÁC MINH 1 LẦN:
+                1. Mở tab Trình duyệt trong Không gian này (m.facebook.com).
+                2. Nhập tài khoản, mật khẩu và 2FA để hoàn tất xác minh thiết bị.
+                3. Khi đã vào được trang Facebook, bấm nút "📥 Trích xuất Token từ Trình duyệt". Toàn bộ 6 App Token và Cookie 'datr' chính chủ sẽ được đồng bộ ngay lập tức!
+                """)
             }
 
             var extraTip = ""

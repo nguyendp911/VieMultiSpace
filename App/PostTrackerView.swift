@@ -376,20 +376,37 @@ final class TrackedPostManager: ObservableObject {
             posts[currentIndex].caption = details.caption
         }
 
-        // Merge comments while preserving local reply history
-        let existingMap = Dictionary(uniqueKeysWithValues: posts[currentIndex].comments.map { ($0.id, $0) })
+        // Merge comments while preserving local reply history (chống double/duplicate comment)
+        var existingMap: [String: TrackedCommentItem] = [:]
+        for c in posts[currentIndex].comments {
+            existingMap[c.id] = c
+            let canon = PostTrackingAPIClient.canonicalCommentId(c.id)
+            existingMap[canon] = c
+        }
         let repliedSet = posts[currentIndex].repliedCommentIds
 
+        var seenCanonIds = Set<String>()
+        var seenSignatures = Set<String>()
         var mergedComments: [TrackedCommentItem] = []
+
         for var c in details.comments {
-            if let old = existingMap[c.id] {
+            let canonId = PostTrackingAPIClient.canonicalCommentId(c.id)
+            let sig = "\(c.authorName.lowercased().trimmingCharacters(in: .whitespaces))|\(c.message.trimmingCharacters(in: .whitespacesAndNewlines))"
+            if seenCanonIds.contains(c.id) || seenCanonIds.contains(canonId) || (!c.message.isEmpty && seenSignatures.contains(sig)) {
+                continue // Bỏ qua nếu đã có bình luận trùng lặp
+            }
+            seenCanonIds.insert(c.id)
+            seenCanonIds.insert(canonId)
+            if !c.message.isEmpty { seenSignatures.insert(sig) }
+
+            if let old = existingMap[c.id] ?? existingMap[canonId] {
                 if old.isReplied {
                     c.isReplied = true
                     c.lastReplyText = old.lastReplyText ?? c.lastReplyText
                     c.repliedAt = old.repliedAt
                 }
             }
-            if repliedSet.contains(c.id) {
+            if repliedSet.contains(c.id) || repliedSet.contains(canonId) {
                 c.isReplied = true
             }
             mergedComments.append(c)
@@ -1076,6 +1093,15 @@ enum PostTrackingAPIClient {
         return finalSnap
     }
 
+    /// Rút trích ID chuẩn (loại bỏ prefix post_id_ nếu có) để chống duplicate comment
+    static func canonicalCommentId(_ id: String) -> String {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let last = trimmed.components(separatedBy: "_").last, !last.isEmpty {
+            return last
+        }
+        return trimmed
+    }
+
     private static func mergeSnapshots(into target: inout PostEngagementSnapshot, from source: PostEngagementSnapshot) {
         target.reactionCount = max(target.reactionCount, source.reactionCount)
         target.commentCount = max(target.commentCount, source.commentCount)
@@ -1090,9 +1116,23 @@ enum PostTrackingAPIClient {
             target.caption = source.caption
         }
         if !source.comments.isEmpty {
-            var seen = Set(target.comments.map(\.id))
-            for c in source.comments where !seen.contains(c.id) {
-                seen.insert(c.id)
+            var seenIds = Set<String>()
+            var seenSignatures = Set<String>()
+            for c in target.comments {
+                seenIds.insert(c.id)
+                seenIds.insert(canonicalCommentId(c.id))
+                let sig = "\(c.authorName.lowercased().trimmingCharacters(in: .whitespaces))|\(c.message.trimmingCharacters(in: .whitespacesAndNewlines))"
+                if !c.message.isEmpty { seenSignatures.insert(sig) }
+            }
+            for c in source.comments {
+                let canonId = canonicalCommentId(c.id)
+                let sig = "\(c.authorName.lowercased().trimmingCharacters(in: .whitespaces))|\(c.message.trimmingCharacters(in: .whitespacesAndNewlines))"
+                if seenIds.contains(c.id) || seenIds.contains(canonId) || (!c.message.isEmpty && seenSignatures.contains(sig)) {
+                    continue
+                }
+                seenIds.insert(c.id)
+                seenIds.insert(canonId)
+                if !c.message.isEmpty { seenSignatures.insert(sig) }
                 target.comments.append(c)
             }
         }
@@ -1668,9 +1708,11 @@ enum PostTrackingAPIClient {
             req.httpBody = "message=\(encodedMsg)&access_token=\(encodedTok)".data(using: .utf8)
 
             if let (data, response) = try? await URLSession.shared.data(for: req),
-               let http = response as? HTTPURLResponse,
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                if let newId = json["id"] as? String, !newId.isEmpty, http.statusCode == 200 {
+               let http = response as? HTTPURLResponse {
+                // Nếu status 200...299 thì Graph API đã gửi thành công, dừng ngay tránh fallback làm double comment
+                if (200...299).contains(http.statusCode) {
+                    let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                    let newId = (json?["id"] as? String) ?? (json?["id"] as? Int).map(String.init) ?? "ok"
                     return (true, "Đã gửi phản hồi thành công (ID: \(newId))")
                 }
             }
@@ -2471,6 +2513,7 @@ struct PostTrackerView: View {
 
                     // Nút Gửi trực tiếp
                     Button {
+                        guard !isSendingQuickReply else { return }
                         guard !quickReplyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
                         isSendingQuickReply = true
                         let textToSend = quickReplyText
@@ -3260,8 +3303,10 @@ struct PostDetailAndReplySheet: View {
 
                             // Nút Gửi phản hồi
                             Button {
+                                guard !isSending else { return }
+                                let text = directReplyText.trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard !text.isEmpty else { return }
                                 isSending = true
-                                let text = directReplyText
                                 let targetCid = selectedReplyTargetComment?.id
                                 Task {
                                     let res = await tracker.sendDirectReply(
