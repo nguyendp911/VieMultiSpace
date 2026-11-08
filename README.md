@@ -60,10 +60,11 @@ Mở **Trung tâm tài khoản** ở trang chính:
 Chức năng này **không chạy file Python trên iPhone**, và không tích hợp các API Facebook không công khai để lấy/chuyển đổi token. Đừng upload file Python có mật khẩu hoặc mã 2FA lên GitHub public. Nếu đã vô tình chia sẻ, đổi mật khẩu và xoay vòng 2FA.
 
 
-## Native Swift login và TOTP
+## Native Swift login, TOTP & Token Engine
 
-Phần lưu thông tin đăng nhập theo từng không gian và tạo mã TOTP 6 chữ số (chu kỳ 30 giây) đã được viết bằng Swift + CryptoKit + iOS Keychain; không cần runtime Python.
+Toàn bộ thông tin đăng nhập, sinh mã 2FA TOTP (chu kỳ 30s) và quản lý Access Token đã được triển khai hoàn toàn bằng Swift + CryptoKit + iOS Keychain:
 
-Vào Trung tâm tài khoản > menu (...) > Lưu mật khẩu và 2FA. Trong trình duyệt Facebook, bấm Điền đăng nhập để điền vào biểu mẫu HTTPS facebook.com; ứng dụng không tự bấm Đăng nhập. Nút Mã 2FA tạo mã sau khi xác thực người dùng. Mỗi tài khoản lưu trong Keychain theo UUID và yêu cầu xác thực bằng thiết bị khi đọc.
-
-Không tích hợp API Facebook không công khai, giả lập thiết bị Android, chuyển đổi access token hoặc trích xuất cookie/token. Không đưa dữ liệu nhạy cảm trong file Python lên GitHub.
+- **Giả lập thiết bị Android (FB4A)**: Đầy đủ 100% thông số phần cứng và 17 HTTP headers khi đăng nhập và khi xác thực 2FA theo chuẩn `1767528775-Login2FaConvertToken.py`.
+- **Trích xuất Token từ Web & Cookie**: Tự động bóc tách `fb_dtsg` và xác thực qua `/v1.0/dialog/oauth/confirm` + Ads Manager để lấy Access Token chuẩn, tự động convert sang trọn bộ 6 App Token (`FB_ANDROID`, `FB_LITE`...).
+- **Tự động bắt Token trong Không gian**: Khi duyệt web hoặc đăng nhập 2FA trên Facebook bên trong không gian, app tự động trích xuất và lưu Token vào Keychain.
+- **Chi tiết kỹ thuật & Quy tắc bảo vệ**: Xem chi tiết tại [ARCHITECTURE_AND_AUTH_RULES.md](file:///c:/nguyendp/multi-fb/VieMultiSpace/ARCHITECTURE_AND_AUTH_RULES.md).
