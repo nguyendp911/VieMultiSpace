@@ -566,7 +566,7 @@ enum SmartPostAPIClient {
     private static var activeCommentLock = Set<String>()
     private static let commentLockQueue = DispatchQueue(label: "vie.smartpost.comment.lock")
 
-    /// Đăng bình luận đầu tiên vào bài viết Facebook qua Graph API (có cơ chế chống gửi double/lặp)
+    /// Đăng bình luận đầu tiên vào bài viết Facebook qua Graph API (chuẩn SmartPost gọn gàng, hiệu năng cao)
     static func commentOnPost(
         postId: String,
         commentText: String,
@@ -604,34 +604,31 @@ enum SmartPostAPIClient {
         }
         let session = URLSession(configuration: config)
 
-        // 1. Ưu tiên postId gốc trước, rồi mới thử cleanPostId và compound ID {ownerUid}_{cleanPostId}
+        // 1. Chuẩn bị danh sách target IDs
         var targets: [String] = []
         if !postId.isEmpty { targets.append(postId) }
-        if !cleanPostId.isEmpty && cleanPostId != postId { targets.append(cleanPostId) }
-        if let uid = ownerUid, !uid.isEmpty, !cleanPostId.isEmpty, !cleanPostId.contains("_") {
+        if let uid = ownerUid, !uid.isEmpty, !cleanPostId.isEmpty && !cleanPostId.contains("_") {
             let compound = "\(uid)_\(cleanPostId)"
-            if !targets.contains(compound) {
-                targets.append(compound)
-            }
+            if !targets.contains(compound) { targets.append(compound) }
         }
+        if !cleanPostId.isEmpty && !targets.contains(cleanPostId) { targets.append(cleanPostId) }
 
-        // 2. Chuẩn bị danh sách Token (nếu là bài viết trên Page, tự động lấy Page Access Token để có đủ quyền bình luận)
+        // 2. Chuẩn bị danh sách Token (ưu tiên FB_ANDROID Katana và Page Token)
         var tokensToTry: [String] = []
         if let underIdx = postId.firstIndex(of: "_") {
             let pageOrOwnerId = String(postId[..<underIdx])
             if let pUrl = URL(string: "https://graph.facebook.com/\(pageOrOwnerId)?fields=access_token") {
-                var pReq = URLRequest(url: pUrl, timeoutInterval: 10)
+                var pReq = URLRequest(url: pUrl, timeoutInterval: 8)
                 pReq.setValue("OAuth \(cleanToken)", forHTTPHeaderField: "authorization")
                 for (k, v) in fbHeaders { pReq.setValue(v, forHTTPHeaderField: k) }
                 if let (pData, _) = try? await session.data(for: pReq),
                    let pJson = try? JSONSerialization.jsonObject(with: pData) as? [String: Any],
                    let pageToken = pJson["access_token"] as? String, !pageToken.isEmpty {
-                    tokensToTry.append(pageToken) // Page Access Token được ưu tiên số 1
+                    tokensToTry.append(pageToken)
                 }
             }
         }
 
-        // Thêm alternative tokens (FB_ANDROID, PAGES_MANAGER...) trước
         for alt in alternativeTokens {
             let c = cleanAccessToken(alt)
             if !c.isEmpty && !tokensToTry.contains(c) {
@@ -643,7 +640,6 @@ enum SmartPostAPIClient {
         }
 
         let endpoints = [
-            "https://graph.facebook.com/v19.0",
             "https://graph.facebook.com",
             "https://b-graph.facebook.com"
         ]
@@ -655,13 +651,8 @@ enum SmartPostAPIClient {
         for tok in tokensToTry {
             let encTok = tok.addingPercentEncoding(withAllowedCharacters: allowed) ?? tok
             let bodiesToTry = [
-                "message=\(encMsg)".data(using: .utf8),
-                "message=\(encMsg)&access_token=\(encTok)".data(using: .utf8)
-            ]
-
-            let headerVariations: [[String: String]] = [
-                fbHeaders,
-                ["User-Agent": "FB4A/iOS-App"]
+                "message=\(encMsg)&access_token=\(encTok)".data(using: .utf8),
+                "message=\(encMsg)".data(using: .utf8)
             ]
 
             for target in targets {
@@ -669,26 +660,23 @@ enum SmartPostAPIClient {
                     guard let url = URL(string: "\(base)/\(target)/comments") else { continue }
                     for postBody in bodiesToTry {
                         guard let body = postBody else { continue }
-                        for headers in headerVariations {
-                            var req = URLRequest(url: url, timeoutInterval: 12)
-                            req.httpMethod = "POST"
-                            req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-                            req.setValue("OAuth \(tok)", forHTTPHeaderField: "authorization")
-                            for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
-                            req.httpBody = body
+                        var req = URLRequest(url: url, timeoutInterval: 10)
+                        req.httpMethod = "POST"
+                        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                        req.setValue("OAuth \(tok)", forHTTPHeaderField: "authorization")
+                        for (k, v) in fbHeaders { req.setValue(v, forHTTPHeaderField: k) }
+                        req.httpBody = body
 
-                            if let (data, resp) = try? await session.data(for: req),
-                               let http = resp as? HTTPURLResponse {
-                                // Nếu status 200...299 thì Facebook đã tiếp nhận và tạo bình luận thành công!
-                                if (200...299).contains(http.statusCode) {
-                                    let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-                                    let cid = (json?["id"] as? String) ?? (json?["id"] as? Int).map(String.init) ?? "ok"
-                                    return (true, "Đã bình luận ID: \(cid)")
-                                } else if let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                                           let err = json["error"] as? [String: Any],
-                                           let msg = err["message"] as? String {
-                                    lastErrorMsg = msg
-                                }
+                        if let (data, resp) = try? await session.data(for: req),
+                           let http = resp as? HTTPURLResponse {
+                            if (200...299).contains(http.statusCode) {
+                                let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                                let cid = (json?["id"] as? String) ?? (json?["id"] as? Int).map(String.init) ?? "ok"
+                                return (true, "Đã bình luận ID: \(cid)")
+                            } else if let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                                       let err = json["error"] as? [String: Any],
+                                       let msg = err["message"] as? String {
+                                lastErrorMsg = msg
                             }
                         }
                     }

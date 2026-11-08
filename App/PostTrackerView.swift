@@ -1751,7 +1751,7 @@ enum PostTrackingAPIClient {
         return nil
     }
 
-    /// Gửi bình luận hoặc trả lời bình luận trực tiếp qua Web Mobile (mbasic.facebook.com) - cực kỳ ổn định với Cookie
+    /// Gửi bình luận hoặc trả lời bình luận trực tiếp qua Web Mobile (mbasic.facebook.com) - nạp cookie storage đa miền chuẩn xác
     static func commentViaMobileWeb(
         postId: String,
         postUrl: String?,
@@ -1764,7 +1764,17 @@ enum PostTrackingAPIClient {
         let cleanPostId = postId.components(separatedBy: "_").last ?? postId
         let mobileUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
 
+        // Cấu hình CookieStorage độc lập và nạp đầy đủ cookie đa miền để không bị CFNetwork lọc khi redirect
+        let cookieStorage = HTTPCookieStorage()
+        let parsedCookies = FacebookGraphQLAutoClient.parseCookies(from: cookieString)
+        for c in parsedCookies {
+            cookieStorage.setCookie(c)
+        }
+
         let config = URLSessionConfiguration.default
+        config.httpCookieStorage = cookieStorage
+        config.httpCookieAcceptPolicy = .always
+        config.httpShouldSetCookies = true
         if let proxy, proxy.isEnabled {
             config.proxyConfigurations = [proxy.toNetworkProxyConfiguration()]
         }
@@ -1776,7 +1786,7 @@ enum PostTrackingAPIClient {
             candidateUrls.append("https://mbasic.facebook.com/comment/reply/?ctoken=\(cid)&p=\(cleanPostId)")
             candidateUrls.append("https://m.facebook.com/comment/reply/?ctoken=\(cid)&p=\(cleanPostId)")
         } else {
-            // URL chuẩn từ post.postUrl (chuyển sang mbasic và m.facebook)
+            // URL chuẩn từ post.postUrl (chuyển sang mbasic)
             if let pUrl = postUrl, !pUrl.isEmpty {
                 let mbasicFromPost = pUrl
                     .replacingOccurrences(of: "https://www.facebook.com", with: "https://mbasic.facebook.com")
@@ -1812,11 +1822,28 @@ enum PostTrackingAPIClient {
 
             if let (pageData, getResp) = try? await session.data(for: getReq),
                let html = String(data: pageData, encoding: .utf8), !html.isEmpty {
-                let formActionPattern = #"action="([^"]*(?:comment|ufi)[^"]*)""#
-                if FacebookTargetPostResolver.firstMatch(pattern: formActionPattern, in: html) != nil {
+                // Kiểm tra xem trang có chứa form bình luận trực tiếp hoặc link mở form comment
+                if html.contains("name=\"comment_text\"") || html.contains("name='comment_text'") {
                     foundHtml = html
                     workingUrl = (getResp as? HTTPURLResponse)?.url?.absoluteString ?? testUrlStr
                     break
+                }
+                // Nếu trang có link Bình luận (comment/reply) trên mbasic, theo link đó để lấy form
+                let cmtLinkPattern = #"href="([^"]*(?:comment/reply|/a/comment\.php)[^"]*)""#
+                if let subHref = FacebookTargetPostResolver.firstMatch(pattern: cmtLinkPattern, in: html) {
+                    let subUrlStr = subHref.hasPrefix("http") ? subHref : "https://mbasic.facebook.com\(subHref.hasPrefix("/") ? "" : "/")\(subHref.replacingOccurrences(of: "&amp;", with: "&"))"
+                    if let subUrl = URL(string: subUrlStr) {
+                        var subReq = URLRequest(url: subUrl, timeoutInterval: 10)
+                        subReq.setValue(mobileUA, forHTTPHeaderField: "User-Agent")
+                        subReq.setValue(cookieString, forHTTPHeaderField: "Cookie")
+                        if let (subData, subResp) = try? await session.data(for: subReq),
+                           let subHtml = String(data: subData, encoding: .utf8),
+                           (subHtml.contains("name=\"comment_text\"") || subHtml.contains("action=")) {
+                            foundHtml = subHtml
+                            workingUrl = (subResp as? HTTPURLResponse)?.url?.absoluteString ?? subUrlStr
+                            break
+                        }
+                    }
                 }
             }
         }
@@ -1825,10 +1852,10 @@ enum PostTrackingAPIClient {
             return (false, "Không tìm thấy form bình luận trên Web Mobile.")
         }
 
-        // 2. Trích xuất form action
-        let formActionPattern = #"action="([^"]*(?:comment|ufi)[^"]*)""#
+        // 2. Trích xuất form action (chứa action gửi bình luận)
+        let formActionPattern = #"action="([^"]*(?:comment|ufi|composer)[^"]*)""#
         guard let actionRaw = FacebookTargetPostResolver.firstMatch(pattern: formActionPattern, in: foundHtml) else {
-            return (false, "Không tìm thấy đường dẫn gửi bình luận trên Web Mobile.")
+            return (false, "Không tìm thấy đường dẫn form bình luận trên Web Mobile.")
         }
         let formAction = actionRaw.replacingOccurrences(of: "&amp;", with: "&")
 
@@ -1899,7 +1926,7 @@ enum PostTrackingAPIClient {
             return (true, "Đã gửi bình luận thành công qua Web Mobile!")
         }
 
-        return (false, "Gửi bình luận Web Mobile thất bại (Mã HTTP: \(http.statusCode))")
+        return (false, "Web Mobile thất bại (HTTP \(http.statusCode))")
     }
 
     /// Trả lời trực tiếp vào bài viết hoặc trả lời vào 1 bình luận cụ thể (Triple Engine: Graph API + Mobile Web + Comet GraphQL)
@@ -1929,12 +1956,29 @@ enum PostTrackingAPIClient {
             }
         }
 
+        // Tự động chuyển đổi token sang FB_ANDROID (Katana App) nếu chưa có để đảm bảo quyền tương tác cao nhất
+        let hasKatanaToken = allCandidateTokens.contains(where: { $0.hasPrefix("EAAAAU") })
+        if !hasKatanaToken, let baseTok = allCandidateTokens.first(where: { $0.hasPrefix("EAA") && $0.count >= 20 }) {
+            if let katanaApp = FacebookAppTokens.allApps.first(where: { $0.key == "FB_ANDROID" }),
+               let record = await FacebookAPILoginClient.convertToken(baseTok, app: katanaApp),
+               !record.accessToken.isEmpty {
+                allCandidateTokens.insert(record.accessToken, at: 0)
+                // Lưu lại vào Token Vault của Space
+                if var vault = try? SecureLoginStore.readTokenVault(spaceId) {
+                    vault.convertedTokens["FB_ANDROID"] = record
+                    try? SecureLoginStore.writeTokenVault(vault, for: spaceId)
+                }
+            }
+        }
+
         // Nếu chưa có token nào nhưng có cookie, thử lấy Ads Manager token
         if allCandidateTokens.isEmpty && !cookieString.isEmpty {
             if let fetched = await SmartPostAPIClient.fetchAdsManagerAccessToken(cookieString: cookieString), !fetched.isEmpty {
                 allCandidateTokens.append(fetched)
             }
         }
+
+        var lastGraphError = "Chưa có Access Token phù hợp"
 
         // ── 1. ƯU TIÊN CAO NHẤT: Facebook Graph API chuẩn SmartPost (Kèm bình luận khi đăng bài) ──
         if !allCandidateTokens.isEmpty {
@@ -1944,14 +1988,17 @@ enum PostTrackingAPIClient {
                     commentText: replyText,
                     accessToken: tok,
                     proxy: proxy,
-                    ownerUid: ownerUid,
-                    alternativeTokens: allCandidateTokens
+                    ownerUid: ownerUid
                 )
                 if res.success {
                     return (true, "Đã gửi phản hồi thành công (\(res.message))")
+                } else {
+                    lastGraphError = res.message
                 }
             }
         }
+
+        var lastWebError = "Chưa có Cookie phiên web"
 
         // ── 2. ƯU TIÊN THỨ HAI: Gửi qua Web Mobile mbasic (Cực kỳ mạnh mẽ và chuẩn xác khi có Cookie) ──
         if !cookieString.isEmpty {
@@ -1966,14 +2013,15 @@ enum PostTrackingAPIClient {
             )
             if mobileRes.success {
                 return (true, mobileRes.message)
+            } else {
+                lastWebError = mobileRes.message
             }
         }
 
-        // ── 3. Fallback Comet Web GraphQL Mutation (Chỉ gọi khi có Feedback ID hợp lệ hoặc trích xuất được từ web) ──
+        // ── 3. Fallback Comet Web GraphQL Mutation (Chỉ gọi khi có Feedback ID hợp lệ) ──
         if !cookieString.isEmpty {
             var realFeedbackId = postFeedbackId
             if realFeedbackId.isEmpty || realFeedbackId == Data("feedback:\(postId)".utf8).base64EncodedString() || realFeedbackId == Data("feedback:\(cleanPostId)".utf8).base64EncodedString() {
-                // Thử trích xuất real feedback_id từ trang bài viết nếu có thể
                 if let resolvedUrl = postUrl, let u = URL(string: resolvedUrl) {
                     var req = URLRequest(url: u, timeoutInterval: 10)
                     req.setValue(cookieString, forHTTPHeaderField: "Cookie")
@@ -1993,7 +2041,6 @@ enum PostTrackingAPIClient {
                 }
             }
 
-            // Chỉ gọi khi có Feedback ID thật từ Facebook (tránh bị Comet GraphQL từ chối vì fake id)
             if !realFeedbackId.isEmpty && !realFeedbackId.contains("feedback:\(cleanPostId)") {
                 let client = FacebookGraphQLAutoClient(
                     spaceId: spaceId,
@@ -2013,7 +2060,7 @@ enum PostTrackingAPIClient {
             }
         }
 
-        return (false, "Không thể gửi bình luận vào bài viết này qua Graph API lẫn Web Mobile. Vui lòng kiểm tra lại quyền tương tác của tài khoản hoặc làm mới Cookie/Token trong Không gian.")
+        return (false, "Lỗi Graph: \(lastGraphError) | Web: \(lastWebError)")
     }
 
     /// Sinh nội dung trả lời tự động bằng Gemini AI
