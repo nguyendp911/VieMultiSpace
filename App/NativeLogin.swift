@@ -898,7 +898,7 @@ enum FacebookAPILoginClient {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 15
         let cookieStore = HTTPCookieStorage()
-        for cookie in parseCookieString(trimmed) {
+        for cookie in FacebookAppTokens.parseCookieString(trimmed) {
             if let httpCookie = HTTPCookie(properties: [
                 .domain: ".facebook.com",
                 .path: "/",
