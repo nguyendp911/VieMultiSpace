@@ -232,6 +232,13 @@ struct SpaceDashboard: View {
                         .onMove { from, to in
                             library.move(from: from, to: to)
                         }
+                        .onDelete { indexSet in
+                            for index in indexSet {
+                                if index < library.spaces.count {
+                                    deleteSpace = library.spaces[index]
+                                }
+                            }
+                        }
                         Button { showAdd = true } label: {
                             Label("Tạo không gian mới", systemImage: "plus.circle.fill")
                                 .fontWeight(.semibold)
@@ -330,10 +337,15 @@ struct SpaceDashboard: View {
                 Button("Xóa không gian và dữ liệu", role: .destructive) {
                     guard let space = deleteSpace else { return }
                     deleteSpace = nil
+                    if openSpace?.id == space.id { openSpace = nil }
+                    if tokenSpace?.id == space.id { tokenSpace = nil }
+                    if autoSpace?.id == space.id { autoSpace = nil }
+                    if proxySpace?.id == space.id { proxySpace = nil }
+                    if renameSpace?.id == space.id { renameSpace = nil }
+                    if clearSpace?.id == space.id { clearSpace = nil }
                     busy = true
                     Task {
-                        do { try await library.delete(space) }
-                        catch { errorMessage = error.localizedDescription }
+                        await library.delete(space)
                         busy = false
                     }
                 }
@@ -624,6 +636,13 @@ struct IsolatedWebView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        uiView.stopLoading()
+        uiView.navigationDelegate = nil
+        uiView.configuration.userContentController.removeAllUserScripts()
+        coordinator.browser.webView = nil
+    }
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         let space: Space

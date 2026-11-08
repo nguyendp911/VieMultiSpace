@@ -137,15 +137,24 @@ final class SpaceLibrary: ObservableObject {
         persist()
     }
 
-    func delete(_ space: Space) async throws {
-        // Do not keep this profile's WKWebView open while removing its store.
-        try await WKWebsiteDataStore.remove(forIdentifier: space.id)
+    func delete(_ space: Space) async {
+        // 1. Xóa toàn bộ dữ liệu web (Cookie, Cache, Storage, IndexedDB...) an toàn, không bị crash unhandled NSException
+        let store = WKWebsiteDataStore(forIdentifier: space.id)
+        await store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
+
+        // 2. Loại bỏ khỏi danh sách không gian
         spaces.removeAll { $0.id == space.id }
+
+        // 3. Xóa dữ liệu xác thực Keychain và Token Cache
         SecureLoginStore.remove(space.id)
         WebSessionTokenCache.clear(for: space.id)
+
+        // 4. Xóa URL trang gần nhất
         var stored = UserDefaults.standard.dictionary(forKey: launchKey) as? [String: String] ?? [:]
         stored.removeValue(forKey: space.id.uuidString)
         UserDefaults.standard.set(stored, forKey: launchKey)
+
+        // 5. Lưu lại danh sách không gian
         persist()
     }
 
