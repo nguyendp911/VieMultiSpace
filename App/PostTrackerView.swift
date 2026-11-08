@@ -2412,7 +2412,7 @@ struct PostTrackerView: View {
 
             // Dòng 3: Thống kê tương tác dạng Pill gọn đẹp (#8FBC8F và trắng)
             HStack(spacing: 8) {
-                engagementPill(icon: "hand.thumbsup.fill", text: reactionSummaryText)
+                engagementPill(icon: "hand.thumbsup.fill", text: reactionSummaryText(for: post))
                 engagementPill(icon: "bubble.left.fill", text: "\(post.commentCount) bình luận")
                 engagementPill(icon: "arrowshape.turn.up.right.fill", text: "\(post.shareCount) chia sẻ")
 
@@ -2612,7 +2612,7 @@ struct PostTrackerView: View {
         .shadow(color: Color.black.opacity(0.04), radius: 4, x: 0, y: 2)
     }
 
-    private var reactionSummaryText: String {
+    private func reactionSummaryText(for post: TrackedPostItem) -> String {
         guard !post.reactionBreakdown.isEmpty else { return "\(post.reactionCount) cảm xúc" }
         let mapEmoji = [
             "Like": "👍",

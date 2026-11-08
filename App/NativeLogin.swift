@@ -1431,7 +1431,8 @@ enum FacebookAPILoginClient {
                 // Tự động giải mã UID số sang Vanity Username và thử lại đăng nhập 1 lần
                 if cleanUser.allSatisfy(\.isNumber) {
                     onStatusUpdate?("UID bị máy chủ Facebook hạn chế, đang tìm Username tài khoản...")
-                    if let (vanity, _) = await resolveVanityUsername(for: cleanUser), let vanityUser = vanity, !vanityUser.isEmpty {
+                    let (vanity, _) = await resolveVanityUsername(for: cleanUser)
+                    if let vanityUser = vanity, !vanityUser.isEmpty {
                         onStatusUpdate?("Đang tự động thử đăng nhập lại với Username: @\(vanityUser)...")
                         return try await login(
                             uidPhoneMail: vanityUser,

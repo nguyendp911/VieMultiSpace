@@ -852,10 +852,14 @@ enum SmartPostAPIClient {
                     effectiveToken = adsTok
                     Task.detached {
                         if var vault = try? SecureLoginStore.readTokenVault(spaceId) {
-                            vault.convertedTokens["ADS_MANAGER_WEB"] = FacebookTokenInfo(
+                            vault.convertedTokens["ADS_MANAGER_WEB"] = ConvertedTokenRecord(
+                                appKey: "ADS_MANAGER_WEB",
+                                appName: "Ads Manager Web",
+                                appId: "438142079694454",
+                                tokenPrefix: FacebookAppTokens.extractTokenPrefix(adsTok),
                                 accessToken: adsTok,
-                                expiresIn: 86400 * 30,
-                                tokenPrefix: FacebookAppTokens.extractTokenPrefix(adsTok)
+                                cookieString: cookie,
+                                cookies: []
                             )
                             if vault.originalToken.isEmpty { vault.originalToken = adsTok }
                             try? SecureLoginStore.saveTokenVault(vault, for: spaceId)
