@@ -1143,48 +1143,69 @@ final class FacebookGraphQLAutoClient {
             throw SpaceLoginError.apiError("Không tìm thấy c_user trong Cookie của không gian này.")
         }
 
-        guard let url = URL(string: "https://www.facebook.com") else {
-            throw SpaceLoginError.apiError("URL Facebook không hợp lệ.")
+        let checkUrls = [
+            "https://m.facebook.com/me",
+            "https://mbasic.facebook.com/me",
+            "https://www.facebook.com"
+        ]
+
+        var resolvedDtsg: String? = nil
+        var resolvedLsd: String? = nil
+        var resolvedJazoest = "25400"
+
+        for urlStr in checkUrls {
+            guard let url = URL(string: urlStr) else { continue }
+            var request = URLRequest(url: url, timeoutInterval: 12)
+            request.httpMethod = "GET"
+            for (k, v) in baseHeaders {
+                request.setValue(v, forHTTPHeaderField: k)
+            }
+            request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8", forHTTPHeaderField: "Accept")
+            request.setValue("1", forHTTPHeaderField: "upgrade-insecure-requests")
+            request.setValue("navigate", forHTTPHeaderField: "sec-fetch-mode")
+            request.setValue("document", forHTTPHeaderField: "sec-fetch-dest")
+
+            guard let (data, _) = try? await session.data(for: request) else { continue }
+            let html = String(data: data, encoding: .utf8) ?? ""
+            guard !html.isEmpty else { continue }
+
+            if resolvedDtsg == nil {
+                resolvedDtsg = FacebookAPILoginClient.extractDtsg(from: html)
+                    ?? Self.firstMatch(pattern: #""dtsg":\{"token":"([^"]+)""#, in: html)
+                    ?? Self.firstMatch(pattern: #""DTSGInitialData",\[\],\{"token":"([^"]+)""#, in: html)
+                    ?? Self.firstMatch(pattern: #""DTSGInitData",\[\],\{"token":"([^"]+)""#, in: html)
+                    ?? Self.firstMatch(pattern: #"name="fb_dtsg"\s+value="([^"]+)""#, in: html)
+                    ?? Self.firstMatch(pattern: #"value="([^"]+)"\s+name="fb_dtsg""#, in: html)
+                    ?? Self.firstMatch(pattern: #"name='fb_dtsg'\s+value='([^']+)'"#, in: html)
+                    ?? Self.firstMatch(pattern: #"\"token\":\"(NA[A-Za-z0-9_\-:]+|AQ[A-Za-z0-9_\-:]+)\""#, in: html)
+            }
+
+            if resolvedLsd == nil {
+                resolvedLsd = Self.firstMatch(pattern: #""token":"([^"]+)"},323\]"#, in: html)
+                    ?? Self.firstMatch(pattern: #""LSD",\[\],\{"token":"([^"]+)""#, in: html)
+                    ?? Self.firstMatch(pattern: #"name="lsd"\s+value="([^"]+)""#, in: html)
+                    ?? Self.firstMatch(pattern: #"value="([^"]+)"\s+name="lsd""#, in: html)
+            }
+
+            if let j = Self.firstMatch(pattern: #"jazoest=(\d+)"#, in: html) {
+                resolvedJazoest = j
+            }
+
+            if resolvedDtsg != nil { break }
         }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        for (k, v) in baseHeaders {
-            request.setValue(v, forHTTPHeaderField: k)
-        }
-        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8", forHTTPHeaderField: "Accept")
-        request.setValue("1", forHTTPHeaderField: "dpr")
-        request.setValue("1920", forHTTPHeaderField: "viewport-width")
-        request.setValue("1", forHTTPHeaderField: "upgrade-insecure-requests")
-        request.setValue("none", forHTTPHeaderField: "sec-fetch-site")
-        request.setValue("navigate", forHTTPHeaderField: "sec-fetch-mode")
-        request.setValue("?1", forHTTPHeaderField: "sec-fetch-user")
-        request.setValue("document", forHTTPHeaderField: "sec-fetch-dest")
-        request.setValue("u=0, i", forHTTPHeaderField: "priority")
-
-        let (data, _) = try await session.data(for: request)
-        let html = String(data: data, encoding: .utf8) ?? ""
-
-        let jazoest = Self.firstMatch(pattern: #"jazoest=(\d+)"#, in: html) ?? "25400"
-        let lsdToken = Self.firstMatch(pattern: #""token":"([^"]+)"},323\]"#, in: html)
-            ?? Self.firstMatch(pattern: #""LSD",\[\],\{"token":"([^"]+)""#, in: html)
-            ?? Self.firstMatch(pattern: #"name="lsd" value="([^"]+)""#, in: html)
-            ?? ""
-        guard let dtsgToken = Self.firstMatch(pattern: #""dtsg":\{"token":"([^"]+)""#, in: html)
-                ?? Self.firstMatch(pattern: #""DTSGInitialData",\[\],\{"token":"([^"]+)""#, in: html)
-                ?? Self.firstMatch(pattern: #""DTSGInitData",\[\],\{"token":"([^"]+)""#, in: html)
-                ?? Self.firstMatch(pattern: #"name="fb_dtsg" value="([^"]+)""#, in: html),
-              !dtsgToken.isEmpty else {
+        guard let dtsgToken = resolvedDtsg, !dtsgToken.isEmpty else {
             let err = "Không lấy được fb_dtsg từ Cookie (Cookie có thể đã hết hạn hoặc bị checkpoint)."
             AppLogger.shared.error("FacebookWeb", "Lỗi lấy session tokens cho c_user=\(userId)", detail: err)
             throw SpaceLoginError.apiError(err)
         }
 
+        let lsdToken = resolvedLsd ?? ""
         AppLogger.shared.info("FacebookWeb", "Lấy thành công fb_dtsg & lsd cho c_user=\(userId)")
 
         return FacebookWebSessionTokens(
             userId: userId,
-            jazoest: jazoest,
+            jazoest: resolvedJazoest,
             lsdToken: lsdToken,
             dtsgToken: dtsgToken,
             updatedAt: Date()

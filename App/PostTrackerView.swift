@@ -686,9 +686,13 @@ final class TrackedPostManager: ObservableObject {
                 let webCookies = await WebCookieBridge.extractFacebookCookies(from: spaceId)
                 cookieStr = FacebookAppTokens.formatCookieString(webCookies)
             }
-            let tok = !vault.originalToken.isEmpty
-                ? vault.originalToken
-                : (vault.convertedTokens["FB_ANDROID"]?.accessToken ?? "")
+            // Ưu tiên resolve token tốt nhất từ mọi nguồn trong vault (originalToken, FB_ANDROID, ADS_MANAGER_WEB, PAGES_MANAGER...)
+            var tok = SmartPostAPIClient.resolveBestAccessToken(from: vault) ?? ""
+            if tok.isEmpty {
+                tok = !vault.originalToken.isEmpty
+                    ? vault.originalToken
+                    : (vault.convertedTokens.values.first(where: { $0.accessToken.hasPrefix("EAA") && $0.accessToken.count >= 20 })?.accessToken ?? "")
+            }
             let uid = !vault.uid.isEmpty
                 ? vault.uid
                 : (FacebookTargetPostResolver.firstMatch(pattern: #"c_user=(\d+)"#, in: cookieStr) ?? "")
@@ -697,7 +701,13 @@ final class TrackedPostManager: ObservableObject {
             let webCookies = await WebCookieBridge.extractFacebookCookies(from: spaceId)
             let cookieStr = FacebookAppTokens.formatCookieString(webCookies)
             let uid = FacebookTargetPostResolver.firstMatch(pattern: #"c_user=(\d+)"#, in: cookieStr) ?? ""
-            return (cookieStr, "", uid)
+            var tok = ""
+            if !cookieStr.isEmpty {
+                if let extracted = await FacebookAPILoginClient.extractTokenFromCookieString(cookieStr), !extracted.isEmpty {
+                    tok = extracted
+                }
+            }
+            return (cookieStr, tok, uid)
         }
     }
 }
@@ -1694,33 +1704,36 @@ enum PostTrackingAPIClient {
         proxy: SpaceProxy?,
         userAgent: String?
     ) async -> (success: Bool, message: String) {
-        let targetObjectId = (commentId?.isEmpty == false) ? commentId! : postId
+        let cleanPostId = postId.components(separatedBy: "_").last ?? postId
+        let targetObjectId = (commentId?.isEmpty == false) ? commentId! : cleanPostId
 
-        // 1. Thử qua Graph API /{targetObjectId}/comments
-        if !accessToken.isEmpty,
-           let url = URL(string: "https://graph.facebook.com/v18.0/\(targetObjectId)/comments") {
-            var req = URLRequest(url: url)
-            req.httpMethod = "POST"
-            req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-            let allowed = CharacterSet.alphanumerics
-            let encodedMsg = replyText.addingPercentEncoding(withAllowedCharacters: allowed) ?? replyText
-            let encodedTok = accessToken.addingPercentEncoding(withAllowedCharacters: allowed) ?? accessToken
-            req.httpBody = "message=\(encodedMsg)&access_token=\(encodedTok)".data(using: .utf8)
+        // ── 1. Ưu tiên cao nhất: Gửi qua Facebook Graph API chuẩn FB4A Android (đầy đủ OAuth header & fbHeaders) ──
+        if !accessToken.isEmpty {
+            let res = await SmartPostAPIClient.commentOnPost(
+                postId: targetObjectId,
+                commentText: replyText,
+                accessToken: accessToken
+            )
+            if res.success {
+                return (true, "Đã gửi phản hồi thành công (\(res.message))")
+            }
 
-            if let (data, response) = try? await URLSession.shared.data(for: req),
-               let http = response as? HTTPURLResponse {
-                // Nếu status 200...299 thì Graph API đã gửi thành công, dừng ngay tránh fallback làm double comment
-                if (200...299).contains(http.statusCode) {
-                    let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-                    let newId = (json?["id"] as? String) ?? (json?["id"] as? Int).map(String.init) ?? "ok"
-                    return (true, "Đã gửi phản hồi thành công (ID: \(newId))")
+            // Nếu postId gốc khác cleanPostId và commentId rỗng, thử thêm 1 lần với postId gốc
+            if commentId == nil && cleanPostId != postId {
+                let res2 = await SmartPostAPIClient.commentOnPost(
+                    postId: postId,
+                    commentText: replyText,
+                    accessToken: accessToken
+                )
+                if res2.success {
+                    return (true, "Đã gửi phản hồi thành công (\(res2.message))")
                 }
             }
         }
 
-        // 2. Fallback sang Comet Web GraphQL thông qua FacebookGraphQLAutoClient
+        // ── 2. Fallback sang Comet Web GraphQL thông qua FacebookGraphQLAutoClient ──
         guard !cookieString.isEmpty else {
-            return (false, "Không thể gửi qua Graph API và không gian chưa có Cookie dự phòng.")
+            return (false, "Không thể gửi: Không gian chưa có Access Token API và chưa có Cookie.")
         }
 
         let client = FacebookGraphQLAutoClient(
