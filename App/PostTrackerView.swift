@@ -601,7 +601,7 @@ final class TrackedPostManager: ObservableObject {
 
         let selectedPosts = posts.filter(\.isAIAutoReplySelected)
         guard !selectedPosts.isEmpty else {
-            statusBanner = "⚠️ Hãy tick chọn ít nhất 1 bài viết (nút AI Tự trả lời) để chạy!"
+            statusBanner = "⚠️ Hãy tick chọn ít nhất 1 bài viết (nút AI Auto) để chạy!"
             return 0
         }
 
@@ -2298,19 +2298,19 @@ struct PostTrackerView: View {
 
                 Spacer()
 
-                // Nút Tick chọn AI tự động trả lời cho bài viết này
+                // Nút Tick chọn AI tự động trả lời cho bài viết này (gọn gàng, thanh lịch)
                 Button {
                     tracker.toggleAIReply(for: post.id)
                 } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: post.isAIAutoReplySelected ? "checkmark.square.fill" : "square")
-                            .font(.caption.bold())
-                        Text("AI Tự trả lời")
-                            .font(.caption2.bold())
+                    HStack(spacing: 3.5) {
+                        Image(systemName: post.isAIAutoReplySelected ? "checkmark.circle.fill" : "sparkles")
+                            .font(.system(size: 9.5, weight: .bold))
+                        Text(post.isAIAutoReplySelected ? "AI Auto" : "AI Auto")
+                            .font(.system(size: 10, weight: .bold))
                     }
                     .foregroundStyle(post.isAIAutoReplySelected ? .white : Color.trackerPrimaryDark)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3.5)
                     .background(
                         post.isAIAutoReplySelected
                             ? AnyShapeStyle(LinearGradient(colors: [.trackerPrimary, .trackerPrimaryDark], startPoint: .leading, endPoint: .trailing))
@@ -2319,7 +2319,7 @@ struct PostTrackerView: View {
                     )
                     .overlay(
                         Capsule()
-                            .stroke(Color.trackerPrimary.opacity(0.35), lineWidth: 1)
+                            .stroke(post.isAIAutoReplySelected ? Color.clear : Color.trackerPrimary.opacity(0.3), lineWidth: 1)
                     )
                 }
                 .buttonStyle(.plain)

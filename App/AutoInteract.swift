@@ -419,17 +419,18 @@ enum GeminiCommentService {
     }
 
     private static func extractSuggestedModel(from text: String) -> String? {
-        let pattern = #"use models/([a-zA-Z0-9._-]+)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+        guard !text.isEmpty,
+              let regex = try? NSRegularExpression(pattern: #"use models/([a-zA-Z0-9._-]+)"#, options: [.caseInsensitive]) else {
             return nil
         }
-        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
-        guard let match = regex.firstMatch(in: text, options: [], range: nsRange),
-              match.numberOfRanges > 1,
-              let range = Range(match.range(at: 1), in: text) else {
+        let nsText = text as NSString
+        guard let match = regex.firstMatch(in: text, options: [], range: NSRange(location: 0, length: nsText.length)),
+              match.numberOfRanges > 1 else {
             return nil
         }
-        return String(text[range]).trimmingCharacters(in: CharacterSet(charactersIn: ".,\"' "))
+        let r = match.range(at: 1)
+        guard r.location != NSNotFound, r.location + r.length <= nsText.length else { return nil }
+        return nsText.substring(with: r).trimmingCharacters(in: CharacterSet(charactersIn: ".,\"' "))
     }
 
     private static func parseGeminiOutput(_ rawText: String, usedModel: String) -> GeminiAnalysisResult {
@@ -602,10 +603,21 @@ enum FacebookTargetPostResolver {
             )
         }
 
-        // Bóc tách sơ bộ ID số nếu có sẵn trên URL
-        var extractedId = extractNumericIdFromURL(trimmed)
+        // Nếu là link share rút gọn (/share/p, /share/r, /share/g, pfbid...), ưu tiên giải mã sang URL canonical trước
+        var workingInput = trimmed
+        let lowerTrimmed = trimmed.lowercased()
+        let isShareInput = lowerTrimmed.contains("/share/") || lowerTrimmed.contains("pfbid") || lowerTrimmed.contains("fb.me") || lowerTrimmed.contains("fb.watch")
+        if isShareInput {
+            if let canon = await resolveShareURLToCanonical(input: trimmed, cookieString: cookieString, proxy: proxy) {
+                workingInput = canon.canonicalURL
+                kind = canon.kind
+            }
+        }
 
-        var urlStr = trimmed
+        // Bóc tách sơ bộ ID số nếu có sẵn trên URL
+        var extractedId = extractNumericIdFromURL(workingInput)
+
+        var urlStr = workingInput
         if !urlStr.lowercased().hasPrefix("http://") && !urlStr.lowercased().hasPrefix("https://") {
             urlStr = "https://" + urlStr
         }
@@ -656,7 +668,8 @@ enum FacebookTargetPostResolver {
                 let redirectedStr = redirected.absoluteString
                 kind = detectKind(from: redirectedStr)
                 if extractedId == nil {
-                    extractedId = extractNumericIdFromURL(redirectedStr)
+                    let decodedRedirect = redirectedStr.removingPercentEncoding ?? redirectedStr
+                    extractedId = extractNumericIdFromURL(decodedRedirect)
                 }
             }
             html = String(data: data, encoding: .utf8) ?? ""
@@ -664,20 +677,28 @@ enum FacebookTargetPostResolver {
             // Nếu lỗi mạng khi tải HTML nhưng đã có ID số trên URL thì vẫn dùng ID đó
         }
 
-        // Bóc tách og:url nếu có (đặc biệt hữu hiệu cho link share/p/..., share/r/...)
-        if let ogUrl = firstMatch(pattern: #"<meta\s+property=[\"']og:url[\"']\s+content=[\"']([^\"']+)[\"']"#, in: html)
-            ?? firstMatch(pattern: #"<meta\s+content=[\"']([^\"']+)[\"']\s+property=[\"']og:url[\"']"#, in: html) {
-            if let ogId = extractNumericIdFromURL(ogUrl) {
-                extractedId = ogId
-                if let u = URL(string: ogUrl) {
-                    finalURL = u
+        // Bóc tách og:url và link canonical nếu có (đặc biệt hữu hiệu cho link share/p/..., share/r/...)
+        let ogPatterns = [
+            #"<meta\s+[^>]*property=[\"']og:url[\"'][^>]*content=[\"']([^\"']+)[\"']"#,
+            #"<meta\s+[^>]*content=[\"']([^\"']+)[\"'][^>]*property=[\"']og:url[\"']"#,
+            #"<link\s+[^>]*rel=[\"']canonical[\"'][^>]*href=[\"']([^\"']+)[\"']"#,
+            #"<link\s+[^>]*href=[\"']([^\"']+)[\"'][^>]*rel=[\"']canonical[\"']"#
+        ]
+        for pat in ogPatterns {
+            if let ogUrl = firstMatch(pattern: pat, in: html) {
+                if let ogId = extractNumericIdFromURL(ogUrl) {
+                    extractedId = ogId
+                    if let u = URL(string: ogUrl) {
+                        finalURL = u
+                    }
+                    break
                 }
             }
         }
 
-        // Bóc tách al:ios:url graphqlid nếu có
+        // Bóc tách graphqlid nếu có
         if extractedId == nil,
-           let alGraphId = firstMatch(pattern: #"property=[\"']al:(?:ios|android):url[\"']\s+content=[\"'][^\"']*graphqlid=([A-Za-z0-9+/=]+)"#, in: html) {
+           let alGraphId = firstMatch(pattern: #"graphqlid=([A-Za-z0-9+/=]+)"#, in: html) {
             if let decData = Data(base64Encoded: alGraphId),
                let decStr = String(data: decData, encoding: .utf8) {
                 let nums = decStr.components(separatedBy: CharacterSet.decimalDigits.inverted).filter { $0.count >= 8 }
@@ -880,8 +901,8 @@ enum FacebookTargetPostResolver {
         let session = URLSession(configuration: config)
 
         let uas = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
         ]
 
         for candURL in candidateURLs {
@@ -897,30 +918,41 @@ enum FacebookTargetPostResolver {
 
                 do {
                     let (data, response) = try await session.data(for: request)
+                    if let httpResp = response as? HTTPURLResponse, httpResp.statusCode >= 400 {
+                        continue
+                    }
                     var finalURLStr = candURL.absoluteString
                     if let httpResp = response as? HTTPURLResponse, let respURL = httpResp.url {
                         finalURLStr = respURL.absoluteString
                     }
 
-                    // 1. Thử lấy ID từ final URL sau redirect
-                    var extractedId = extractNumericIdFromURL(finalURLStr)
+                    // 1. Thử lấy ID từ final URL sau redirect (bao gồm cả mbasic redirect có next=...)
+                    let decodedFinalURL = finalURLStr.removingPercentEncoding ?? finalURLStr
+                    var extractedId = extractNumericIdFromURL(decodedFinalURL)
                     var resolvedFinalURL = finalURLStr
 
                     let html = String(data: data, encoding: .utf8) ?? ""
 
                     // 2. Thử bóc tách meta og:url hoặc link canonical
-                    if let ogUrl = firstMatch(pattern: #"<meta\s+property=[\"']og:url[\"']\s+content=[\"']([^\"']+)[\"']"#, in: html)
-                        ?? firstMatch(pattern: #"<meta\s+content=[\"']([^\"']+)[\"']\s+property=[\"']og:url[\"']"#, in: html)
-                        ?? firstMatch(pattern: #"<link\s+rel=[\"']canonical[\"']\s+href=[\"']([^\"']+)[\"']"#, in: html) {
-                        if let ogId = extractNumericIdFromURL(ogUrl) {
-                            extractedId = ogId
-                            resolvedFinalURL = ogUrl
+                    let ogPatterns = [
+                        #"<meta\s+[^>]*property=[\"']og:url[\"'][^>]*content=[\"']([^\"']+)[\"']"#,
+                        #"<meta\s+[^>]*content=[\"']([^\"']+)[\"'][^>]*property=[\"']og:url[\"']"#,
+                        #"<link\s+[^>]*rel=[\"']canonical[\"'][^>]*href=[\"']([^\"']+)[\"']"#,
+                        #"<link\s+[^>]*href=[\"']([^\"']+)[\"'][^>]*rel=[\"']canonical[\"']"#
+                    ]
+                    for pat in ogPatterns {
+                        if let ogUrl = firstMatch(pattern: pat, in: html) {
+                            if let ogId = extractNumericIdFromURL(ogUrl) {
+                                extractedId = ogId
+                                resolvedFinalURL = ogUrl
+                                break
+                            }
                         }
                     }
 
                     // 3. Thử bóc tách al:ios:url graphqlid
                     if extractedId == nil,
-                       let alGraphId = firstMatch(pattern: #"property=[\"']al:(?:ios|android):url[\"']\s+content=[\"'][^\"']*graphqlid=([A-Za-z0-9+/=]+)"#, in: html) {
+                       let alGraphId = firstMatch(pattern: #"graphqlid=([A-Za-z0-9+/=]+)"#, in: html) {
                         if let decData = Data(base64Encoded: alGraphId),
                            let decStr = String(data: decData, encoding: .utf8) {
                             let nums = decStr.components(separatedBy: CharacterSet.decimalDigits.inverted).filter { $0.count >= 8 }
@@ -1002,14 +1034,16 @@ enum FacebookTargetPostResolver {
     }
 
     static func firstMatch(pattern: String, in text: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
-        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
-        guard let match = regex.firstMatch(in: text, options: [], range: nsRange),
-              match.numberOfRanges > 1,
-              let range = Range(match.range(at: 1), in: text) else {
+        guard !text.isEmpty,
+              let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let nsText = text as NSString
+        guard let match = regex.firstMatch(in: text, options: [], range: NSRange(location: 0, length: nsText.length)),
+              match.numberOfRanges > 1 else {
             return nil
         }
-        return String(text[range])
+        let r = match.range(at: 1)
+        guard r.location != NSNotFound, r.location + r.length <= nsText.length else { return nil }
+        return nsText.substring(with: r)
     }
 
     static func decodeJSONEscapes(_ raw: String) -> String {
@@ -2009,14 +2043,16 @@ final class FacebookGraphQLAutoClient {
     }
 
     private static func firstMatch(pattern: String, in text: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
-        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
-        guard let match = regex.firstMatch(in: text, options: [], range: nsRange),
-              match.numberOfRanges > 1,
-              let range = Range(match.range(at: 1), in: text) else {
+        guard !text.isEmpty,
+              let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
+        let nsText = text as NSString
+        guard let match = regex.firstMatch(in: text, options: [], range: NSRange(location: 0, length: nsText.length)),
+              match.numberOfRanges > 1 else {
             return nil
         }
-        return String(text[range])
+        let r = match.range(at: 1)
+        guard r.location != NSNotFound, r.location + r.length <= nsText.length else { return nil }
+        return nsText.substring(with: r)
     }
 
     private static func jsonString(from dict: [String: Any]) -> String {
