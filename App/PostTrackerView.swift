@@ -454,7 +454,7 @@ final class TrackedPostManager: ObservableObject {
         var creds = await Self.resolveCookieAndToken(forId: targetSpaceId, fallbackSpace: actingSpace)
 
         if creds.cookie.isEmpty && creds.token.isEmpty {
-            if let fallback = SpaceLibrary.shared.spaces.first(where: { $0.platform == .facebook }) {
+            if let fallback = SpaceLibrary.shared?.spaces.first(where: { $0.platform == .facebook }) {
                 let fbCreds = await Self.resolveCookieAndToken(forId: fallback.id, fallbackSpace: fallback)
                 if !fbCreds.cookie.isEmpty || !fbCreds.token.isEmpty {
                     creds = fbCreds
