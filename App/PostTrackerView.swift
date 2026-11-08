@@ -1966,7 +1966,7 @@ enum PostTrackingAPIClient {
                 // Lưu lại vào Token Vault của Space
                 if var vault = try? SecureLoginStore.readTokenVault(spaceId) {
                     vault.convertedTokens["FB_ANDROID"] = record
-                    try? SecureLoginStore.writeTokenVault(vault, for: spaceId)
+                    try? SecureLoginStore.saveTokenVault(vault, for: spaceId)
                 }
             }
         }
