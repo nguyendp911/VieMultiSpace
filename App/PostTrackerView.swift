@@ -33,6 +33,7 @@ struct TrackedPostItem: Identifiable, Codable, Hashable {
     var reactionCount: Int = 0
     var commentCount: Int = 0
     var shareCount: Int = 0
+    var reactionBreakdown: [String: Int] = [:]
 
     // AI Auto-Reply Configuration
     var isAIAutoReplySelected: Bool = false
@@ -368,6 +369,7 @@ final class TrackedPostManager: ObservableObject {
 
         guard let currentIndex = posts.firstIndex(where: { $0.id == id }) else { return }
         posts[currentIndex].reactionCount = details.reactionCount
+        posts[currentIndex].reactionBreakdown = details.reactionBreakdown
         posts[currentIndex].commentCount = max(details.commentCount, details.comments.count)
         posts[currentIndex].shareCount = details.shareCount
         if !details.caption.isEmpty && posts[currentIndex].caption.isEmpty {
@@ -692,6 +694,8 @@ enum PostTrackingAPIClient {
         var commentCount: Int = 0
         var shareCount: Int = 0
         var comments: [TrackedCommentItem] = []
+        var reactionBreakdown: [String: Int] = [:]
+        var reactors: [(id: String, name: String, type: String)] = []
     }
 
     /// Quét danh sách các bài viết mà tài khoản đã đăng trên dòng thời gian
@@ -820,7 +824,180 @@ enum PostTrackingAPIClient {
         return results
     }
 
-    /// Lấy thống kê tương tác (Reaction, Comment, Share) và danh sách bình luận chi tiết của 1 bài viết (Đa tầng: Graph API + Comet Relay JSON + GraphQL Feedback)
+    static let cometReactions: [(name: String, id: String)] = [
+        ("Like", "1635855486666999"),
+        ("Love", "1678524932434102"),
+        ("Haha", "115940658764963"),
+        ("Sad", "908563459236466"),
+        ("Care", "613557422527858"),
+        ("Wow", "478547315650144"),
+        ("Angry", "444813342392137")
+    ]
+
+    /// Lấy chính xác 100% số lượng từng Reaction & danh sách người thả cảm xúc theo 1748401675-getuidnamereactionpostfacebookcachetoken.py
+    static func fetchExactReactionsViaCometUFI(
+        postId: String,
+        postUrl: String,
+        cookieString: String,
+        proxy: SpaceProxy? = nil
+    ) async -> (totalCount: Int, breakdown: [String: Int], reactors: [(id: String, name: String, type: String)])? {
+        let cleanPostUrl = postUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+        var targetUrlStr = cleanPostUrl
+        if targetUrlStr.isEmpty {
+            targetUrlStr = "https://www.facebook.com/\(postId)"
+        }
+
+        let session = makeCookieSession(cookieString: cookieString, proxy: proxy)
+
+        // 1. Trích xuất pfbid từ URL nếu có
+        var extractedFeedbackTargetId: String? = nil
+        let urlParts = targetUrlStr.components(separatedBy: "/")
+        for part in urlParts {
+            if part.hasPrefix("pfbid") {
+                extractedFeedbackTargetId = part
+                break
+            }
+        }
+
+        var lsdToken = ""
+        var jazoestToken = ""
+
+        // 2. Tải HTML bài viết để lấy feedback_target_id, lsd, jazoest
+        if let targetUrl = URL(string: targetUrlStr) {
+            var req = URLRequest(url: targetUrl)
+            req.timeoutInterval = 12
+            req.httpMethod = "GET"
+            req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+            req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8", forHTTPHeaderField: "Accept")
+            req.setValue("vi-VN,vi;q=0.9,en-US;q=0.8", forHTTPHeaderField: "Accept-Language")
+            if !cookieString.isEmpty {
+                req.setValue(cookieString, forHTTPHeaderField: "Cookie")
+            }
+
+            if let (data, _) = try? await session.data(for: req),
+               let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) {
+
+                lsdToken = FacebookTargetPostResolver.firstMatch(pattern: #"\"LSD\"[^{]*\{\"token\":\"([^\"]+)\""#, in: html) ?? ""
+                jazoestToken = FacebookTargetPostResolver.firstMatch(pattern: #"\"jazoest\":\{\"name\":\"jazoest\",\"value\":\"([^\"]+)\"\}"#, in: html) ?? ""
+
+                if extractedFeedbackTargetId == nil {
+                    let patterns = [
+                        #"\"feedback_target_id\":\"([^\"]+)\""#,
+                        #"\"feedbackTargetID\":\"([^\"]+)\""#,
+                        #"\"target_id\":\"([^\"]+)\""#,
+                        #"\"post_id\":\"([^\"]+)\""#,
+                        #"feedbackTargetID[\"\s]*:[\"\s]*\"([^\"]+)\""#,
+                        #"feedback_target_id[\"\s]*:[\"\s]*\"([^\"]+)\""#,
+                        #"\"feedback\":[^}]*\"target_id\":\"([^\"]+)\""#,
+                        #"pfbid[A-Za-z0-9_-]+"#,
+                        #"\"videoID\":\"(\d+)\""#,
+                        #"\"video_id\":\"(\d+)\""#,
+                        #"\"legacyID\":\"(\d+)\""#
+                    ]
+                    for pat in patterns {
+                        if let match = FacebookTargetPostResolver.firstMatch(pattern: pat, in: html), match.count > 5 {
+                            extractedFeedbackTargetId = match
+                            break
+                        }
+                    }
+                }
+            }
+        }
+
+        let targetId = extractedFeedbackTargetId ?? postId
+        guard !targetId.isEmpty, targetId.count > 4 else { return nil }
+
+        let lsd = !lsdToken.isEmpty ? lsdToken : "AV..."
+        let jazoest = !jazoestToken.isEmpty ? jazoestToken : "2955"
+
+        var breakdown: [String: Int] = [:]
+        var reactorsList: [(id: String, name: String, type: String)] = []
+        var totalReactionSum = 0
+
+        guard let gqlUrl = URL(string: "https://www.facebook.com/api/graphql/") else { return nil }
+
+        for reaction in cometReactions {
+            var req = URLRequest(url: gqlUrl)
+            req.timeoutInterval = 10
+            req.httpMethod = "POST"
+            req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+            req.setValue("CometUFIReactionIconTooltipContentQuery", forHTTPHeaderField: "x-fb-friendly-name")
+            req.setValue("359341", forHTTPHeaderField: "x-asbd-id")
+            req.setValue(lsd, forHTTPHeaderField: "x-fb-lsd")
+            req.setValue("https://www.facebook.com", forHTTPHeaderField: "origin")
+            req.setValue("same-origin", forHTTPHeaderField: "sec-fetch-site")
+            req.setValue("cors", forHTTPHeaderField: "sec-fetch-mode")
+            req.setValue("empty", forHTTPHeaderField: "sec-fetch-dest")
+            req.setValue("u=1, i", forHTTPHeaderField: "priority")
+            req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+            if !cookieString.isEmpty {
+                req.setValue(cookieString, forHTTPHeaderField: "Cookie")
+            }
+
+            let bodyPairs: [(String, String)] = [
+                ("av", "0"),
+                ("__aaid", "0"),
+                ("__user", "0"),
+                ("__a", "1"),
+                ("__req", "n"),
+                ("__hs", "20234.HYP:comet_loggedout_pkg.2.1...0"),
+                ("dpr", "1"),
+                ("__ccg", "GOOD"),
+                ("__rev", "1023183597"),
+                ("__s", "jmehfj:ejwx64:a718cb"),
+                ("__hsi", "7508579432954383764"),
+                ("__comet_req", "15"),
+                ("lsd", lsd),
+                ("jazoest", jazoest),
+                ("__spin_r", "1023183597"),
+                ("__spin_b", "trunk"),
+                ("__spin_t", "1748227382"),
+                ("__crn", "comet.fbweb.CometSinglePostDialogRoute"),
+                ("fb_api_caller_class", "RelayModern"),
+                ("fb_api_req_friendly_name", "CometUFIReactionIconTooltipContentQuery"),
+                ("variables", "{\"feedbackTargetID\":\"\(targetId)\",\"reactionID\":\"\(reaction.id)\"}"),
+                ("server_timestamps", "true"),
+                ("doc_id", "9516958201714477")
+            ]
+
+            let allowed = CharacterSet.alphanumerics
+            let bodyStr = bodyPairs.map { k, v in
+                let ek = k.addingPercentEncoding(withAllowedCharacters: allowed) ?? k
+                let ev = v.addingPercentEncoding(withAllowedCharacters: allowed) ?? v
+                return "\(ek)=\(ev)"
+            }.joined(separator: "&")
+            req.httpBody = Data(bodyStr.utf8)
+
+            if let (data, resp) = try? await session.data(for: req),
+               (resp as? HTTPURLResponse)?.statusCode == 200,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let feedback = (json["data"] as? [String: Any])?["feedback"] as? [String: Any],
+               let reactors = feedback["reactors"] as? [String: Any] {
+
+                let count = reactors["count"] as? Int ?? 0
+                if count > 0 {
+                    breakdown[reaction.name] = count
+                    totalReactionSum += count
+                }
+                if let nodes = reactors["nodes"] as? [[String: Any]] {
+                    for node in nodes {
+                        let uid = (node["id"] as? String) ?? ""
+                        let name = (node["name"] as? String) ?? ""
+                        if !uid.isEmpty {
+                            reactorsList.append((id: uid, name: name, type: reaction.name))
+                        }
+                    }
+                }
+            }
+        }
+
+        if totalReactionSum > 0 || !breakdown.isEmpty {
+            return (totalCount: totalReactionSum, breakdown: breakdown, reactors: reactorsList)
+        }
+        return nil
+    }
+
+    /// Lấy thống kê tương tác (Reaction, Comment, Share) và danh sách bình luận chi tiết của 1 bài viết (Đa tầng: Comet UFI + Graph API + Comet Relay JSON + GraphQL Feedback)
     static func fetchPostEngagementAndComments(
         postId: String,
         postUrl: String = "",
@@ -832,6 +1009,18 @@ enum PostTrackingAPIClient {
         proxy: SpaceProxy? = nil
     ) async -> PostEngagementSnapshot {
         var finalSnap = PostEngagementSnapshot()
+
+        // Tầng 0: Lấy chính xác Reaction theo CometUFI (chuẩn 1748401675-getuidnamereactionpostfacebookcachetoken.py)
+        if let exactReactions = await fetchExactReactionsViaCometUFI(
+            postId: postId,
+            postUrl: postUrl,
+            cookieString: cookieString,
+            proxy: proxy
+        ) {
+            finalSnap.reactionCount = exactReactions.totalCount
+            finalSnap.reactionBreakdown = exactReactions.breakdown
+            finalSnap.reactors = exactReactions.reactors
+        }
 
         // Tầng 1: Truy vấn qua Graph API (thử cả ownerUserId_postId và postId trực tiếp + truy vấn nhánh con /comments & /reactions)
         if !accessToken.isEmpty {
@@ -891,6 +1080,12 @@ enum PostTrackingAPIClient {
         target.reactionCount = max(target.reactionCount, source.reactionCount)
         target.commentCount = max(target.commentCount, source.commentCount)
         target.shareCount = max(target.shareCount, source.shareCount)
+        if !source.reactionBreakdown.isEmpty {
+            target.reactionBreakdown = source.reactionBreakdown
+        }
+        if !source.reactors.isEmpty {
+            target.reactors = source.reactors
+        }
         if target.caption.isEmpty && !source.caption.isEmpty {
             target.caption = source.caption
         }
@@ -2217,7 +2412,7 @@ struct PostTrackerView: View {
 
             // Dòng 3: Thống kê tương tác dạng Pill gọn đẹp (#8FBC8F và trắng)
             HStack(spacing: 8) {
-                engagementPill(icon: "hand.thumbsup.fill", text: "\(post.reactionCount) cảm xúc")
+                engagementPill(icon: "hand.thumbsup.fill", text: reactionSummaryText)
                 engagementPill(icon: "bubble.left.fill", text: "\(post.commentCount) bình luận")
                 engagementPill(icon: "arrowshape.turn.up.right.fill", text: "\(post.shareCount) chia sẻ")
 
@@ -2415,6 +2610,23 @@ struct PostTrackerView: View {
                 )
         )
         .shadow(color: Color.black.opacity(0.04), radius: 4, x: 0, y: 2)
+    }
+
+    private var reactionSummaryText: String {
+        guard !post.reactionBreakdown.isEmpty else { return "\(post.reactionCount) cảm xúc" }
+        let mapEmoji = [
+            "Like": "👍",
+            "Love": "❤️",
+            "Care": "🥰",
+            "Haha": "😆",
+            "Wow": "😮",
+            "Sad": "😢",
+            "Angry": "😡"
+        ]
+        let nonZero = post.reactionBreakdown.filter { $0.value > 0 }.sorted(by: { $0.value > $1.value })
+        if nonZero.isEmpty { return "\(post.reactionCount) cảm xúc" }
+        let emojis = nonZero.prefix(2).map { k, v in "\(mapEmoji[k] ?? "")\(v)" }.joined(separator: " ")
+        return "\(emojis) (\(post.reactionCount))"
     }
 
     private func engagementPill(icon: String, text: String) -> some View {

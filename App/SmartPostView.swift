@@ -45,6 +45,9 @@ struct FacebookDestinationItem: Identifiable, Codable, Hashable {
     var subtitle: String
     var ownerSpaceId: UUID?
     var ownerSpaceName: String
+    var viewerPostStatus: String? = nil
+    var memberCount: Int? = nil
+    var privacy: String? = nil
 
     var uniqueSelectionKey: String {
         "\(kind.rawValue)_\(id)_\(ownerSpaceId?.uuidString ?? "manual")"
@@ -650,18 +653,265 @@ enum SmartPostAPIClient {
         return items
     }
 
+    final class StopRedirectDelegate: NSObject, URLSessionTaskDelegate {
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping (URLRequest?) -> Void
+        ) {
+            completionHandler(nil)
+        }
+    }
+
+    /// Lấy access_token từ Ads Manager bằng Cookie theo đúng quy trình của 1769064737-GetGroupUid.py
+    static func fetchAdsManagerAccessToken(cookieString: String) async -> String? {
+        let trimmed = cookieString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let delegate = StopRedirectDelegate()
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 25
+        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+
+        var currentUrl = URL(string: "https://adsmanager.facebook.com/adsmanager/manage/campaigns")
+        var redirectCount = 0
+        let maxRedirects = 2
+
+        while let url = currentUrl, redirectCount <= maxRedirects {
+            var req = URLRequest(url: url)
+            req.httpMethod = "GET"
+            req.setValue(trimmed, forHTTPHeaderField: "Cookie")
+            req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+            req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7", forHTTPHeaderField: "Accept")
+            req.setValue("gzip, deflate, br, zstd", forHTTPHeaderField: "Accept-Encoding")
+            req.setValue("vi-VN,vi;q=0.9,fr-FR;q=0.8,fr;q=0.7,en-US;q=0.6,en;q=0.5", forHTTPHeaderField: "Accept-Language")
+            req.setValue("\"Google Chrome\";v=\"143\", \"Chromium\";v=\"143\", \"Not A(Brand\";v=\"24\"", forHTTPHeaderField: "sec-ch-ua")
+            req.setValue("?0", forHTTPHeaderField: "sec-ch-ua-mobile")
+            req.setValue("\"Windows\"", forHTTPHeaderField: "sec-ch-ua-platform")
+            req.setValue("1", forHTTPHeaderField: "upgrade-insecure-requests")
+            req.setValue("none", forHTTPHeaderField: "sec-fetch-site")
+            req.setValue("navigate", forHTTPHeaderField: "sec-fetch-mode")
+            req.setValue("?1", forHTTPHeaderField: "sec-fetch-user")
+            req.setValue("document", forHTTPHeaderField: "sec-fetch-dest")
+            req.setValue("u=0, i", forHTTPHeaderField: "priority")
+
+            guard let (data, resp) = try? await session.data(for: req),
+                  let http = resp as? HTTPURLResponse else {
+                break
+            }
+
+            let bodyStr = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
+            if let tok = FacebookTargetPostResolver.firstMatch(pattern: #"window\.__accessToken\s*=\s*\"([^\"]+)\""#, in: bodyStr)
+                ?? FacebookTargetPostResolver.firstMatch(pattern: #"\"accessToken\"\s*:\s*\"(EAA[A-Za-z0-9_\-\|=]{20,500})\""#, in: bodyStr) {
+                if !tok.isEmpty { return tok }
+            }
+
+            if [301, 302, 303, 307, 308].contains(http.statusCode), redirectCount < maxRedirects {
+                redirectCount += 1
+                if let loc = http.value(forHTTPHeaderField: "Location") ?? http.value(forHTTPHeaderField: "location"),
+                   let next = URL(string: loc, relativeTo: url)?.absoluteURL {
+                    currentUrl = next
+                    continue
+                }
+            }
+            break
+        }
+        return nil
+    }
+
+    /// Truy vấn danh sách Nhóm đã tham gia qua GraphQL endpoint theo 1769064737-GetGroupUid.py
+    static func queryGraphQLGroups(
+        query: String,
+        token: String,
+        cookieString: String?,
+        spaceId: UUID,
+        spaceName: String,
+        seenIds: inout Set<String>
+    ) async -> [FacebookDestinationItem]? {
+        guard let url = URL(string: "https://graph.facebook.com/graphql") else { return nil }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 30
+        req.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+        req.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
+        req.setValue("https://graph.facebook.com", forHTTPHeaderField: "Origin")
+        req.setValue("https://graph.facebook.com", forHTTPHeaderField: "Referer")
+        req.setValue("same-origin", forHTTPHeaderField: "sec-fetch-site")
+        req.setValue("cors", forHTTPHeaderField: "sec-fetch-mode")
+        req.setValue("empty", forHTTPHeaderField: "sec-fetch-dest")
+        req.setValue("u=1, i", forHTTPHeaderField: "priority")
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        if let c = cookieString, !c.isEmpty {
+            req.setValue(c, forHTTPHeaderField: "Cookie")
+        }
+
+        let postBody = [
+            "q=\(query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query)",
+            "access_token=\(token.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? token)"
+        ].joined(separator: "&")
+        req.httpBody = Data(postBody.utf8)
+
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode != 404,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        if let err = json["error"] as? [String: Any], let code = err["code"] as? Int, code == 190 {
+            return nil
+        }
+
+        var groupNodes: [[String: Any]] = []
+        if let dataDict = json["data"] as? [String: Any] {
+            if let groupsDict = dataDict["groups"] as? [String: Any],
+               let nodes = groupsDict["nodes"] as? [[String: Any]] {
+                groupNodes = nodes
+            } else {
+                for (_, val) in dataDict {
+                    if let dict = val as? [String: Any],
+                       let groupsDict = dict["groups"] as? [String: Any],
+                       let nodes = groupsDict["nodes"] as? [[String: Any]] {
+                        groupNodes = nodes
+                        break
+                    }
+                }
+            }
+        } else {
+            for (_, val) in json {
+                if let dict = val as? [String: Any],
+                   let groupsDict = dict["groups"] as? [String: Any],
+                   let nodes = groupsDict["nodes"] as? [[String: Any]] {
+                    groupNodes = nodes
+                    break
+                }
+            }
+        }
+
+        var results: [FacebookDestinationItem] = []
+        for node in groupNodes {
+            guard let id = node["id"] as? String, !id.isEmpty, !seenIds.contains(id) else { continue }
+            seenIds.insert(id)
+            let name = (node["name"] as? String) ?? "Nhóm \(id)"
+            let status = (node["viewer_post_status"] as? String) ?? ""
+            let visibility = (node["visibility"] as? String) ?? "GROUP"
+            let count = (node["group_member_profiles"] as? [String: Any])?["count"] as? Int ?? 0
+
+            let postStatusText = (status == "CAN_POST_DIRECTLY") ? "Đăng trực tiếp" : (status.isEmpty ? "" : "Cần duyệt")
+            var parts: [String] = []
+            if !postStatusText.isEmpty { parts.append(postStatusText) }
+            if count > 0 { parts.append("\(count) TV") }
+            if !visibility.isEmpty { parts.append(visibility) }
+            parts.append(spaceName)
+            let sub = parts.joined(separator: " • ")
+
+            results.append(FacebookDestinationItem(
+                id: id,
+                name: name,
+                kind: .group,
+                pageAccessToken: nil,
+                subtitle: sub,
+                ownerSpaceId: spaceId,
+                ownerSpaceName: spaceName,
+                viewerPostStatus: status,
+                memberCount: count,
+                privacy: visibility
+            ))
+        }
+        return results
+    }
+
     /// Lấy danh sách Nhóm (Group) mà tài khoản đã tham gia hoặc quản trị
     static func fetchJoinedGroups(
         accessToken: String,
         cookieString: String?,
+        userId: String? = nil,
         spaceId: UUID,
         spaceName: String
     ) async -> [FacebookDestinationItem] {
         var items: [FacebookDestinationItem] = []
         var seenIds = Set<String>()
-        let cleanToken = cleanAccessToken(accessToken)
+        var effectiveToken = cleanAccessToken(accessToken)
 
-        // Tầng 1: Thử các endpoint Graph API (v19.0, b-graph, graph.facebook.com)
+        // 1. Dò tìm UID tài khoản
+        var effectiveUid = userId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if effectiveUid.isEmpty, let c = cookieString {
+            effectiveUid = FacebookTargetPostResolver.firstMatch(pattern: #"c_user=(\d+)"#, in: c) ?? ""
+        }
+        if effectiveUid.isEmpty {
+            if let vault = try? SecureLoginStore.readTokenVault(spaceId), !vault.uid.isEmpty {
+                effectiveUid = vault.uid
+            }
+        }
+
+        // 2. Chuẩn bị token Ads Manager (theo 1769064737-GetGroupUid.py)
+        if let cookie = cookieString, !cookie.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if effectiveToken.isEmpty || !effectiveToken.hasPrefix("EAAB") {
+                if let adsTok = await fetchAdsManagerAccessToken(cookieString: cookie) {
+                    effectiveToken = adsTok
+                    Task.detached {
+                        if var vault = try? SecureLoginStore.readTokenVault(spaceId) {
+                            vault.convertedTokens["ADS_MANAGER_WEB"] = FacebookTokenInfo(
+                                accessToken: adsTok,
+                                expiresIn: 86400 * 30,
+                                tokenPrefix: FacebookAppTokens.extractTokenPrefix(adsTok)
+                            )
+                            if vault.originalToken.isEmpty { vault.originalToken = adsTok }
+                            try? SecureLoginStore.saveTokenVault(vault, for: spaceId)
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. TẦNG 1: Truy vấn GraphQL chính xác theo 1769064737-GetGroupUid.py
+        if !effectiveToken.isEmpty {
+            let queriesToTry: [String] = {
+                if !effectiveUid.isEmpty {
+                    return [
+                        "nodes(\(effectiveUid)){groups{nodes{id,name,viewer_post_status,visibility,group_member_profiles{count}}}}",
+                        "me(){groups{nodes{id,name,viewer_post_status,visibility,group_member_profiles{count}}}}"
+                    ]
+                }
+                return ["me(){groups{nodes{id,name,viewer_post_status,visibility,group_member_profiles{count}}}}"]
+            }()
+
+            for q in queriesToTry {
+                if let gqlResults = await queryGraphQLGroups(
+                    query: q,
+                    token: effectiveToken,
+                    cookieString: cookieString,
+                    spaceId: spaceId,
+                    spaceName: spaceName,
+                    seenIds: &seenIds
+                ) {
+                    if !gqlResults.isEmpty {
+                        items.append(contentsOf: gqlResults)
+                        break
+                    }
+                } else if let cookie = cookieString, !cookie.isEmpty {
+                    if let freshTok = await fetchAdsManagerAccessToken(cookieString: cookie) {
+                        effectiveToken = freshTok
+                        if let retryResults = await queryGraphQLGroups(
+                            query: q,
+                            token: freshTok,
+                            cookieString: cookieString,
+                            spaceId: spaceId,
+                            spaceName: spaceName,
+                            seenIds: &seenIds
+                        ), !retryResults.isEmpty {
+                            items.append(contentsOf: retryResults)
+                            break
+                        }
+                    }
+                }
+            }
+        }
+
+        if !items.isEmpty { return items }
+
+        // 4. TẦNG 2: Fallback qua các endpoint Graph API cũ
         let graphURLs = [
             "https://b-graph.facebook.com/me/groups?fields=id,name,privacy,administrator,icon&limit=200",
             "https://graph.facebook.com/v19.0/me/groups?fields=id,name,privacy,administrator,icon&limit=200",
@@ -673,8 +923,8 @@ enum SmartPostAPIClient {
             var request = URLRequest(url: url, timeoutInterval: 15)
             request.httpMethod = "GET"
             for (k, v) in fbHeaders { request.setValue(v, forHTTPHeaderField: k) }
-            if !cleanToken.isEmpty {
-                request.setValue("OAuth \(cleanToken)", forHTTPHeaderField: "authorization")
+            if !effectiveToken.isEmpty {
+                request.setValue("OAuth \(effectiveToken)", forHTTPHeaderField: "authorization")
             }
             if let c = cookieString, !c.isEmpty {
                 request.setValue(c, forHTTPHeaderField: "Cookie")
@@ -696,7 +946,8 @@ enum SmartPostAPIClient {
                         pageAccessToken: nil,
                         subtitle: "\(isAdmin ? "Quản trị viên • " : "")\(privacy) • \(spaceName)",
                         ownerSpaceId: spaceId,
-                        ownerSpaceName: spaceName
+                        ownerSpaceName: spaceName,
+                        privacy: privacy
                     ))
                 }
                 if !items.isEmpty {
@@ -705,7 +956,7 @@ enum SmartPostAPIClient {
             }
         }
 
-        // Tầng 2: Nếu Graph API rỗng, quét qua Mobile/Web bằng Cookie
+        // 5. TẦNG 3: Nếu Graph API rỗng, quét qua Mobile/Web bằng Cookie
         if items.isEmpty, let cookie = cookieString, !cookie.isEmpty {
             let groupListURLs = [
                 "https://www.facebook.com/groups/joins/",
@@ -2546,10 +2797,31 @@ struct SmartPostView: View {
                                     .font(.caption)
                                     .foregroundStyle(Color.themePrimary)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(item.name)
-                                        .font(.caption.bold())
-                                        .foregroundStyle(.primary)
-                                        .lineLimit(1)
+                                    HStack(spacing: 6) {
+                                        Text(item.name)
+                                            .font(.caption.bold())
+                                            .foregroundStyle(.primary)
+                                            .lineLimit(1)
+                                        if let postStatus = item.viewerPostStatus {
+                                            if postStatus == "CAN_POST_DIRECTLY" {
+                                                Text("Tự do đăng")
+                                                    .font(.system(size: 8, weight: .bold))
+                                                    .padding(.horizontal, 4)
+                                                    .padding(.vertical, 1.5)
+                                                    .background(Color.green.opacity(0.18))
+                                                    .foregroundStyle(Color.green)
+                                                    .clipShape(Capsule())
+                                            } else if postStatus == "CAN_POST_AFTER_APPROVAL" || postStatus == "NEEDS_ADMIN_APPROVAL" {
+                                                Text("Cần duyệt")
+                                                    .font(.system(size: 8, weight: .bold))
+                                                    .padding(.horizontal, 4)
+                                                    .padding(.vertical, 1.5)
+                                                    .background(Color.orange.opacity(0.18))
+                                                    .foregroundStyle(Color.orange)
+                                                    .clipShape(Capsule())
+                                            }
+                                        }
+                                    }
                                     HStack(spacing: 4) {
                                         Text("ID: \(item.id)")
                                             .font(.system(size: 10, design: .monospaced))
@@ -2607,6 +2879,7 @@ struct SmartPostView: View {
                 let groups = await SmartPostAPIClient.fetchJoinedGroups(
                     accessToken: token,
                     cookieString: cookie,
+                    userId: creds.uid,
                     spaceId: space.id,
                     spaceName: space.name
                 )

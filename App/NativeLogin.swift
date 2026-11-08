@@ -1065,6 +1065,58 @@ enum FacebookAPILoginClient {
         try? SecureLoginStore.save(record, for: spaceId)
     }
 
+    /// Tự động dò tìm Vanity Username (ví dụ: yenbinh.dt1992) hoặc Tên tài khoản từ UID số
+    static func resolveVanityUsername(for uid: String) async -> (vanity: String?, name: String?) {
+        let trimmed = uid.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.allSatisfy(\.isNumber), trimmed.count >= 5 else {
+            return (nil, nil)
+        }
+
+        let urls = [
+            "https://m.facebook.com/profile.php?id=\(trimmed)",
+            "https://www.facebook.com/profile.php?id=\(trimmed)"
+        ]
+
+        for urlStr in urls {
+            guard let url = URL(string: urlStr) else { continue }
+            var req = URLRequest(url: url)
+            req.httpMethod = "GET"
+            req.timeoutInterval = 8
+            req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
+            req.setValue("vi-VN,vi;q=0.9,en-US;q=0.8", forHTTPHeaderField: "Accept-Language")
+
+            if let (data, resp) = try? await URLSession.shared.data(for: req),
+               let http = resp as? HTTPURLResponse, (http.statusCode == 200 || http.statusCode == 301 || http.statusCode == 302),
+               let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) {
+
+                var resolvedVanity: String? = nil
+                var profileName: String? = nil
+
+                if let titleMatch = FacebookTargetPostResolver.firstMatch(pattern: #"<title>([^<]+)</title>"#, in: html) {
+                    let cleaned = titleMatch.replacingOccurrences(of: " | Facebook", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !cleaned.isEmpty && !cleaned.lowercased().contains("đăng nhập") && !cleaned.lowercased().contains("log in") {
+                        profileName = cleaned
+                    }
+                }
+
+                if let canon = FacebookTargetPostResolver.firstMatch(pattern: #"<link\s+rel=[\"']canonical[\"']\s+href=[\"']([^\"']+)[\"']"#, in: html)
+                    ?? FacebookTargetPostResolver.firstMatch(pattern: #"<meta\s+property=[\"']og:url[\"']\s+content=[\"']([^\"']+)[\"']"#, in: html) {
+                    if let cUrl = URL(string: canon) {
+                        let path = cUrl.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                        if !path.isEmpty && !path.hasPrefix("profile.php") && !path.hasPrefix("login") && !path.hasPrefix("checkpoint") && !path.contains("/") {
+                            resolvedVanity = path
+                        }
+                    }
+                }
+
+                if resolvedVanity != nil || profileName != nil {
+                    return (resolvedVanity, profileName)
+                }
+            }
+        }
+        return (nil, nil)
+    }
+
     static func login(
         uidPhoneMail: String,
         password: String,
@@ -1376,6 +1428,22 @@ enum FacebookAPILoginClient {
             if errInfo.code == 400 || errInfo.subcode == 1348092 {
                 extraTip = "\n• Mẹo: Nếu mật khẩu chính xác nhưng FB báo sai, hãy lấy giá trị cookie 'datr' của tài khoản dán vào ô 'Machine ID / datr' (như gợi ý trong file script Python)."
             } else if errInfo.code == 401 || errInfo.subcode == 1348131 {
+                // Tự động giải mã UID số sang Vanity Username và thử lại đăng nhập 1 lần
+                if cleanUser.allSatisfy(\.isNumber) {
+                    onStatusUpdate?("UID bị máy chủ Facebook hạn chế, đang tìm Username tài khoản...")
+                    if let (vanity, _) = await resolveVanityUsername(for: cleanUser), let vanityUser = vanity, !vanityUser.isEmpty {
+                        onStatusUpdate?("Đang tự động thử đăng nhập lại với Username: @\(vanityUser)...")
+                        return try await login(
+                            uidPhoneMail: vanityUser,
+                            password: cleanPass,
+                            totpSecretOrCode: cleanTotp,
+                            machineId: resolvedMachineId,
+                            spaceId: spaceId,
+                            convertAll: convertAll,
+                            onStatusUpdate: onStatusUpdate
+                        )
+                    }
+                }
                 extraTip = "\n• Lưu ý: Trên ứng dụng Facebook Android, FB thường chặn đăng nhập bằng dãy số UID. Hãy thử dùng Email hoặc Số điện thoại đăng ký tài khoản này để đăng nhập, hoặc đăng nhập trên Web Không gian rồi bấm 'Trích xuất Token'."
             }
             let userMsg = (errorData["error_user_msg"] as? String)
@@ -1652,6 +1720,9 @@ struct TxtAccount: Identifiable {
     let uid: String
     let password: String
     let twoFA: String
+    var email: String = ""
+    var cookie: String = ""
+    var vanityUsername: String = ""
     var display: String {
         let u = uid.trimmingCharacters(in: .whitespaces)
         return u.isEmpty ? String(password.prefix(10)) + "..." : u
@@ -1789,6 +1860,12 @@ struct TxtAccountPickerSheet: View {
                                             .foregroundStyle(.secondary)
                                             .lineLimit(1)
                                     }
+                                    if !acc.email.isEmpty {
+                                        Text(acc.email)
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.blue)
+                                            .lineLimit(1)
+                                    }
                                     Text(String(acc.password.prefix(8)) + "••••")
                                         .font(.caption2.monospaced())
                                         .foregroundStyle(.secondary)
@@ -1857,6 +1934,11 @@ struct LoginEditorSheet: View {
     @State private var showTxtAccountPicker = false
     @State private var showPassword = false
 
+    @State private var detectedEmail = ""
+    @State private var resolvedVanity = ""
+    @State private var resolvedProfileName = ""
+    @State private var isResolvingVanity = false
+
     var body: some View {
         NavigationStack {
             Form {
@@ -1899,6 +1981,57 @@ struct LoginEditorSheet: View {
                                 applyPipeFormatString(newValue)
                             }
                         }
+
+                    if username.trimmingCharacters(in: .whitespacesAndNewlines).allSatisfy(\.isNumber) || !detectedEmail.isEmpty || !resolvedVanity.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                if !resolvedVanity.isEmpty {
+                                    Button {
+                                        username = resolvedVanity
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "arrow.triangle.2.circlepath")
+                                            Text("Đổi sang @\(resolvedVanity)\(resolvedProfileName.isEmpty ? "" : " (\(resolvedProfileName))")")
+                                        }
+                                        .font(.caption2.bold())
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(Color.themePrimaryDark)
+                                }
+                                if !detectedEmail.isEmpty, detectedEmail != username {
+                                    Button {
+                                        username = detectedEmail
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "envelope.fill")
+                                            Text("Dùng Email: \(detectedEmail)")
+                                        }
+                                        .font(.caption2.bold())
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .tint(.blue)
+                                }
+                                if username.trimmingCharacters(in: .whitespacesAndNewlines).allSatisfy(\.isNumber) && resolvedVanity.isEmpty {
+                                    Button {
+                                        Task { await resolveVanityForCurrentUID() }
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            if isResolvingVanity {
+                                                ProgressView().controlSize(.mini)
+                                            } else {
+                                                Image(systemName: "sparkles")
+                                            }
+                                            Text("Tìm Username / Tên Facebook")
+                                        }
+                                        .font(.caption2.bold())
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .disabled(isResolvingVanity)
+                                }
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
 
                     HStack(spacing: 8) {
                         Group {
@@ -2166,10 +2299,29 @@ struct LoginEditorSheet: View {
                     username = acc.uid
                     password = acc.password
                     seed = acc.twoFA
+                    if !acc.email.isEmpty { detectedEmail = acc.email }
+                    if !acc.cookie.isEmpty { manualCookie = acc.cookie }
+                    if acc.uid.allSatisfy(\.isNumber) {
+                        Task { await resolveVanityForCurrentUID() }
+                    }
                     message = "✅ Đã nạp tài khoản: \(acc.uid)"
                 }
                 .presentationDetents([.medium, .large])
             }
+        }
+    }
+
+    private func resolveVanityForCurrentUID() async {
+        let clean = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard clean.allSatisfy(\.isNumber), clean.count >= 5 else { return }
+        isResolvingVanity = true
+        defer { isResolvingVanity = false }
+        let (vanity, name) = await FacebookAPILoginClient.resolveVanityUsername(for: clean)
+        if let vanity, !vanity.isEmpty {
+            resolvedVanity = vanity
+        }
+        if let name, !name.isEmpty {
+            resolvedProfileName = name
         }
     }
 
@@ -2220,6 +2372,11 @@ struct LoginEditorSheet: View {
                 username = single.uid
                 password = single.password
                 seed = single.twoFA
+                if !single.email.isEmpty { detectedEmail = single.email }
+                if !single.cookie.isEmpty { manualCookie = single.cookie }
+                if single.uid.allSatisfy(\.isNumber) {
+                    Task { await resolveVanityForCurrentUID() }
+                }
                 message = "✅ Đã nạp tài khoản: \(single.uid)"
             } else {
                 parsedTxtAccounts = accounts
@@ -2267,11 +2424,19 @@ struct LoginEditorSheet: View {
         if parts.count >= 3, !parts[2].isEmpty {
             seed = parts[2]
         }
-        if parts.count >= 4, parts[3].contains("c_user=") {
-            manualCookie = parts[3]
+        for p in parts {
+            if p.contains("@") && p.contains(".") && !p.contains(" ") && detectedEmail.isEmpty {
+                detectedEmail = p
+            } else if p.contains("c_user=") && manualCookie.isEmpty {
+                manualCookie = p
+            } else if p.hasPrefix("EAA") && manualToken.isEmpty {
+                manualToken = p
+            }
         }
-        if parts.count >= 5, parts[4].hasPrefix("EAA") {
-            manualToken = parts[4]
+        if parts[0].contains("@") && parts[0].contains(".") {
+            detectedEmail = parts[0]
+        } else if parts[0].allSatisfy(\.isNumber) {
+            Task { await resolveVanityForCurrentUID() }
         }
     }
 
@@ -2314,24 +2479,33 @@ struct LoginEditorSheet: View {
             let uid = parts[0]
             let pass = parts[1]
             var fa = ""
+            var emailCandidate = ""
+            var cookieCandidate = ""
 
-            if parts.count >= 3 {
-                for i in 2..<parts.count {
-                    let candidate = parts[i].replacingOccurrences(of: " ", with: "")
+            for i in 2..<parts.count {
+                let part = parts[i]
+                if part.contains("@") && part.contains(".") && !part.contains(" ") && emailCandidate.isEmpty {
+                    emailCandidate = part
+                } else if part.contains("c_user=") && cookieCandidate.isEmpty {
+                    cookieCandidate = part
+                } else if fa.isEmpty {
+                    let candidate = part.replacingOccurrences(of: " ", with: "")
                     let clean = candidate.uppercased()
                     let isBase32 = clean.count >= 16 && clean.count <= 64 && clean.allSatisfy { "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains($0) }
-                    if isBase32 && fa.isEmpty {
+                    if isBase32 {
                         fa = clean
-                        break
                     }
                 }
-                if fa.isEmpty {
-                    fa = parts[2]
-                }
+            }
+            if fa.isEmpty, parts.count >= 3 {
+                fa = parts[2]
+            }
+            if uid.contains("@") && uid.contains(".") {
+                emailCandidate = uid
             }
 
             guard !uid.isEmpty, !pass.isEmpty else { return nil }
-            return TxtAccount(uid: uid, password: pass, twoFA: fa)
+            return TxtAccount(uid: uid, password: pass, twoFA: fa, email: emailCandidate, cookie: cookieCandidate)
         }
     }
 
