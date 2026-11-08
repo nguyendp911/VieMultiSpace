@@ -1947,6 +1947,8 @@ struct SmartPostView: View {
     @State private var manualDestinationInput: String = ""
     @State private var isLoadingDestinations = false
     @State private var isResolvingManualDestination = false
+    @State private var isGroupListExpanded: Bool = true
+    @State private var isPageListExpanded: Bool = true
 
     @State private var postCaption = ""
     @State private var privacyOption: SmartPostPrivacy = .everyone
@@ -1998,86 +2000,78 @@ struct SmartPostView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                // Custom Modern 3-Tab Switcher (Gọn gàng & Trang trí đẹp mắt với tone #8FBC8F)
-                HStack(spacing: 6) {
-                    smartTabButton(
-                        index: 0,
-                        title: "Soạn & Đăng",
-                        icon: "square.and.pencil",
-                        badgeCount: 0,
-                        activeColors: [Color.themePrimary, Color.themePrimaryDark]
-                    )
-                    smartTabButton(
-                        index: 1,
-                        title: "Lịch đăng",
-                        icon: "calendar.badge.clock",
-                        badgeCount: scheduler.tasks.count,
-                        activeColors: [Color.themePrimary, Color.themePrimaryDark]
-                    )
-                    smartTabButton(
-                        index: 2,
-                        title: "Theo dõi & AI",
-                        icon: "chart.bar.doc.horizontal.fill",
-                        badgeCount: tracker.posts.count,
-                        activeColors: [Color.themePrimary, Color.themePrimaryDark]
-                    )
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
+        VStack(spacing: 0) {
+            // Custom Modern 3-Tab Switcher (Gọn gàng & Trang trí đẹp mắt với tone #8FBC8F)
+            HStack(spacing: 6) {
+                smartTabButton(
+                    index: 0,
+                    title: "Soạn & Đăng",
+                    icon: "square.and.pencil",
+                    badgeCount: 0,
+                    activeColors: [Color.themePrimary, Color.themePrimaryDark]
+                )
+                smartTabButton(
+                    index: 1,
+                    title: "Lịch đăng",
+                    icon: "calendar.badge.clock",
+                    badgeCount: scheduler.tasks.count,
+                    activeColors: [Color.themePrimary, Color.themePrimaryDark]
+                )
+                smartTabButton(
+                    index: 2,
+                    title: "Theo dõi & AI",
+                    icon: "chart.bar.doc.horizontal.fill",
+                    badgeCount: tracker.posts.count,
+                    activeColors: [Color.themePrimary, Color.themePrimaryDark]
+                )
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
 
-                if selectedTab == 0 {
-                    composeForm
-                } else if selectedTab == 1 {
-                    scheduleManagerView
-                } else {
-                    PostTrackerView()
-                }
+            if selectedTab == 0 {
+                composeForm
+            } else if selectedTab == 1 {
+                scheduleManagerView
+            } else {
+                PostTrackerView()
             }
-            .navigationTitle("Smart Post")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Đóng") { dismiss() }
-                        .disabled(isPublishing)
-                }
-            }
-            .sheet(isPresented: $showPhotoPicker) {
-                SmartPostMediaPicker(
-                    onImagesPicked: { imgs in
-                        selectedVideoData = nil // Nếu chọn ảnh thì xóa video
-                        selectedImages.append(contentsOf: imgs)
-                    },
-                    onVideoPicked: { _ in },
-                    filterType: .images
-                )
-            }
-            .sheet(isPresented: $showVideoPicker) {
-                SmartPostMediaPicker(
-                    onImagesPicked: { _ in },
-                    onVideoPicked: { vdata in
-                        selectedImages.removeAll() // Nếu chọn video thì bỏ ảnh
-                        selectedVideoData = vdata
-                    },
-                    filterType: .videos
-                )
-            }
-            .sheet(item: $editingTask) { task in
-                EditScheduleSheet(task: task)
-            }
-            .alert("Thông báo", isPresented: Binding(
-                get: { alertMessage != nil },
-                set: { if !$0 { alertMessage = nil } }
-            )) {
-                Button("OK") { alertMessage = nil }
-            } message: {
-                Text(alertMessage ?? "")
-            }
-            .onAppear {
-                if selectedSpaceIds.isEmpty {
-                    selectedSpaceIds = Set(availableSpaces.map(\.id))
-                }
+        }
+        .navigationTitle("Smart Post")
+        .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showPhotoPicker) {
+            SmartPostMediaPicker(
+                onImagesPicked: { imgs in
+                    selectedVideoData = nil // Nếu chọn ảnh thì xóa video
+                    selectedImages.append(contentsOf: imgs)
+                },
+                onVideoPicked: { _ in },
+                filterType: .images
+            )
+        }
+        .sheet(isPresented: $showVideoPicker) {
+            SmartPostMediaPicker(
+                onImagesPicked: { _ in },
+                onVideoPicked: { vdata in
+                    selectedImages.removeAll() // Nếu chọn video thì bỏ ảnh
+                    selectedVideoData = vdata
+                },
+                filterType: .videos
+            )
+        }
+        .sheet(item: $editingTask) { task in
+            EditScheduleSheet(task: task)
+        }
+        .alert("Thông báo", isPresented: Binding(
+            get: { alertMessage != nil },
+            set: { if !$0 { alertMessage = nil } }
+        )) {
+            Button("OK") { alertMessage = nil }
+        } message: {
+            Text(alertMessage ?? "")
+        }
+        .onAppear {
+            if selectedSpaceIds.isEmpty {
+                selectedSpaceIds = Set(availableSpaces.map(\.id))
             }
         }
     }
@@ -2820,127 +2814,172 @@ struct SmartPostView: View {
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 2)
             } else {
-                // Thanh tìm kiếm nhanh danh sách Nhóm / Fanpage
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                        .font(.caption)
-                    TextField("Tìm kiếm tên hoặc ID \(isGroup ? "nhóm" : "trang")...", text: $destinationSearchText)
-                        .font(.caption)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                    if !destinationSearchText.isEmpty {
-                        Button {
-                            destinationSearchText = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
-
+                let isExpanded = isGroup ? isGroupListExpanded : isPageListExpanded
                 let filteredList = list.filter { item in
                     let q = destinationSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                     if q.isEmpty { return true }
                     return item.name.lowercased().contains(q) || item.id.contains(q) || item.subtitle.lowercased().contains(q)
                 }
 
-                HStack {
+                // Thanh điều khiển: Thống kê + Nút Thu gọn / Mở rộng + Chọn hết / Bỏ chọn
+                HStack(spacing: 8) {
                     Text("Đã chọn \(activeSelectedDestinations.count)/\(list.count) \(isGroup ? "Nhóm" : "Fanpage")")
                         .font(.caption.bold())
                         .foregroundStyle(Color.themePrimary)
+
                     Spacer()
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            if isGroup {
+                                isGroupListExpanded.toggle()
+                            } else {
+                                isPageListExpanded.toggle()
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: isExpanded ? "chevron.up.circle.fill" : "chevron.down.circle.fill")
+                            Text(isExpanded ? "Thu gọn" : "Mở rộng")
+                        }
+                        .font(.caption2.bold())
+                        .foregroundStyle(Color.themePrimary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3.5)
+                        .background(Color.themePrimary.opacity(0.12), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+
                     Button("Chọn hết") {
                         for item in filteredList { selectedDestinationKeys.insert(item.uniqueSelectionKey) }
                     }
                     .font(.caption2.bold())
+                    .foregroundStyle(Color.themePrimary)
+
                     Text("•").foregroundStyle(.secondary)
+
                     Button("Bỏ chọn") {
                         for item in filteredList { selectedDestinationKeys.remove(item.uniqueSelectionKey) }
                     }
                     .font(.caption2.bold())
+                    .foregroundStyle(.secondary)
                 }
 
-                if filteredList.isEmpty {
-                    Text("Không tìm thấy kết quả phù hợp với \"\(destinationSearchText)\"")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 4)
-                } else {
-                    ForEach(filteredList, id: \.uniqueSelectionKey) { item in
-                        let isChecked = selectedDestinationKeys.contains(item.uniqueSelectionKey)
-                        Button {
-                            if isChecked {
-                                selectedDestinationKeys.remove(item.uniqueSelectionKey)
-                            } else {
-                                selectedDestinationKeys.insert(item.uniqueSelectionKey)
-                            }
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: isChecked ? "checkmark.square.fill" : "square")
-                                    .foregroundStyle(isChecked ? Color.themePrimary : .secondary)
-                                    .font(.subheadline)
-                                Image(systemName: item.kind.icon)
+                if isExpanded {
+                    // Thanh tìm kiếm nhanh danh sách Nhóm / Fanpage
+                    HStack(spacing: 6) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                            .font(.caption)
+                        TextField("Tìm kiếm tên hoặc ID \(isGroup ? "nhóm" : "trang")...", text: $destinationSearchText)
+                            .font(.caption)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                        if !destinationSearchText.isEmpty {
+                            Button {
+                                destinationSearchText = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
                                     .font(.caption)
-                                    .foregroundStyle(Color.themePrimary)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 6) {
-                                        Text(item.name)
-                                            .font(.caption.bold())
-                                            .foregroundStyle(.primary)
-                                            .lineLimit(1)
-                                        if let postStatus = item.viewerPostStatus {
-                                            if postStatus == "CAN_POST_DIRECTLY" {
-                                                Text("Tự do đăng")
-                                                    .font(.system(size: 8, weight: .bold))
-                                                    .padding(.horizontal, 4)
-                                                    .padding(.vertical, 1.5)
-                                                    .background(Color.green.opacity(0.18))
-                                                    .foregroundStyle(Color.green)
-                                                    .clipShape(Capsule())
-                                            } else if postStatus == "CAN_POST_AFTER_APPROVAL" || postStatus == "NEEDS_ADMIN_APPROVAL" {
-                                                Text("Cần duyệt")
-                                                    .font(.system(size: 8, weight: .bold))
-                                                    .padding(.horizontal, 4)
-                                                    .padding(.vertical, 1.5)
-                                                    .background(Color.orange.opacity(0.18))
-                                                    .foregroundStyle(Color.orange)
-                                                    .clipShape(Capsule())
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+
+                    if filteredList.isEmpty {
+                        Text("Không tìm thấy kết quả phù hợp với \"\(destinationSearchText)\"")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 4)
+                    } else {
+                        ForEach(filteredList, id: \.uniqueSelectionKey) { item in
+                            let isChecked = selectedDestinationKeys.contains(item.uniqueSelectionKey)
+                            Button {
+                                if isChecked {
+                                    selectedDestinationKeys.remove(item.uniqueSelectionKey)
+                                } else {
+                                    selectedDestinationKeys.insert(item.uniqueSelectionKey)
+                                }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: isChecked ? "checkmark.square.fill" : "square")
+                                        .foregroundStyle(isChecked ? Color.themePrimary : .secondary)
+                                        .font(.subheadline)
+                                    Image(systemName: item.kind.icon)
+                                        .font(.caption)
+                                        .foregroundStyle(Color.themePrimary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(spacing: 6) {
+                                            Text(item.name)
+                                                .font(.caption.bold())
+                                                .foregroundStyle(.primary)
+                                                .lineLimit(1)
+                                            if let postStatus = item.viewerPostStatus {
+                                                if postStatus == "CAN_POST_DIRECTLY" {
+                                                    Text("Tự do đăng")
+                                                        .font(.system(size: 8, weight: .bold))
+                                                        .padding(.horizontal, 4)
+                                                        .padding(.vertical, 1.5)
+                                                        .background(Color.green.opacity(0.18))
+                                                        .foregroundStyle(Color.green)
+                                                        .clipShape(Capsule())
+                                                } else if postStatus == "CAN_POST_AFTER_APPROVAL" || postStatus == "NEEDS_ADMIN_APPROVAL" {
+                                                    Text("Cần duyệt")
+                                                        .font(.system(size: 8, weight: .bold))
+                                                        .padding(.horizontal, 4)
+                                                        .padding(.vertical, 1.5)
+                                                        .background(Color.orange.opacity(0.18))
+                                                        .foregroundStyle(Color.orange)
+                                                        .clipShape(Capsule())
+                                                }
                                             }
                                         }
+                                        HStack(spacing: 4) {
+                                            Text("ID: \(item.id)")
+                                                .font(.system(size: 10, design: .monospaced))
+                                                .foregroundStyle(.secondary)
+                                            Text("•")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                            Text(item.subtitle)
+                                                .font(.system(size: 10))
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
                                     }
-                                    HStack(spacing: 4) {
-                                        Text("ID: \(item.id)")
-                                            .font(.system(size: 10, design: .monospaced))
-                                            .foregroundStyle(.secondary)
-                                        Text("•")
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                        Text(item.subtitle)
-                                            .font(.system(size: 10))
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(1)
+                                    Spacer()
+                                    if item.pageAccessToken != nil {
+                                        Text("Page Token")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 2)
+                                            .background(Color.themeBackgroundPastel, in: Capsule())
+                                            .foregroundStyle(Color.themePrimaryDark)
                                     }
                                 }
-                                Spacer()
-                                if item.pageAccessToken != nil {
-                                    Text("Page Token")
-                                        .font(.system(size: 9, weight: .bold))
-                                        .padding(.horizontal, 5)
-                                        .padding(.vertical, 2)
-                                        .background(Color.themeBackgroundPastel, in: Capsule())
-                                        .foregroundStyle(Color.themePrimaryDark)
-                                }
+                                .padding(.vertical, 3)
                             }
-                            .padding(.vertical, 3)
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
+                } else {
+                    // Trạng thái thu gọn gọn gàng, giảm tải không gian cuộn dọc
+                    HStack(spacing: 6) {
+                        Image(systemName: "list.bullet.rectangle")
+                            .foregroundStyle(Color.themePrimary)
+                            .font(.caption)
+                        Text("Danh sách đang thu gọn (\(activeSelectedDestinations.count)/\(list.count) mục được chọn). Chạm 'Mở rộng' để xem hoặc tìm kiếm.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
                 }
             }
         }
@@ -2988,6 +3027,7 @@ struct SmartPostView: View {
             }
             discoveredGroups = combined
             for g in combined { selectedDestinationKeys.insert(g.uniqueSelectionKey) }
+            isGroupListExpanded = true
         } else if kind == .fanpage {
             let manualExisting = discoveredPages.filter { $0.ownerSpaceId == nil }
             var combined = manualExisting
@@ -2996,6 +3036,7 @@ struct SmartPostView: View {
             }
             discoveredPages = combined
             for p in combined { selectedDestinationKeys.insert(p.uniqueSelectionKey) }
+            isPageListExpanded = true
         }
     }
 
@@ -3026,10 +3067,12 @@ struct SmartPostView: View {
                 if !discoveredGroups.contains(where: { $0.id == item.id && $0.ownerSpaceId == nil }) {
                     discoveredGroups.insert(item, at: 0)
                 }
+                isGroupListExpanded = true
             } else if kind == .fanpage {
                 if !discoveredPages.contains(where: { $0.id == item.id && $0.ownerSpaceId == nil }) {
                     discoveredPages.insert(item, at: 0)
                 }
+                isPageListExpanded = true
             }
             selectedDestinationKeys.insert(item.uniqueSelectionKey)
             manualDestinationInput = ""
