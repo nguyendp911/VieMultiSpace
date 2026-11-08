@@ -1738,53 +1738,79 @@ struct TxtAccountPickerSheet: View {
     var onSelect: (TxtAccount) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var selectedId: UUID? = nil
+    @State private var searchText = ""
 
     private let columns = [GridItem(.flexible()), GridItem(.flexible())]
 
+    private var filteredAccounts: [TxtAccount] {
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return accounts }
+        return accounts.filter {
+            $0.uid.localizedCaseInsensitiveContains(trimmed) ||
+            $0.display.localizedCaseInsensitiveContains(trimmed)
+        }
+    }
+
     var body: some View {
         NavigationStack {
-            ScrollView {
-                LazyVGrid(columns: columns, spacing: 10) {
-                    ForEach(accounts) { acc in
-                        let isSelected = selectedId == acc.id
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack {
-                                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(isSelected ? Color.blue : Color.secondary)
-                                Spacer()
-                                if !acc.twoFA.isEmpty {
-                                    Image(systemName: "lock.shield")
-                                        .font(.caption2)
-                                        .foregroundStyle(.orange)
+            Group {
+                if filteredAccounts.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "doc.text.magnifyingglass")
+                            .font(.system(size: 44))
+                            .foregroundStyle(.secondary)
+                        Text(accounts.isEmpty ? "Danh sách tài khoản trống" : "Không tìm thấy tài khoản phù hợp")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollView {
+                        LazyVGrid(columns: columns, spacing: 10) {
+                            ForEach(filteredAccounts) { acc in
+                                let isSelected = selectedId == acc.id
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack {
+                                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                            .foregroundStyle(isSelected ? Color.blue : Color.secondary)
+                                        Spacer()
+                                        if !acc.twoFA.isEmpty {
+                                            Image(systemName: "lock.shield")
+                                                .font(.caption2)
+                                                .foregroundStyle(.orange)
+                                        }
+                                    }
+                                    Text(acc.display)
+                                        .font(.caption.bold())
+                                        .lineLimit(1)
+                                    if !acc.uid.isEmpty {
+                                        Text("UID: " + acc.uid)
+                                            .font(.caption2.monospaced())
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    Text(String(acc.password.prefix(8)) + "••••")
+                                        .font(.caption2.monospaced())
+                                        .foregroundStyle(.secondary)
                                 }
-                            }
-                            Text(acc.display)
-                                .font(.caption.bold())
-                                .lineLimit(1)
-                            if !acc.uid.isEmpty {
-                                Text("UID: " + acc.uid)
-                                    .font(.caption2.monospaced())
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                            Text(String(acc.password.prefix(8)) + "••••")
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10)
-                                .fill(isSelected ? Color.blue.opacity(0.12) : Color(uiColor: .secondarySystemGroupedBackground))
-                                .overlay(
+                                .padding(10)
+                                .background(
                                     RoundedRectangle(cornerRadius: 10)
-                                        .stroke(isSelected ? Color.blue : Color.clear, lineWidth: 1.5)
+                                        .fill(isSelected ? Color.blue.opacity(0.12) : Color(uiColor: .secondarySystemGroupedBackground))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 10)
+                                                .stroke(isSelected ? Color.blue : Color.clear, lineWidth: 1.5)
+                                        )
                                 )
-                        )
-                        .onTapGesture { selectedId = acc.id }
+                                .contentShape(Rectangle())
+                                .onTapGesture { selectedId = acc.id }
+                            }
+                        }
+                        .padding()
                     }
                 }
-                .padding()
             }
+            .searchable(text: $searchText, prompt: "Tìm theo UID...")
             .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle("Chọn tài khoản (\(accounts.count))")
             .navigationBarTitleDisplayMode(.inline)
@@ -2129,39 +2155,72 @@ struct LoginEditorSheet: View {
             )) {
                 Button("OK") { message = nil }
             } message: { Text(message ?? "") }
-            .sheet(isPresented: $showFilePicker) {
-                TxtDocumentPicker(
-                    onPicked: { text in
-                        showFilePicker = false
-                        let accounts = parseTxtAccounts(text)
-                        if accounts.isEmpty {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                                message = "Không tìm thấy dòng tài khoản hợp lệ trong file.\nĐịnh dạng hỗ trợ: UID|Pass|2FA (hoặc phân tách bằng :, tab, ;)."
-                            }
-                        } else if accounts.count == 1, let single = accounts.first {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                                username = single.uid
-                                password = single.password
-                                seed = single.twoFA
-                                message = "✅ Đã nạp tài khoản: \(single.uid)"
-                            }
-                        } else {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                                parsedTxtAccounts = accounts
-                                showTxtAccountPicker = true
-                            }
+            .fileImporter(
+                isPresented: $showFilePicker,
+                allowedContentTypes: [.plainText, .text, .utf8PlainText, .commaSeparatedText, .data],
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let url):
+                    let canAccess = url.startAccessingSecurityScopedResource()
+                    defer {
+                        if canAccess {
+                            url.stopAccessingSecurityScopedResource()
                         }
-                    },
-                    onDismiss: {
-                        showFilePicker = false
                     }
-                )
+
+                    var loadedData: Data? = try? Data(contentsOf: url)
+                    if loadedData == nil {
+                        var coordinatorError: NSError?
+                        let coordinator = NSFileCoordinator()
+                        coordinator.coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinatorError) { readURL in
+                            loadedData = try? Data(contentsOf: readURL)
+                        }
+                    }
+
+                    guard let data = loadedData, !data.isEmpty else {
+                        message = "⚠️ Không thể đọc nội dung file (file trống hoặc chưa được tải về)."
+                        return
+                    }
+
+                    let decodedText: String? = {
+                        if let s = String(data: data, encoding: .utf8) { return s }
+                        if let s = String(data: data, encoding: .utf16) { return s }
+                        if let s = String(data: data, encoding: .unicode) { return s }
+                        if let s = String(data: data, encoding: .windowsCP1252) { return s }
+                        if let s = String(data: data, encoding: .isoLatin1) { return s }
+                        if let s = String(data: data, encoding: .ascii) { return s }
+                        return nil
+                    }()
+
+                    guard let rawText = decodedText, !rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        message = "⚠️ Không thể giải mã bảng mã của file văn bản."
+                        return
+                    }
+
+                    let accounts = parseTxtAccounts(rawText)
+                    if accounts.isEmpty {
+                        message = "Không tìm thấy dòng tài khoản hợp lệ trong file.\nĐịnh dạng hỗ trợ: UID|Pass|2FA (hoặc phân tách bằng :, tab, ;)."
+                    } else if accounts.count == 1, let single = accounts.first {
+                        username = single.uid
+                        password = single.password
+                        seed = single.twoFA
+                        message = "✅ Đã nạp tài khoản: \(single.uid)"
+                    } else {
+                        parsedTxtAccounts = accounts
+                        showTxtAccountPicker = true
+                    }
+
+                case .failure(let err):
+                    message = "Lỗi khi chọn file: \(err.localizedDescription)"
+                }
             }
             .sheet(isPresented: $showTxtAccountPicker) {
                 TxtAccountPickerSheet(accounts: parsedTxtAccounts) { acc in
                     username = acc.uid
                     password = acc.password
                     seed = acc.twoFA
+                    message = "✅ Đã nạp tài khoản: \(acc.uid)"
                 }
                 .presentationDetents([.medium, .large])
             }
@@ -2213,12 +2272,14 @@ struct LoginEditorSheet: View {
     }
 
     private func parseTxtAccounts(_ text: String) -> [TxtAccount] {
-        let lines = text.replacingOccurrences(of: "\r\n", with: "\n")
+        let invisibleChars = CharacterSet(charactersIn: "\u{200B}\u{200C}\u{200D}\u{FEFF}")
+        let lines = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
             .components(separatedBy: "\n")
 
         return lines.compactMap { line -> TxtAccount? in
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines.union(invisibleChars))
             guard !trimmed.isEmpty, !trimmed.hasPrefix("#"), !trimmed.hasPrefix("//") else { return nil }
 
             let delimiter: Character? = {
@@ -2229,9 +2290,21 @@ struct LoginEditorSheet: View {
                 return nil
             }()
 
-            guard let delim = delimiter else { return nil }
-            let parts = trimmed.split(separator: delim, omittingEmptySubsequences: false)
-                .map { String($0).trimmingCharacters(in: .whitespaces) }
+            let parts: [String]
+            if let delim = delimiter {
+                parts = trimmed.split(separator: delim, omittingEmptySubsequences: false)
+                    .map { String($0).trimmingCharacters(in: .whitespaces.union(invisibleChars)) }
+            } else {
+                let spaceParts = trimmed.components(separatedBy: .whitespaces)
+                    .map { $0.trimmingCharacters(in: .whitespaces.union(invisibleChars)) }
+                    .filter { !$0.isEmpty }
+                if spaceParts.count >= 2 {
+                    parts = spaceParts
+                } else {
+                    return nil
+                }
+            }
+
             guard parts.count >= 2 else { return nil }
 
             let uid = parts[0]
