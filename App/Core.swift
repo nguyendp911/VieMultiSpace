@@ -121,10 +121,7 @@ final class SpaceLibrary: ObservableObject {
         }
     }
 
-    static func findSpace(id: UUID) -> Space? {
-        if let sp = shared?.spaces.first(where: { $0.id == id }) {
-            return sp
-        }
+    nonisolated static func findSpace(id: UUID) -> Space? {
         if let data = UserDefaults.standard.data(forKey: "vie.multispace.profiles.v1"),
            let profiles = try? JSONDecoder().decode([Space].self, from: data) {
             return profiles.first(where: { $0.id == id })
