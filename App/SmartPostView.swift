@@ -571,12 +571,14 @@ enum SmartPostAPIClient {
         postId: String,
         commentText: String,
         accessToken: String,
-        proxy: SpaceProxy? = nil
+        proxy: SpaceProxy? = nil,
+        ownerUid: String? = nil,
+        alternativeTokens: [String] = []
     ) async -> (success: Bool, message: String) {
         let cleanText = commentText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanText.isEmpty else { return (false, "Nội dung rỗng") }
         let cleanToken = cleanAccessToken(accessToken)
-        guard !cleanToken.isEmpty else { return (false, "Token rỗng") }
+        guard !cleanToken.isEmpty || !alternativeTokens.isEmpty else { return (false, "Token rỗng") }
 
         let cleanPostId = postId.components(separatedBy: "_").last ?? postId
         let lockKey = "\(cleanPostId)_\(cleanText.hashValue)"
@@ -602,13 +604,19 @@ enum SmartPostAPIClient {
         }
         let session = URLSession(configuration: config)
 
-        // 1. Ưu tiên postId gốc trước (rất quan trọng đối với Page Post dạng {pageId}_{postId}), rồi mới thử cleanPostId
+        // 1. Ưu tiên postId gốc trước, rồi mới thử cleanPostId và compound ID {ownerUid}_{cleanPostId}
         var targets: [String] = []
         if !postId.isEmpty { targets.append(postId) }
         if !cleanPostId.isEmpty && cleanPostId != postId { targets.append(cleanPostId) }
+        if let uid = ownerUid, !uid.isEmpty, !cleanPostId.isEmpty, !cleanPostId.contains("_") {
+            let compound = "\(uid)_\(cleanPostId)"
+            if !targets.contains(compound) {
+                targets.append(compound)
+            }
+        }
 
         // 2. Chuẩn bị danh sách Token (nếu là bài viết trên Page, tự động lấy Page Access Token để có đủ quyền bình luận)
-        var tokensToTry: [String] = [cleanToken]
+        var tokensToTry: [String] = []
         if let underIdx = postId.firstIndex(of: "_") {
             let pageOrOwnerId = String(postId[..<underIdx])
             if let pUrl = URL(string: "https://graph.facebook.com/\(pageOrOwnerId)?fields=access_token") {
@@ -617,14 +625,25 @@ enum SmartPostAPIClient {
                 for (k, v) in fbHeaders { pReq.setValue(v, forHTTPHeaderField: k) }
                 if let (pData, _) = try? await session.data(for: pReq),
                    let pJson = try? JSONSerialization.jsonObject(with: pData) as? [String: Any],
-                   let pageToken = pJson["access_token"] as? String, !pageToken.isEmpty,
-                   !tokensToTry.contains(pageToken) {
-                    tokensToTry.insert(pageToken, at: 0) // Page Access Token được ưu tiên số 1
+                   let pageToken = pJson["access_token"] as? String, !pageToken.isEmpty {
+                    tokensToTry.append(pageToken) // Page Access Token được ưu tiên số 1
                 }
             }
         }
 
+        // Thêm alternative tokens (FB_ANDROID, PAGES_MANAGER...) trước
+        for alt in alternativeTokens {
+            let c = cleanAccessToken(alt)
+            if !c.isEmpty && !tokensToTry.contains(c) {
+                tokensToTry.append(c)
+            }
+        }
+        if !cleanToken.isEmpty && !tokensToTry.contains(cleanToken) {
+            tokensToTry.append(cleanToken)
+        }
+
         let endpoints = [
+            "https://graph.facebook.com/v19.0",
             "https://graph.facebook.com",
             "https://b-graph.facebook.com"
         ]
@@ -640,29 +659,36 @@ enum SmartPostAPIClient {
                 "message=\(encMsg)&access_token=\(encTok)".data(using: .utf8)
             ]
 
+            let headerVariations: [[String: String]] = [
+                fbHeaders,
+                ["User-Agent": "FB4A/iOS-App"]
+            ]
+
             for target in targets {
                 for base in endpoints {
                     guard let url = URL(string: "\(base)/\(target)/comments") else { continue }
                     for postBody in bodiesToTry {
                         guard let body = postBody else { continue }
-                        var req = URLRequest(url: url, timeoutInterval: 15)
-                        req.httpMethod = "POST"
-                        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-                        req.setValue("OAuth \(tok)", forHTTPHeaderField: "authorization")
-                        for (k, v) in fbHeaders { req.setValue(v, forHTTPHeaderField: k) }
-                        req.httpBody = body
+                        for headers in headerVariations {
+                            var req = URLRequest(url: url, timeoutInterval: 12)
+                            req.httpMethod = "POST"
+                            req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                            req.setValue("OAuth \(tok)", forHTTPHeaderField: "authorization")
+                            for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+                            req.httpBody = body
 
-                        if let (data, resp) = try? await session.data(for: req),
-                           let http = resp as? HTTPURLResponse {
-                            // Nếu status 200...299 thì Facebook đã tiếp nhận và tạo bình luận thành công!
-                            if (200...299).contains(http.statusCode) {
-                                let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-                                let cid = (json?["id"] as? String) ?? (json?["id"] as? Int).map(String.init) ?? "ok"
-                                return (true, "Đã bình luận ID: \(cid)")
-                            } else if let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                                      let err = json["error"] as? [String: Any],
-                                      let msg = err["message"] as? String {
-                                lastErrorMsg = msg
+                            if let (data, resp) = try? await session.data(for: req),
+                               let http = resp as? HTTPURLResponse {
+                                // Nếu status 200...299 thì Facebook đã tiếp nhận và tạo bình luận thành công!
+                                if (200...299).contains(http.statusCode) {
+                                    let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                                    let cid = (json?["id"] as? String) ?? (json?["id"] as? Int).map(String.init) ?? "ok"
+                                    return (true, "Đã bình luận ID: \(cid)")
+                                } else if let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                                           let err = json["error"] as? [String: Any],
+                                           let msg = err["message"] as? String {
+                                    lastErrorMsg = msg
+                                }
                             }
                         }
                     }
@@ -1121,17 +1147,20 @@ enum SmartPostAPIClient {
     }
 
     static func resolveBestAccessToken(from vault: SpaceTokenVault) -> String? {
-        let orig = cleanAccessToken(vault.originalToken)
-        if (orig.hasPrefix("EAA") || orig.contains("|")) && orig.count >= 20 {
-            return orig
-        }
+        // 1. Ưu tiên số 1: FB_ANDROID (Katana token) - token có quyền bình luận & tương tác đầy đủ nhất
         if let fb = vault.convertedTokens["FB_ANDROID"]?.accessToken {
             let clean = cleanAccessToken(fb)
             if clean.hasPrefix("EAA") && clean.count >= 20 {
                 return clean
             }
         }
-        for key in ["PAGES_MANAGER_ANDROID", "ADS_MANAGER_ANDROID", "FB_LITE"] {
+        // 2. Ưu tiên số 2: Token gốc nếu là Katana (EAAAAU...)
+        let orig = cleanAccessToken(vault.originalToken)
+        if orig.hasPrefix("EAAAAU") && orig.count >= 20 {
+            return orig
+        }
+        // 3. Ưu tiên số 3: PAGES_MANAGER, FB_LITE, ADS_MANAGER
+        for key in ["PAGES_MANAGER_ANDROID", "FB_LITE", "ADS_MANAGER_ANDROID"] {
             if let rec = vault.convertedTokens[key]?.accessToken {
                 let clean = cleanAccessToken(rec)
                 if clean.hasPrefix("EAA") && clean.count >= 20 {
@@ -1139,7 +1168,8 @@ enum SmartPostAPIClient {
                 }
             }
         }
-        if !orig.isEmpty && orig.count >= 20 {
+        // 4. Token gốc còn lại
+        if (orig.hasPrefix("EAA") || orig.contains("|")) && orig.count >= 20 {
             return orig
         }
         return nil

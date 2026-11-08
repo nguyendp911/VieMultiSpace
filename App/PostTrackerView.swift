@@ -466,14 +466,37 @@ final class TrackedPostManager: ObservableObject {
             return (false, "Tài khoản chưa có Cookie hoặc Access Token.")
         }
 
+        // Thu thập toàn bộ Access Token có trong Vault (FB_ANDROID, PAGES_MANAGER, FB_LITE, etc.)
+        var allTokens: [String] = []
+        if let vault = (try? SecureLoginStore.readTokenVault(targetSpaceId)) ?? (resolvedSpace != nil ? try? SecureLoginStore.readTokenVault(resolvedSpace!.id) : nil) {
+            if let fb = vault.convertedTokens["FB_ANDROID"]?.accessToken, !fb.isEmpty {
+                allTokens.append(SmartPostAPIClient.cleanAccessToken(fb))
+            }
+            if let pm = vault.convertedTokens["PAGES_MANAGER_ANDROID"]?.accessToken, !pm.isEmpty {
+                allTokens.append(SmartPostAPIClient.cleanAccessToken(pm))
+            }
+            if let fl = vault.convertedTokens["FB_LITE"]?.accessToken, !fl.isEmpty {
+                allTokens.append(SmartPostAPIClient.cleanAccessToken(fl))
+            }
+            if !vault.originalToken.isEmpty {
+                allTokens.append(SmartPostAPIClient.cleanAccessToken(vault.originalToken))
+            }
+        }
+        if !creds.token.isEmpty && !allTokens.contains(creds.token) {
+            allTokens.insert(creds.token, at: 0)
+        }
+
         let res = await PostTrackingAPIClient.replyToPostOrComment(
             postId: post.postId,
+            postUrl: post.postUrl,
             postFeedbackId: post.feedbackId,
             commentId: targetCommentId,
             replyText: cleanText,
             spaceId: resolvedSpace?.id ?? targetSpaceId,
+            ownerUid: creds.uid.isEmpty ? nil : creds.uid,
             cookieString: creds.cookie,
             accessToken: creds.token,
+            alternativeTokens: allTokens,
             proxy: resolvedSpace?.proxy,
             userAgent: resolvedSpace?.fingerprint?.userAgent
         )
@@ -1731,8 +1754,10 @@ enum PostTrackingAPIClient {
     /// Gửi bình luận hoặc trả lời bình luận trực tiếp qua Web Mobile (mbasic.facebook.com) - cực kỳ ổn định với Cookie
     static func commentViaMobileWeb(
         postId: String,
+        postUrl: String?,
         commentId: String?,
         commentText: String,
+        ownerUid: String?,
         cookieString: String,
         proxy: SpaceProxy?
     ) async -> (success: Bool, message: String) {
@@ -1745,54 +1770,105 @@ enum PostTrackingAPIClient {
         }
         let session = URLSession(configuration: config, delegate: CookiePreservingRedirectDelegate(cookieString: cookieString), delegateQueue: nil)
 
-        // 1. Tải trang chi tiết bài viết hoặc trang phản hồi bình luận
-        let targetPageUrl: String
+        // 1. Chuẩn bị danh sách URLs ứng viên để mở trang bài viết
+        var candidateUrls: [String] = []
         if let cid = commentId, !cid.isEmpty {
-            targetPageUrl = "https://mbasic.facebook.com/comment/reply/?ctoken=\(cid)&p=\(cleanPostId)"
-        } else if postId.contains("_"),
-                  let underIdx = postId.firstIndex(of: "_") {
-            let ownerId = String(postId[..<underIdx])
-            let fbid = String(postId[postId.index(after: underIdx)...])
-            targetPageUrl = "https://mbasic.facebook.com/story.php?story_fbid=\(fbid)&id=\(ownerId)"
+            candidateUrls.append("https://mbasic.facebook.com/comment/reply/?ctoken=\(cid)&p=\(cleanPostId)")
+            candidateUrls.append("https://m.facebook.com/comment/reply/?ctoken=\(cid)&p=\(cleanPostId)")
         } else {
-            targetPageUrl = "https://mbasic.facebook.com/story.php?story_fbid=\(cleanPostId)&id=\(cleanPostId)"
+            // URL chuẩn từ post.postUrl (chuyển sang mbasic và m.facebook)
+            if let pUrl = postUrl, !pUrl.isEmpty {
+                let mbasicFromPost = pUrl
+                    .replacingOccurrences(of: "https://www.facebook.com", with: "https://mbasic.facebook.com")
+                    .replacingOccurrences(of: "https://m.facebook.com", with: "https://mbasic.facebook.com")
+                    .replacingOccurrences(of: "https://web.facebook.com", with: "https://mbasic.facebook.com")
+                candidateUrls.append(mbasicFromPost)
+            }
+            // URL dạng /posts/{cleanPostId}
+            candidateUrls.append("https://mbasic.facebook.com/posts/\(cleanPostId)")
+            // URL dạng /{cleanPostId}
+            candidateUrls.append("https://mbasic.facebook.com/\(cleanPostId)")
+            // Nếu có ownerUid
+            if let uid = ownerUid, !uid.isEmpty {
+                candidateUrls.append("https://mbasic.facebook.com/story.php?story_fbid=\(cleanPostId)&id=\(uid)")
+            }
+            if postId.contains("_"), let underIdx = postId.firstIndex(of: "_") {
+                let ownerId = String(postId[..<underIdx])
+                let fbid = String(postId[postId.index(after: underIdx)...])
+                candidateUrls.append("https://mbasic.facebook.com/story.php?story_fbid=\(fbid)&id=\(ownerId)")
+            }
         }
 
-        guard let pageUrl = URL(string: targetPageUrl) else {
-            return (false, "URL bài viết mbasic không hợp lệ.")
+        var foundHtml = ""
+        var workingUrl = ""
+        for testUrlStr in candidateUrls {
+            guard let testUrl = URL(string: testUrlStr) else { continue }
+            var getReq = URLRequest(url: testUrl, timeoutInterval: 12)
+            getReq.httpMethod = "GET"
+            getReq.setValue(mobileUA, forHTTPHeaderField: "User-Agent")
+            getReq.setValue(cookieString, forHTTPHeaderField: "Cookie")
+            getReq.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+            getReq.setValue("vi,en-US;q=0.8,en;q=0.6", forHTTPHeaderField: "Accept-Language")
+
+            if let (pageData, getResp) = try? await session.data(for: getReq),
+               let html = String(data: pageData, encoding: .utf8), !html.isEmpty {
+                let formActionPattern = #"action="([^"]*(?:comment|ufi)[^"]*)""#
+                if FacebookTargetPostResolver.firstMatch(pattern: formActionPattern, in: html) != nil {
+                    foundHtml = html
+                    workingUrl = (getResp as? HTTPURLResponse)?.url?.absoluteString ?? testUrlStr
+                    break
+                }
+            }
         }
 
-        var getReq = URLRequest(url: pageUrl, timeoutInterval: 15)
-        getReq.httpMethod = "GET"
-        getReq.setValue(mobileUA, forHTTPHeaderField: "User-Agent")
-        getReq.setValue(cookieString, forHTTPHeaderField: "Cookie")
-        getReq.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
-
-        guard let (pageData, _) = try? await session.data(for: getReq),
-              let html = String(data: pageData, encoding: .utf8), !html.isEmpty else {
-            return (false, "Không thể tải trang mbasic bài viết.")
+        guard !foundHtml.isEmpty else {
+            return (false, "Không tìm thấy form bình luận trên Web Mobile.")
         }
 
-        // 2. Trích xuất form action, fb_dtsg, jazoest
+        // 2. Trích xuất form action
         let formActionPattern = #"action="([^"]*(?:comment|ufi)[^"]*)""#
-        guard let actionRaw = FacebookTargetPostResolver.firstMatch(pattern: formActionPattern, in: html) else {
-            return (false, "Không tìm thấy form bình luận trên mbasic.")
+        guard let actionRaw = FacebookTargetPostResolver.firstMatch(pattern: formActionPattern, in: foundHtml) else {
+            return (false, "Không tìm thấy đường dẫn gửi bình luận trên Web Mobile.")
         }
         let formAction = actionRaw.replacingOccurrences(of: "&amp;", with: "&")
 
-        let dtsg = FacebookTargetPostResolver.firstMatch(pattern: #"name="fb_dtsg"\s+value="([^"]+)""#, in: html)
-            ?? FacebookTargetPostResolver.firstMatch(pattern: #"value="([^"]+)"\s+name="fb_dtsg""#, in: html)
-            ?? FacebookAPILoginClient.extractDtsg(from: html)
-            ?? ""
-        guard !dtsg.isEmpty else {
-            return (false, "Không lấy được fb_dtsg từ form mbasic.")
+        // 3. Trích xuất tất cả các hidden input fields từ HTML để gửi đầy đủ các token phiên
+        var formParams: [String: String] = [:]
+        let hiddenInputPattern = #"<input[^>]+name="([^"]+)"[^>]+value="([^"]*)""#
+        if let regex = try? NSRegularExpression(pattern: hiddenInputPattern, options: [.caseInsensitive]) {
+            let nsStr = foundHtml as NSString
+            let matches = regex.matches(in: foundHtml, options: [], range: NSRange(location: 0, length: nsStr.length))
+            for m in matches {
+                if m.numberOfRanges >= 3 {
+                    let k = nsStr.substring(with: m.range(at: 1))
+                    let v = nsStr.substring(with: m.range(at: 2))
+                    formParams[k] = v
+                }
+            }
         }
 
-        let jazoest = FacebookTargetPostResolver.firstMatch(pattern: #"name="jazoest"\s+value="([^"]+)""#, in: html)
-            ?? FacebookTargetPostResolver.firstMatch(pattern: #"value="([^"]+)"\s+name="jazoest""#, in: html)
-            ?? "25400"
+        // Đảm bảo có fb_dtsg và jazoest
+        if formParams["fb_dtsg"] == nil || formParams["fb_dtsg"]?.isEmpty == true {
+            if let dtsg = FacebookTargetPostResolver.firstMatch(pattern: #"name="fb_dtsg"\s+value="([^"]+)""#, in: foundHtml)
+                ?? FacebookAPILoginClient.extractDtsg(from: foundHtml) {
+                formParams["fb_dtsg"] = dtsg
+            }
+        }
+        if formParams["jazoest"] == nil || formParams["jazoest"]?.isEmpty == true {
+            formParams["jazoest"] = FacebookTargetPostResolver.firstMatch(pattern: #"name="jazoest"\s+value="([^"]+)""#, in: foundHtml) ?? "25400"
+        }
 
-        // 3. Chuẩn bị URL POST
+        guard let dtsg = formParams["fb_dtsg"], !dtsg.isEmpty else {
+            return (false, "Không lấy được mã bảo mật fb_dtsg từ trang bình luận.")
+        }
+
+        // 4. Gắn nội dung bình luận
+        formParams["comment_text"] = commentText
+        if formParams["post"] == nil {
+            formParams["post"] = "Bình luận"
+        }
+
+        // 5. Chuẩn bị request POST
         let postUrlStr = formAction.hasPrefix("http") ? formAction : "https://mbasic.facebook.com\(formAction.hasPrefix("/") ? "" : "/")\(formAction)"
         guard let postUrl = URL(string: postUrlStr) else {
             return (false, "URL form submit không hợp lệ.")
@@ -1804,38 +1880,40 @@ enum PostTrackingAPIClient {
         postReq.setValue(cookieString, forHTTPHeaderField: "Cookie")
         postReq.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         postReq.setValue("https://mbasic.facebook.com", forHTTPHeaderField: "Origin")
-        postReq.setValue(targetPageUrl, forHTTPHeaderField: "Referer")
+        postReq.setValue(workingUrl.isEmpty ? "https://mbasic.facebook.com" : workingUrl, forHTTPHeaderField: "Referer")
 
-        let allowed = CharacterSet.alphanumerics
-        let encDtsg = dtsg.addingPercentEncoding(withAllowedCharacters: allowed) ?? dtsg
-        let encJazoest = jazoest.addingPercentEncoding(withAllowedCharacters: allowed) ?? jazoest
-        let encText = commentText.addingPercentEncoding(withAllowedCharacters: allowed) ?? commentText
-        let encBtn = ("Bình luận").addingPercentEncoding(withAllowedCharacters: allowed) ?? "B%C3%ACnh%20lu%E1%BA%ADn"
-
-        let bodyStr = "fb_dtsg=\(encDtsg)&jazoest=\(encJazoest)&comment_text=\(encText)&post=\(encBtn)"
+        let bodyStr = formParams.map { k, v in
+            let encK = k.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? k
+            let encV = v.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? v
+            return "\(encK)=\(encV)"
+        }.joined(separator: "&")
         postReq.httpBody = bodyStr.data(using: .utf8)
 
-        guard let (_, postResp) = try? await session.data(for: postReq),
+        guard let (respData, postResp) = try? await session.data(for: postReq),
               let http = postResp as? HTTPURLResponse else {
-            return (false, "Không nhận được phản hồi khi gửi bình luận mbasic.")
+            return (false, "Không nhận được phản hồi khi gửi bình luận Web Mobile.")
         }
 
-        if (200...399).contains(http.statusCode) {
+        let respHtml = String(data: respData, encoding: .utf8) ?? ""
+        if (200...399).contains(http.statusCode) && !respHtml.contains("bị chặn") && !respHtml.contains("chặn tính năng") {
             return (true, "Đã gửi bình luận thành công qua Web Mobile!")
         }
 
-        return (false, "Gửi bình luận mbasic thất bại (Mã lỗi HTTP: \(http.statusCode))")
+        return (false, "Gửi bình luận Web Mobile thất bại (Mã HTTP: \(http.statusCode))")
     }
 
     /// Trả lời trực tiếp vào bài viết hoặc trả lời vào 1 bình luận cụ thể (Triple Engine: Graph API + Mobile Web + Comet GraphQL)
     static func replyToPostOrComment(
         postId: String,
+        postUrl: String? = nil,
         postFeedbackId: String,
         commentId: String?,
         replyText: String,
         spaceId: UUID,
+        ownerUid: String? = nil,
         cookieString: String,
         accessToken: String,
+        alternativeTokens: [String] = [],
         proxy: SpaceProxy?,
         userAgent: String?
     ) async -> (success: Bool, message: String) {
@@ -1843,32 +1921,46 @@ enum PostTrackingAPIClient {
         // Nếu có commentId thì trả lời bình luận đó, nếu không thì gửi vào postId gốc đầy đủ như SmartPost
         let targetObjectId = (commentId?.isEmpty == false) ? commentId! : postId
 
-        // ── 1. Ưu tiên cao nhất: Gửi qua Facebook Graph API chuẩn SmartPost (hỗ trợ Page Token & FB4A) ──
-        var effectiveToken = accessToken
-        if effectiveToken.isEmpty && !cookieString.isEmpty {
+        var allCandidateTokens: [String] = []
+        if !accessToken.isEmpty { allCandidateTokens.append(accessToken) }
+        for t in alternativeTokens {
+            if !t.isEmpty && !allCandidateTokens.contains(t) {
+                allCandidateTokens.append(t)
+            }
+        }
+
+        // Nếu chưa có token nào nhưng có cookie, thử lấy Ads Manager token
+        if allCandidateTokens.isEmpty && !cookieString.isEmpty {
             if let fetched = await SmartPostAPIClient.fetchAdsManagerAccessToken(cookieString: cookieString), !fetched.isEmpty {
-                effectiveToken = fetched
+                allCandidateTokens.append(fetched)
             }
         }
 
-        if !effectiveToken.isEmpty {
-            let res = await SmartPostAPIClient.commentOnPost(
-                postId: targetObjectId,
-                commentText: replyText,
-                accessToken: effectiveToken,
-                proxy: proxy
-            )
-            if res.success {
-                return (true, "Đã gửi phản hồi thành công (\(res.message))")
+        // ── 1. ƯU TIÊN CAO NHẤT: Facebook Graph API chuẩn SmartPost (Kèm bình luận khi đăng bài) ──
+        if !allCandidateTokens.isEmpty {
+            for tok in allCandidateTokens {
+                let res = await SmartPostAPIClient.commentOnPost(
+                    postId: targetObjectId,
+                    commentText: replyText,
+                    accessToken: tok,
+                    proxy: proxy,
+                    ownerUid: ownerUid,
+                    alternativeTokens: allCandidateTokens
+                )
+                if res.success {
+                    return (true, "Đã gửi phản hồi thành công (\(res.message))")
+                }
             }
         }
 
-        // ── 2. Ưu tiên thứ hai: Gửi qua Web Mobile mbasic (cực kỳ hiệu quả và ổn định cho Cookie) ──
+        // ── 2. ƯU TIÊN THỨ HAI: Gửi qua Web Mobile mbasic (Cực kỳ mạnh mẽ và chuẩn xác khi có Cookie) ──
         if !cookieString.isEmpty {
             let mobileRes = await commentViaMobileWeb(
                 postId: cleanPostId,
+                postUrl: postUrl,
                 commentId: commentId,
                 commentText: replyText,
+                ownerUid: ownerUid,
                 cookieString: cookieString,
                 proxy: proxy
             )
@@ -1877,34 +1969,51 @@ enum PostTrackingAPIClient {
             }
         }
 
-        // ── 3. Fallback sang Comet Web GraphQL thông qua FacebookGraphQLAutoClient ──
-        guard !cookieString.isEmpty else {
-            return (false, "Không thể gửi: Không gian chưa có Access Token API và chưa có Cookie.")
+        // ── 3. Fallback Comet Web GraphQL Mutation (Chỉ gọi khi có Feedback ID hợp lệ hoặc trích xuất được từ web) ──
+        if !cookieString.isEmpty {
+            var realFeedbackId = postFeedbackId
+            if realFeedbackId.isEmpty || realFeedbackId == Data("feedback:\(postId)".utf8).base64EncodedString() || realFeedbackId == Data("feedback:\(cleanPostId)".utf8).base64EncodedString() {
+                // Thử trích xuất real feedback_id từ trang bài viết nếu có thể
+                if let resolvedUrl = postUrl, let u = URL(string: resolvedUrl) {
+                    var req = URLRequest(url: u, timeoutInterval: 10)
+                    req.setValue(cookieString, forHTTPHeaderField: "Cookie")
+                    if let (htmlData, _) = try? await URLSession.shared.data(for: req),
+                       let htmlStr = String(data: htmlData, encoding: .utf8) {
+                        let patterns = [
+                            #""feedback":\{"id":"([A-Za-z0-9+/=]+)""#,
+                            #""feedback_id":"([A-Za-z0-9+/=]+)""#
+                        ]
+                        for pat in patterns {
+                            if let fb = FacebookTargetPostResolver.firstMatch(pattern: pat, in: htmlStr), !fb.isEmpty {
+                                realFeedbackId = fb
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Chỉ gọi khi có Feedback ID thật từ Facebook (tránh bị Comet GraphQL từ chối vì fake id)
+            if !realFeedbackId.isEmpty && !realFeedbackId.contains("feedback:\(cleanPostId)") {
+                let client = FacebookGraphQLAutoClient(
+                    spaceId: spaceId,
+                    cookieString: cookieString,
+                    accessToken: accessToken,
+                    proxy: proxy,
+                    userAgent: userAgent
+                )
+                let graphQLRes = await client.commentOnPost(
+                    postId: targetObjectId,
+                    commentText: replyText,
+                    explicitFeedbackId: realFeedbackId
+                )
+                if graphQLRes.success {
+                    return graphQLRes
+                }
+            }
         }
 
-        let client = FacebookGraphQLAutoClient(
-            spaceId: spaceId,
-            cookieString: cookieString,
-            accessToken: accessToken,
-            proxy: proxy,
-            userAgent: userAgent
-        )
-
-        let explicitFbId: String
-        if let cid = commentId, !cid.isEmpty {
-            explicitFbId = Data("feedback:\(cid)".utf8).base64EncodedString()
-        } else if !postFeedbackId.isEmpty {
-            explicitFbId = postFeedbackId
-        } else {
-            explicitFbId = Data("feedback:\(postId)".utf8).base64EncodedString()
-        }
-
-        let res = await client.commentOnPost(
-            postId: targetObjectId,
-            commentText: replyText,
-            explicitFeedbackId: explicitFbId
-        )
-        return res
+        return (false, "Không thể gửi bình luận vào bài viết này qua Graph API lẫn Web Mobile. Vui lòng kiểm tra lại quyền tương tác của tài khoản hoặc làm mới Cookie/Token trong Không gian.")
     }
 
     /// Sinh nội dung trả lời tự động bằng Gemini AI
