@@ -450,17 +450,16 @@ final class TrackedPostManager: ObservableObject {
 
         let post = posts[idx]
         var resolvedSpace = actingSpace
-        let targetSpaceId = actingSpace?.id ?? post.spaceId
-        var creds = await Self.resolveCookieAndToken(forId: targetSpaceId, fallbackSpace: actingSpace)
+            ?? SpaceLibrary.shared?.spaces.first(where: { $0.id == post.spaceId })
+            ?? SpaceLibrary.shared?.spaces.first(where: { $0.platform == .facebook })
+        let targetSpaceId = resolvedSpace?.id ?? post.spaceId
+        var creds = await Self.resolveCookieAndToken(forId: targetSpaceId, fallbackSpace: resolvedSpace)
 
-        if creds.cookie.isEmpty && creds.token.isEmpty {
-            if let fallback = SpaceLibrary.shared?.spaces.first(where: { $0.platform == .facebook }) {
-                let fbCreds = await Self.resolveCookieAndToken(forId: fallback.id, fallbackSpace: fallback)
-                if !fbCreds.cookie.isEmpty || !fbCreds.token.isEmpty {
-                    creds = fbCreds
-                    resolvedSpace = fallback
-                }
-            }
+        // Tự động liên kết lại spaceId cho bài viết nếu không gian cũ bị lệch hoặc bị xóa
+        if let currentSpace = resolvedSpace, post.spaceId != currentSpace.id {
+            posts[idx].spaceId = currentSpace.id
+            posts[idx].spaceName = currentSpace.name
+            savePosts()
         }
 
         guard !creds.cookie.isEmpty || !creds.token.isEmpty else {
@@ -688,13 +687,32 @@ final class TrackedPostManager: ObservableObject {
     }
 
     static func resolveCookieAndToken(forId spaceId: UUID, fallbackSpace: Space? = nil) async -> (cookie: String, token: String, uid: String) {
-        if let vault = try? SecureLoginStore.readTokenVault(spaceId) {
+        // 1. Thử đọc Vault của spaceId
+        var targetVault = try? SecureLoginStore.readTokenVault(spaceId)
+        var effectiveSpaceId = spaceId
+
+        // 2. Nếu spaceId không có Vault, tự động tìm Vault từ fallbackSpace hoặc bất kỳ Facebook Space nào
+        if targetVault == nil, let fbSpace = fallbackSpace {
+            if let v = try? SecureLoginStore.readTokenVault(fbSpace.id) {
+                targetVault = v
+                effectiveSpaceId = fbSpace.id
+            }
+        }
+        if targetVault == nil {
+            if let activeSpace = SpaceLibrary.shared?.spaces.first(where: { $0.platform == .facebook }),
+               let v = try? SecureLoginStore.readTokenVault(activeSpace.id) {
+                targetVault = v
+                effectiveSpaceId = activeSpace.id
+            }
+        }
+
+        if let vault = targetVault {
             var cookieStr = vault.cookieString
             if cookieStr.isEmpty, !vault.cookies.isEmpty {
                 cookieStr = FacebookAppTokens.formatCookieString(vault.cookies)
             }
             if cookieStr.isEmpty {
-                let webCookies = await WebCookieBridge.extractFacebookCookies(from: spaceId)
+                let webCookies = await WebCookieBridge.extractFacebookCookies(from: effectiveSpaceId)
                 cookieStr = FacebookAppTokens.formatCookieString(webCookies)
             }
             // Ưu tiên resolve token tốt nhất từ mọi nguồn trong vault (originalToken, FB_ANDROID, ADS_MANAGER_WEB, PAGES_MANAGER...)
@@ -704,17 +722,24 @@ final class TrackedPostManager: ObservableObject {
                     ? vault.originalToken
                     : (vault.convertedTokens.values.first(where: { $0.accessToken.hasPrefix("EAA") && $0.accessToken.count >= 20 })?.accessToken ?? "")
             }
+            if tok.isEmpty && !cookieStr.isEmpty {
+                if let adsTok = await SmartPostAPIClient.fetchAdsManagerAccessToken(cookieString: cookieStr), !adsTok.isEmpty {
+                    tok = adsTok
+                }
+            }
             let uid = !vault.uid.isEmpty
                 ? vault.uid
                 : (FacebookTargetPostResolver.firstMatch(pattern: #"c_user=(\d+)"#, in: cookieStr) ?? "")
             return (cookieStr, tok, uid)
         } else {
-            let webCookies = await WebCookieBridge.extractFacebookCookies(from: spaceId)
+            let webCookies = await WebCookieBridge.extractFacebookCookies(from: effectiveSpaceId)
             let cookieStr = FacebookAppTokens.formatCookieString(webCookies)
             let uid = FacebookTargetPostResolver.firstMatch(pattern: #"c_user=(\d+)"#, in: cookieStr) ?? ""
             var tok = ""
             if !cookieStr.isEmpty {
-                if let extracted = await FacebookAPILoginClient.extractTokenFromCookieString(cookieStr), !extracted.isEmpty {
+                if let adsTok = await SmartPostAPIClient.fetchAdsManagerAccessToken(cookieString: cookieStr), !adsTok.isEmpty {
+                    tok = adsTok
+                } else if let extracted = await FacebookAPILoginClient.extractTokenFromCookieString(cookieStr), !extracted.isEmpty {
                     tok = extracted
                 }
             }
@@ -1819,11 +1844,18 @@ enum PostTrackingAPIClient {
         let targetObjectId = (commentId?.isEmpty == false) ? commentId! : postId
 
         // ── 1. Ưu tiên cao nhất: Gửi qua Facebook Graph API chuẩn SmartPost (hỗ trợ Page Token & FB4A) ──
-        if !accessToken.isEmpty {
+        var effectiveToken = accessToken
+        if effectiveToken.isEmpty && !cookieString.isEmpty {
+            if let fetched = await SmartPostAPIClient.fetchAdsManagerAccessToken(cookieString: cookieString), !fetched.isEmpty {
+                effectiveToken = fetched
+            }
+        }
+
+        if !effectiveToken.isEmpty {
             let res = await SmartPostAPIClient.commentOnPost(
                 postId: targetObjectId,
                 commentText: replyText,
-                accessToken: accessToken,
+                accessToken: effectiveToken,
                 proxy: proxy
             )
             if res.success {
@@ -2030,7 +2062,16 @@ struct PostTrackerView: View {
 
     private var filteredPosts: [TrackedPostItem] {
         tracker.posts.filter { item in
-            let matchSpace = (selectedSpaceFilter == nil) || (item.spaceId == selectedSpaceFilter)
+            let matchSpace: Bool
+            if selectedSpaceFilter == nil {
+                matchSpace = true
+            } else if item.spaceId == selectedSpaceFilter {
+                matchSpace = true
+            } else if facebookSpaces.count == 1 && facebookSpaces.first?.id == selectedSpaceFilter {
+                matchSpace = true
+            } else {
+                matchSpace = false
+            }
             let matchQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || item.caption.localizedCaseInsensitiveContains(searchText)
                 || item.postId.localizedCaseInsensitiveContains(searchText)
@@ -2375,7 +2416,11 @@ struct PostTrackerView: View {
                     selectedSpaceFilter = nil
                 }
                 ForEach(facebookSpaces) { sp in
-                    let count = tracker.posts.filter { $0.spaceId == sp.id }.count
+                    let count = tracker.posts.filter { post in
+                        if post.spaceId == sp.id { return true }
+                        if facebookSpaces.count == 1 { return true }
+                        return false
+                    }.count
                     filterChip(title: "\(sp.name) (\(count))", isSelected: selectedSpaceFilter == sp.id) {
                         selectedSpaceFilter = sp.id
                     }
