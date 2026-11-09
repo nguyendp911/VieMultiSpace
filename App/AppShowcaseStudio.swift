@@ -21,19 +21,14 @@ struct RealCapturedPhoto: Identifiable, Equatable {
 final class ShowcaseStudioManager: ObservableObject {
     static let shared = ShowcaseStudioManager()
 
-    // Bật/tắt nút chụp nổi
+    // Bật/tắt nút chụp nổi (Mặc định BẬT để user thấy ngay nút 📸)
     @Published var isFloatingCameraEnabled: Bool = true
 
     // Danh sách ảnh thật đã chụp
     @Published var capturedPhotos: [RealCapturedPhoto] = []
 
-    // Trạng thái tự động chụp
-    @Published var isAutoCapturing: Bool = false
-    @Published var autoCaptureProgress: Double = 0.0
-    @Published var currentCapturingName: String = ""
-
-    // MARK: - Chụp trực tiếp cửa sổ màn hình đang hiển thị
-    func captureCurrentWindow() -> UIImage? {
+    // MARK: - Chụp trực tiếp cửa sổ màn hình thật (Live Window Hierarchy)
+    func captureCurrentWindow(customLabel: String? = nil) -> UIImage? {
         guard let windowScene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
             .first(where: { $0.activationState == .foregroundActive }) ?? UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
@@ -46,105 +41,23 @@ final class ShowcaseStudioManager: ObservableObject {
         format.scale = UIScreen.main.scale
         let renderer = UIGraphicsImageRenderer(bounds: bounds, format: format)
 
+        // Vẽ trực tiếp các layer thực tế từ GPU/UIKit window
         let image = renderer.image { _ in
             window.drawHierarchy(in: bounds, afterScreenUpdates: true)
         }
 
         let timeStr = Date().formatted(date: .omitted, time: .standard)
-        let item = RealCapturedPhoto(image: image, label: "Ảnh chụp thật lúc \(timeStr)")
+        let itemLabel = customLabel ?? "Ảnh thật lúc \(timeStr)"
+        let item = RealCapturedPhoto(image: image, label: itemLabel)
         capturedPhotos.insert(item, at: 0)
 
-        // Tự động lưu vào Album ảnh của máy
+        // Tự động lưu ảnh thật vào Album ảnh của iPhone
         UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
 
         return image
     }
 
-    // MARK: - Tự động kết xuất ảnh thật từ các View thực tế của App
-    func autoCaptureAllRealViews(library: SpaceLibrary?) async {
-        isAutoCapturing = true
-        autoCaptureProgress = 0.0
-
-        let screens: [(name: String, view: AnyView)] = [
-            ("1. Trang chủ MultiSpace", AnyView(
-                NavigationStack {
-                    SpaceDashboard()
-                }
-            )),
-            ("2. Smart Post - Đăng bài", AnyView(
-                NavigationStack {
-                    SmartPostView(initialTab: 0)
-                }
-            )),
-            ("3. Smart Post - Lịch đăng", AnyView(
-                NavigationStack {
-                    SmartPostView(initialTab: 1)
-                }
-            )),
-            ("4. Smart Post - Theo dõi bài", AnyView(
-                NavigationStack {
-                    SmartPostView(initialTab: 2)
-                }
-            )),
-            ("5. Smart Post - Quản lý AI", AnyView(
-                NavigationStack {
-                    SmartPostView(initialTab: 3)
-                }
-            )),
-            ("6. Auto Feeds - Tương tác AI", AnyView(
-                NavigationStack {
-                    AutoInteractView()
-                }
-            )),
-            ("7. Trung tâm Tài khoản & Token", AnyView(
-                NavigationStack {
-                    AccountCenterView()
-                }
-            )),
-            ("8. Mạng Proxy & Vân tay", AnyView(
-                NavigationStack {
-                    BatchProxyManagerView()
-                }
-            )),
-            ("9. MultiSpace Sync", AnyView(
-                NavigationStack {
-                    MultiSpaceSyncView()
-                }
-            ))
-        ]
-
-        let screenSize = UIScreen.main.bounds.size
-
-        let lib = library ?? SpaceLibrary.shared ?? SpaceLibrary()
-
-        for (index, item) in screens.enumerated() {
-            currentCapturingName = "Đang chụp: \(item.name)..."
-
-            let target = item.view
-                .environmentObject(lib)
-                .frame(width: screenSize.width, height: screenSize.height)
-                .background(Color(uiColor: .systemBackground))
-
-            let renderer = ImageRenderer(content: target)
-            renderer.scale = UIScreen.main.scale
-            renderer.proposedSize = ProposedViewSize(screenSize)
-
-            if let img = renderer.uiImage {
-                let photoItem = RealCapturedPhoto(image: img, label: item.name)
-                capturedPhotos.insert(photoItem, at: 0)
-                UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil)
-            }
-
-            autoCaptureProgress = Double(index + 1) / Double(screens.count)
-            try? await Task.sleep(nanoseconds: 200_000_000)
-        }
-
-        currentCapturingName = "Đã chụp và lưu thành công tất cả màn hình thật vào Album ảnh!"
-        try? await Task.sleep(nanoseconds: 500_000_000)
-        isAutoCapturing = false
-    }
-
-    // MARK: - Lưu toàn bộ ảnh trong bộ sưu tập vào Album
+    // MARK: - Lưu lại toàn bộ ảnh trong bộ sưu tập vào Album
     func saveAllToPhotos(completion: @escaping (Int) -> Void) {
         guard !capturedPhotos.isEmpty else {
             completion(0)
@@ -188,7 +101,7 @@ struct FloatingCaptureOverlay: View {
                     takeRealScreenshotNow()
                 } label: {
                     ZStack {
-                        // Nền gradient nổi bật với viền trắng
+                        // Nền gradient nổi bật với viền trắng 2.5pt
                         Circle()
                             .fill(
                                 LinearGradient(
@@ -264,14 +177,14 @@ struct FloatingCaptureOverlay: View {
         // 1. Tạm ẩn nút chụp nổi để không dính vào ảnh
         isHidingForShot = true
 
-        // 2. Chờ 0.08s để view biến mất khỏi hierarchy
+        // 2. Chờ 0.08s để view biến mất khỏi render hierarchy
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            // 3. Chụp ảnh thật của cửa sổ màn hình
-            if let img = manager.captureCurrentWindow() {
+            // 3. Chụp ảnh thật của màn hình trực tiếp từ window hierarchy
+            if let _ = manager.captureCurrentWindow() {
                 // Rung phản hồi haptic
                 UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
 
-                // Hiệu ứng chớp sáng màn hình
+                // Hiệu ứng chớp sáng màn hình như máy ảnh thật
                 withAnimation(.easeOut(duration: 0.12)) {
                     showFlash = true
                 }
@@ -281,7 +194,7 @@ struct FloatingCaptureOverlay: View {
                     }
                 }
 
-                // Hiển thị toast
+                // Hiển thị toast xác nhận đã lưu vào Album ảnh
                 withAnimation {
                     toastMessage = "Đã chụp ảnh thật & lưu vào Album ảnh (\(manager.capturedPhotos.count))"
                 }
@@ -303,7 +216,6 @@ struct FloatingCaptureOverlay: View {
 struct AppShowcaseStudioView: View {
     @ObservedObject var manager = ShowcaseStudioManager.shared
     @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var library: SpaceLibrary
 
     @State private var selectedPhotoForPreview: RealCapturedPhoto? = nil
     @State private var showShareSheet: Bool = false
@@ -315,11 +227,11 @@ struct AppShowcaseStudioView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
-                    // Header Card: Hướng dẫn & Tùy chọn Nút Chụp Nổi
-                    floatingButtonControlCard
+                    // Card Hướng Dẫn: Nút Chụp Nổi
+                    floatingButtonGuideCard
 
-                    // Action Card: Nút Tự Động Chụp Tất Cả Cửa Sổ Thật
-                    autoCaptureActionCard
+                    // Nút Chụp Màn Hình Bên Dưới Ngay Bây Giờ
+                    snapUnderlyingScreenCard
 
                     // Action Buttons: Lưu & Xuất ảnh
                     if !manager.capturedPhotos.isEmpty {
@@ -338,18 +250,6 @@ struct AppShowcaseStudioView: View {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Đóng") { dismiss() }
                 }
-
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        snapActiveWindowNow()
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "camera.fill")
-                            Text("Chụp màn hình này")
-                        }
-                        .font(.caption.bold())
-                    }
-                }
             }
             .sheet(item: $selectedPhotoForPreview) { photo in
                 RealPhotoFullPreviewSheet(photo: photo)
@@ -366,7 +266,7 @@ struct AppShowcaseStudioView: View {
     }
 
     // MARK: - 1. Floating Button Control Card
-    private var floatingButtonControlCard: some View {
+    private var floatingButtonGuideCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Label("Nút Chụp Ảnh Nổi Trên Màn Hình", systemImage: "camera.viewfinder")
@@ -378,58 +278,68 @@ struct AppShowcaseStudioView: View {
                     .tint(Color.themePrimaryDark)
             }
 
-            Text("Khi bật, nút chụp 📸 sẽ nổi trên góc màn hình. Bạn chỉ cần mở bất kỳ cửa sổ nào của ứng dụng (Đăng bài, Lịch đăng, Theo dõi, Quản lý AI, Facebook...), bấm nút 📸 là ứng dụng sẽ CHỤP ẢNH THẬT của màn hình đó và tự động lưu vào Album ảnh iPhone của bạn!")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineSpacing(2)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "1.circle.fill")
+                        .foregroundStyle(Color.themePrimaryDark)
+                    Text("Đóng cửa sổ này lại và chuyển đến màn hình bạn cần chụp (Đăng bài, Lịch đăng, Theo dõi, Quản lý AI, lướt Facebook...).")
+                        .font(.caption)
+                }
+
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "2.circle.fill")
+                        .foregroundStyle(Color.themePrimaryDark)
+                    Text("Bấm 1 chạm vào nút tròn [📸 CHỤP THẬT] ở góc dưới bên phải màn hình.")
+                        .font(.caption)
+                }
+
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "3.circle.fill")
+                        .foregroundStyle(Color.themePrimaryDark)
+                    Text("Màn hình chớp sáng và ẢNH THẬT 100% được lưu ngay lập tức vào Album ảnh (Photos) của iPhone!")
+                        .font(.caption)
+                }
+            }
+            .foregroundStyle(.secondary)
         }
         .padding(14)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
     }
 
-    // MARK: - 2. Auto Capture Action Card
-    private var autoCaptureActionCard: some View {
+    // MARK: - 2. Snap Underlying Screen Card
+    private var snapUnderlyingScreenCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("Tự Động Chụp Tất Cả Cửa Sổ Thật", systemImage: "bolt.fill")
+            Label("Chụp Ngay Màn Hình Phía Dưới", systemImage: "camera.shutter.button.fill")
                 .font(.subheadline.bold())
                 .foregroundStyle(Color.themePrimaryDark)
 
-            Text("Hệ thống sẽ tự động duyệt qua lần lượt các cửa sổ thực tế của ứng dụng (Trang chủ, Đăng bài, Lịch đăng, Theo dõi tương tác, Quản lý AI, Auto Feeds, Kho Token, Proxy, Sync) và chụp ảnh thật lưu vào Album ảnh.")
+            Text("Tự động đóng Studio lại và chụp ngay màn hình bạn vừa đứng trước khi mở Studio:")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            if manager.isAutoCapturing {
-                VStack(spacing: 6) {
-                    ProgressView(value: manager.autoCaptureProgress, total: 1.0)
-                        .tint(Color.themePrimaryDark)
-                    Text(manager.currentCapturingName)
-                        .font(.caption2.bold())
-                        .foregroundStyle(Color.themePrimaryDark)
+            Button {
+                dismiss()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    _ = manager.captureCurrentWindow(customLabel: "Ảnh chụp màn hình")
+                    UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
                 }
-                .padding(.vertical, 4)
-            } else {
-                Button {
-                    Task {
-                        await manager.autoCaptureAllRealViews(library: library)
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "camera.on.rectangle.fill")
-                        Text("Bắt đầu tự động chụp 9 cửa sổ thật")
-                    }
-                    .font(.subheadline.bold())
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 11)
-                    .background(Color.themePrimaryDark, in: RoundedRectangle(cornerRadius: 10))
-                    .foregroundStyle(.white)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "camera.fill")
+                    Text("Đóng & Chụp ngay màn hình phía dưới")
                 }
+                .font(.subheadline.bold())
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 11)
+                .background(Color.themePrimaryDark, in: RoundedRectangle(cornerRadius: 10))
+                .foregroundStyle(.white)
             }
         }
         .padding(14)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
     }
 
-    // MARK: - 3. Export & Save Buttons
+    // MARK: - 3. Export Action Buttons
     private var exportActionButtons: some View {
         HStack(spacing: 10) {
             Button {
@@ -488,7 +398,7 @@ struct AppShowcaseStudioView: View {
                         .foregroundStyle(Color.themePrimary.opacity(0.5))
                     Text("Chưa có ảnh thật nào được chụp")
                         .font(.footnote.bold())
-                    Text("Bấm 'Chụp màn hình này', hoặc bật 'Nút Chụp Nổi' rồi chuyển đến các màn hình bạn muốn chụp.")
+                    Text("Hãy bấm nút tròn [📸 CHỤP THẬT] ở góc màn hình khi bạn đang xem bất kỳ tính năng nào để lấy ảnh thật.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -556,13 +466,6 @@ struct AppShowcaseStudioView: View {
     }
 
     // MARK: - Actions
-    private func snapActiveWindowNow() {
-        if let img = manager.captureCurrentWindow() {
-            alertMessage = "Đã chụp ảnh thật của màn hình này và tự động lưu vào Album ảnh của bạn!"
-            showAlert = true
-        }
-    }
-
     private func saveAllPhotosToAlbum() {
         manager.saveAllToPhotos { count in
             if count > 0 {
