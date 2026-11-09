@@ -224,7 +224,7 @@ final class AITrainingStore: ObservableObject {
 
     init() {
         if let data = UserDefaults.standard.data(forKey: storageKey),
-           let decoded = try? JSONDecoder().decode(AITrainingProfile.self, data: data) {
+           let decoded = try? JSONDecoder().decode(AITrainingProfile.self, from: data) {
             self.profile = decoded
         } else {
             self.profile = .defaultProfile
