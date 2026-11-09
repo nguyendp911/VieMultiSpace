@@ -276,6 +276,9 @@ struct VieMultiSpaceApp: App {
         WindowGroup {
             SpaceDashboard()
                 .environmentObject(library)
+                .overlay {
+                    FloatingCaptureOverlay()
+                }
         }
     }
 }

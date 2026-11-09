@@ -140,7 +140,7 @@ struct SpaceDashboard: View {
 
                                     VStack(alignment: .leading, spacing: 1) {
                                         HStack(spacing: 4) {
-                                            Text("Studio Giới thiệu App")
+                                            Text("Chụp ảnh thật từ App")
                                                 .font(.caption.bold())
                                                 .foregroundStyle(.primary)
                                             Text("HOT")
@@ -150,7 +150,7 @@ struct SpaceDashboard: View {
                                                 .background(Color.pink, in: Capsule())
                                                 .foregroundStyle(.white)
                                         }
-                                        Text("Chụp & xuất trọn bộ ảnh 8 cửa sổ chức năng để làm bài giới thiệu")
+                                        Text("Chụp màn hình thật & lưu Album ảnh để làm bài giới thiệu")
                                             .font(.system(size: 10))
                                             .foregroundStyle(.secondary)
                                             .lineLimit(1)
