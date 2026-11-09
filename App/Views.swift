@@ -324,18 +324,34 @@ struct SpaceDashboard: View {
                     EditButton()
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
+                    HStack(spacing: 8) {
                         Button {
                             showShowcaseStudio = true
                         } label: {
-                            Label("Chụp ảnh giới thiệu App", systemImage: "camera.viewfinder")
+                            HStack(spacing: 4) {
+                                Image(systemName: "camera.fill")
+                                Text("Chụp ảnh thật")
+                                    .font(.caption2.bold())
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(Color.themePrimaryDark, in: Capsule())
+                            .foregroundStyle(.white)
                         }
-                        Divider()
-                        Toggle("Khóa bằng Face ID / mã máy", isOn: $requireUnlock)
-                        Button("Khóa ngay", systemImage: "lock") { isLocked = true }
-                            .disabled(!requireUnlock)
-                    } label: {
-                        Image(systemName: "gearshape")
+
+                        Menu {
+                            Button {
+                                showShowcaseStudio = true
+                            } label: {
+                                Label("Chụp ảnh thật từ App", systemImage: "camera.viewfinder")
+                            }
+                            Divider()
+                            Toggle("Khóa bằng Face ID / mã máy", isOn: $requireUnlock)
+                            Button("Khóa ngay", systemImage: "lock") { isLocked = true }
+                                .disabled(!requireUnlock)
+                        } label: {
+                            Image(systemName: "gearshape")
+                        }
                     }
                 }
             }

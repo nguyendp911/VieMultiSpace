@@ -2354,8 +2354,15 @@ struct SmartPostView: View {
                 Button {
                     showShowcaseStudio = true
                 } label: {
-                    Image(systemName: "camera.viewfinder")
-                        .font(.system(size: 15))
+                    HStack(spacing: 4) {
+                        Image(systemName: "camera.fill")
+                        Text("Chụp ảnh thật")
+                            .font(.caption2.bold())
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.themePrimaryDark, in: Capsule())
+                    .foregroundStyle(.white)
                 }
             }
         }

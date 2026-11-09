@@ -173,43 +173,14 @@ final class ShowcaseStudioManager: ObservableObject {
 
 struct FloatingCaptureOverlay: View {
     @ObservedObject var manager = ShowcaseStudioManager.shared
-    @State private var position: CGPoint = CGPoint(
-        x: UIScreen.main.bounds.width - 45,
-        y: UIScreen.main.bounds.height - 180
-    )
+    @State private var dragOffset: CGSize = .zero
     @State private var isHidingForShot: Bool = false
     @State private var showFlash: Bool = false
     @State private var toastMessage: String? = nil
 
     var body: some View {
-        ZStack {
-            // Flash Effect khi chụp
-            if showFlash {
-                Color.white
-                    .ignoresSafeArea()
-                    .opacity(0.85)
-                    .transition(.opacity)
-            }
-
-            // Toast thông báo chụp thành công
-            if let msg = toastMessage {
-                VStack {
-                    HStack(spacing: 8) {
-                        Image(systemName: "camera.fill")
-                            .foregroundStyle(.white)
-                        Text(msg)
-                            .font(.caption.bold())
-                            .foregroundStyle(.white)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color.black.opacity(0.85), in: Capsule())
-                    .shadow(radius: 8)
-                    .padding(.top, 55)
-                    Spacer()
-                }
-                .transition(.move(edge: .top).combined(with: .opacity))
-            }
+        ZStack(alignment: .bottomTrailing) {
+            Color.clear.ignoresSafeArea()
 
             // Nút Chụp Nổi (Draggable Floating Camera Button)
             if manager.isFloatingCameraEnabled && !isHidingForShot {
@@ -217,7 +188,7 @@ struct FloatingCaptureOverlay: View {
                     takeRealScreenshotNow()
                 } label: {
                     ZStack {
-                        // Nền gradient nổi bật
+                        // Nền gradient nổi bật với viền trắng
                         Circle()
                             .fill(
                                 LinearGradient(
@@ -226,14 +197,15 @@ struct FloatingCaptureOverlay: View {
                                     endPoint: .bottomTrailing
                                 )
                             )
-                            .frame(width: 58, height: 58)
-                            .shadow(color: Color.black.opacity(0.35), radius: 6, x: 0, y: 3)
+                            .frame(width: 62, height: 62)
+                            .overlay(Circle().stroke(Color.white, lineWidth: 2.5))
+                            .shadow(color: Color.black.opacity(0.4), radius: 8, x: 0, y: 4)
 
                         VStack(spacing: 2) {
                             Image(systemName: "camera.fill")
                                 .font(.system(size: 20, weight: .bold))
                                 .foregroundStyle(.white)
-                            Text("Chụp thật")
+                            Text("CHỤP THẬT")
                                 .font(.system(size: 8, weight: .heavy))
                                 .foregroundStyle(.white)
                         }
@@ -242,24 +214,50 @@ struct FloatingCaptureOverlay: View {
                         if !manager.capturedPhotos.isEmpty {
                             Text("\(manager.capturedPhotos.count)")
                                 .font(.system(size: 10, weight: .bold))
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1.5)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
                                 .background(Color.red, in: Capsule())
                                 .foregroundStyle(.white)
-                                .offset(x: 20, y: -20)
+                                .offset(x: 22, y: -22)
                         }
                     }
                 }
-                .position(position)
+                .buttonStyle(.plain)
+                .padding(.trailing, 20)
+                .padding(.bottom, 95)
+                .offset(dragOffset)
                 .gesture(
                     DragGesture()
                         .onChanged { value in
-                            position = value.location
+                            dragOffset = value.translation
                         }
                 )
             }
         }
-        .allowsHitTesting(manager.isFloatingCameraEnabled)
+        .overlay(alignment: .top) {
+            if let msg = toastMessage {
+                HStack(spacing: 8) {
+                    Image(systemName: "camera.fill")
+                        .foregroundStyle(.white)
+                    Text(msg)
+                        .font(.caption.bold())
+                        .foregroundStyle(.white)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Color.black.opacity(0.88), in: Capsule())
+                .shadow(radius: 8)
+                .padding(.top, 55)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .overlay {
+            if showFlash {
+                Color.white
+                    .ignoresSafeArea()
+                    .opacity(0.85)
+            }
+        }
     }
 
     private func takeRealScreenshotNow() {
