@@ -17,8 +17,8 @@ enum AIPersona: String, CaseIterable, Identifiable, Codable {
         case .shopOwner: return "Chủ shop thân thiện"
         case .consultant: return "Chuyên gia tư vấn"
         case .customerCare: return "CSKH chu đáo"
-        case .genZ: return "Gen Z vui tươi, dí dỏm"
-        case .corporate: return "Doanh nghiệp chuẩn mực"
+        case .genZ: return "Gen Z vui tươi"
+        case .corporate: return "Doanh nghiệp chuẩn"
         case .custom: return "Tùy chỉnh riêng"
         }
     }
@@ -61,9 +61,9 @@ enum AIReplyLength: String, CaseIterable, Identifiable, Codable {
 
     var title: String {
         switch self {
-        case .short: return "Ngắn gọn (1 câu)"
-        case .medium: return "Vừa vặn (2-3 câu)"
-        case .detailed: return "Đầy đủ chi tiết"
+        case .short: return "Ngắn (1 câu)"
+        case .medium: return "Vừa (2-3 câu)"
+        case .detailed: return "Chi tiết"
         }
     }
 
@@ -96,6 +96,7 @@ struct AITrainingProfile: Codable, Equatable {
 
     // Business Knowledge Base
     var brandName: String = "ViePN Smart Store"
+    var contactPhone: String = "0988.xxx.xxx"
     var productCatalog: String = "Sản phẩm công nghệ & phần mềm tự động hóa cao cấp. Giá cả cạnh tranh, chất lượng chuẩn mực, hỗ trợ kỹ thuật trọn đời."
     var policyAndContact: String = "Hỗ trợ 24/7. Được dùng thử miễn phí, bảo hành lỗi 1 đổi 1. Hotline/Zalo: 0988.xxx.xxx, Website: viepn.vn"
 
@@ -151,8 +152,11 @@ struct AITrainingProfile: Codable, Equatable {
         if !productCatalog.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             kb += "- Sản phẩm & Bảng giá: \(productCatalog)\n"
         }
+        if !contactPhone.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            kb += "- Hotline / Zalo: \(contactPhone)\n"
+        }
         if !policyAndContact.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            kb += "- Chính sách & Liên hệ: \(policyAndContact)\n"
+            kb += "- Chính sách & Hỗ trợ: \(policyAndContact)\n"
         }
         sections.append(kb)
 
@@ -258,19 +262,19 @@ final class AITrainingStore: ObservableObject {
     }
 }
 
-// MARK: - 3. Comprehensive Training & Management UI Sheet
+// MARK: - 3. Clean & Modern AI Training View (Reusable & Compact)
 
-struct AITrainingAndManagementSheet: View {
+struct AITrainingManagementView: View {
     @ObservedObject var store = AITrainingStore.shared
     @Binding var geminiApiKey: String
     @Binding var geminiModel: String
+    var isEmbedded: Bool = false
+    var onDismiss: (() -> Void)? = nil
 
-    @Environment(\.dismiss) private var dismiss
     @State private var selectedTab: Int = 0
-
-    // Toast & Alert State
     @State private var showSaveSuccessBanner: Bool = false
     @State private var showResetConfirmAlert: Bool = false
+    @State private var showApiKeyField: Bool = false
 
     // New QA Modal State
     @State private var showAddQASheet: Bool = false
@@ -278,129 +282,109 @@ struct AITrainingAndManagementSheet: View {
     @State private var newAnswerText: String = ""
 
     // Testing Playground State
-    @State private var testPostCaption: String = "Chào mừng bạn đến với shop! Mẫu mới vừa về cực hot hôm nay."
-    @State private var testCustomerComment: String = "Sản phẩm này còn bảo hành và freeship không shop?"
-    @State private var testAuthorName: String = "Nguyễn Văn A"
+    @State private var testPostCaption: String = "Hàng mới về cực hot hôm nay! Mời mọi người tham khảo nha."
+    @State private var testCustomerComment: String = "Shop ơi cho mình hỏi giá và phí ship thế nào?"
+    @State private var testAuthorName: String = "Khách hàng"
     @State private var isTestingAI: Bool = false
     @State private var testResultReply: String = ""
     @State private var testResponseLatency: Double = 0.0
     @State private var testErrorMessage: String? = nil
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                // Top Header info bar (API Key & Model Status)
-                topModelBar
+        VStack(spacing: 0) {
+            // 1. Compact Unified API Key & Model Card
+            compactTopControlCard
 
-                // Custom Segmented Picker
-                tabSegmentedControl
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(Color(uiColor: .systemGroupedBackground))
+            // 2. Responsive 5-Tab Segmented Switcher (Không bị tràn/cắt chữ)
+            compactSegmentedTabs
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
 
-                Divider()
+            Divider()
 
-                // Content View for selected tab
-                TabView(selection: $selectedTab) {
-                    personaTabView
-                        .tag(0)
-
-                    knowledgeTabView
-                        .tag(1)
-
-                    fewShotQATabView
-                        .tag(2)
-
-                    guardrailsTabView
-                        .tag(3)
-
-                    playgroundTabView
-                        .tag(4)
-                }
-                .tabViewStyle(.page(indexDisplayMode: .never))
+            // 3. Tab Content
+            TabView(selection: $selectedTab) {
+                compactPersonaTab.tag(0)
+                compactKnowledgeTab.tag(1)
+                compactFewShotQATab.tag(2)
+                compactGuardrailsTab.tag(3)
+                compactPlaygroundTab.tag(4)
             }
-            .background(Color(uiColor: .systemGroupedBackground))
-            .navigationTitle("Huấn luyện & Quản lý AI")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Đóng") {
-                        dismiss()
-                    }
-                }
-
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button(role: .destructive) {
-                            showResetConfirmAlert = true
-                        } label: {
-                            Label("Khôi phục mặc định", systemImage: "arrow.counterclockwise")
-                        }
-
-                        Button {
-                            saveAll()
-                        } label: {
-                            Label("Lưu & Áp dụng", systemImage: "checkmark.circle")
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .font(.system(size: 18))
-                    }
-                }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+        .alert("Khôi phục mặc định?", isPresented: $showResetConfirmAlert) {
+            Button("Hủy", role: .cancel) {}
+            Button("Khôi phục", role: .destructive) {
+                store.resetToDefaults()
+                notifySaved()
             }
-            .safeAreaInset(edge: .bottom) {
-                bottomActionBar
-            }
-            .sheet(isPresented: $showAddQASheet) {
-                addQAModalSheet
-            }
-            .alert("Khôi phục mặc định?", isPresented: $showResetConfirmAlert) {
-                Button("Hủy", role: .cancel) {}
-                Button("Khôi phục", role: .destructive) {
-                    store.resetToDefaults()
+        } message: {
+            Text("Toàn bộ nhân cách, kiến thức và mẫu huấn luyện sẽ được trả về mặc định ban đầu.")
+        }
+        .sheet(isPresented: $showAddQASheet) {
+            addQAModalSheet
+        }
+        .overlay(alignment: .top) {
+            if showSaveSuccessBanner {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.white)
+                    Text("Đã lưu cấu hình AI")
+                        .font(.caption.bold())
+                        .foregroundStyle(.white)
                 }
-            } message: {
-                Text("Tất cả kiến thức, nhân cách và mẫu huấn luyện sẽ được đưa về dữ liệu chuẩn ban đầu.")
-            }
-            .overlay(alignment: .top) {
-                if showSaveSuccessBanner {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.white)
-                        Text("Đã lưu cấu hình huấn luyện AI thành công!")
-                            .font(.footnote.bold())
-                            .foregroundStyle(.white)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color.trackerPrimaryDark, in: Capsule())
-                    .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .padding(.top, 8)
-                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Color.trackerPrimaryDark, in: Capsule())
+                .shadow(color: .black.opacity(0.15), radius: 6, y: 3)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .padding(.top, 6)
             }
         }
     }
 
-    // MARK: - Top Model & Key Bar
-    private var topModelBar: some View {
-        VStack(spacing: 6) {
+    // MARK: - 1. Compact Top Control Card
+    private var compactTopControlCard: some View {
+        VStack(spacing: 8) {
             HStack(spacing: 8) {
-                Image(systemName: "key.fill")
+                // Key Icon + Input
+                Image(systemName: geminiApiKey.isEmpty ? "key.slash.fill" : "key.fill")
                     .font(.footnote)
                     .foregroundStyle(geminiApiKey.isEmpty ? Color.orange : Color.trackerPrimaryDark)
 
-                SecureField("Gemini API Key (AIza...)", text: $geminiApiKey)
-                    .font(.caption)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                if showApiKeyField {
+                    TextField("Nhập Gemini API Key (AIza...)", text: $geminiApiKey)
+                        .font(.caption)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .onChange(of: geminiApiKey) { _ in
+                            SecureGeminiStore.saveKey(geminiApiKey)
+                        }
+                } else {
+                    HStack(spacing: 4) {
+                        Text(geminiApiKey.isEmpty ? "Chưa cài đặt Gemini API Key" : "Gemini API Key: ••••••••••••")
+                            .font(.caption)
+                            .foregroundStyle(geminiApiKey.isEmpty ? .secondary : .primary)
+                        Spacer()
+                    }
+                }
 
-                Spacer()
+                Button {
+                    showApiKeyField.toggle()
+                } label: {
+                    Image(systemName: showApiKeyField ? "eye.slash" : "pencil.circle.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.trackerPrimaryDark)
+                }
+                .buttonStyle(.plain)
 
+                // Model Selection Pill
                 Menu {
                     ForEach(GeminiCommentService.availableModels, id: \.self) { m in
                         Button {
                             geminiModel = m
+                            notifySaved()
                         } label: {
                             HStack {
                                 Text(GeminiCommentService.modelLabel(m))
@@ -411,214 +395,248 @@ struct AITrainingAndManagementSheet: View {
                         }
                     }
                 } label: {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 3) {
                         Image(systemName: "cpu")
-                        Text(geminiModel == "auto" ? "Tự động dò" : geminiModel)
+                            .font(.system(size: 10))
+                        Text(geminiModel == "auto" ? "Tự dò" : geminiModel.replacingOccurrences(of: "gemini-", with: ""))
+                            .font(.system(size: 11, weight: .bold))
                             .lineLimit(1)
                         Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 9))
+                            .font(.system(size: 8))
                     }
-                    .font(.caption2.bold())
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)
                     .background(Color.trackerPrimary.opacity(0.15), in: Capsule())
                     .foregroundStyle(Color.trackerPrimaryDark)
                 }
+
+                // Reset Menu
+                Menu {
+                    Button(role: .destructive) {
+                        showResetConfirmAlert = true
+                    } label: {
+                        Label("Khôi phục mẫu mặc định", systemImage: "arrow.counterclockwise")
+                    }
+
+                    Button {
+                        SecureGeminiStore.saveKey(geminiApiKey)
+                        store.saveToDisk()
+                        notifySaved()
+                    } label: {
+                        Label("Lưu cấu hình", systemImage: "checkmark.circle")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 16))
+                        .foregroundStyle(.secondary)
+                }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(Color(uiColor: .secondarySystemGroupedBackground))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
+    }
+
+    // MARK: - 2. Responsive 5-Tab Bar (Fit 100% màn hình, không bị cắt chữ)
+    private var compactSegmentedTabs: some View {
+        HStack(spacing: 4) {
+            tabItemButton(title: "Nhân cách", icon: "theatermasks.fill", index: 0)
+            tabItemButton(title: "Dữ liệu", icon: "book.pages.fill", index: 1)
+            tabItemButton(title: "Mẫu Q&A", icon: "brain.head.profile", badge: store.profile.trainedQAs.count, index: 2)
+            tabItemButton(title: "Quy tắc", icon: "shield.lefthalf.filled", index: 3)
+            tabItemButton(title: "Thử test", icon: "flask.fill", index: 4)
         }
     }
 
-    // MARK: - Tab Segmented Control
-    private var tabSegmentedControl: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                tabButton(title: "Nhân cách", icon: "theatermasks.fill", index: 0)
-                tabButton(title: "Kiến thức", icon: "book.pages.fill", index: 1)
-                tabButton(title: "Mẫu Q&A (\(store.profile.trainedQAs.count))", icon: "brain.head.profile", index: 2)
-                tabButton(title: "Nguyên tắc", icon: "shield.lefthalf.filled", index: 3)
-                tabButton(title: "Thử nghiệm", icon: "flask.fill", index: 4)
-            }
-            .padding(.vertical, 2)
-        }
-    }
-
-    private func tabButton(title: String, icon: String, index: Int) -> some View {
+    private func tabItemButton(title: String, icon: String, badge: Int? = nil, index: Int) -> some View {
         let isSelected = selectedTab == index
         return Button {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
                 selectedTab = index
             }
         } label: {
-            HStack(spacing: 5) {
-                Image(systemName: icon)
-                    .font(.system(size: 12))
+            VStack(spacing: 2) {
+                HStack(spacing: 3) {
+                    Image(systemName: icon)
+                        .font(.system(size: 11))
+                    if let b = badge, b > 0 {
+                        Text("\(b)")
+                            .font(.system(size: 9, weight: .bold))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(isSelected ? Color.white.opacity(0.3) : Color.trackerPrimaryDark, in: Capsule())
+                            .foregroundStyle(.white)
+                    }
+                }
                 Text(title)
-                    .font(.system(size: 13, weight: isSelected ? .bold : .medium))
+                    .font(.system(size: 11, weight: isSelected ? .bold : .medium))
+                    .lineLimit(1)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
             .background(
                 isSelected ? Color.trackerPrimaryDark : Color(uiColor: .secondarySystemGroupedBackground),
-                in: Capsule()
+                in: RoundedRectangle(cornerRadius: 8)
             )
             .foregroundStyle(isSelected ? Color.white : Color.primary)
             .overlay(
-                Capsule().stroke(Color.trackerPrimary.opacity(isSelected ? 0 : 0.25), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.trackerPrimary.opacity(isSelected ? 0 : 0.2), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
     }
 
-    // MARK: - Tab 1: Persona & Voice
-    private var personaTabView: some View {
+    // MARK: - Tab 0: Persona & Voice (Gọn gàng & Hiện đại)
+    private var compactPersonaTab: some View {
         ScrollView {
-            VStack(spacing: 16) {
-                // Section: Chọn hình mẫu nhân cách
-                VStack(alignment: .leading, spacing: 10) {
-                    Label("Chọn phong cách nhân cách (Persona)", systemImage: "person.crop.circle.badge.checkmark")
-                        .font(.footnote.bold())
-                        .foregroundStyle(Color.trackerPrimaryDark)
+            VStack(spacing: 12) {
+                // Card 1: Chọn Persona (Dạng grid 3x2 cực kỳ gọn gàng)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Label("Hình mẫu nhân cách", systemImage: "person.crop.circle.badge.checkmark")
+                            .font(.caption.bold())
+                            .foregroundStyle(Color.trackerPrimaryDark)
+                        Spacer()
+                        Text("Chạm để chọn")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
 
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 6) {
                         ForEach(AIPersona.allCases) { p in
                             let isChosen = store.profile.persona == p
                             Button {
-                                withAnimation(.easeInOut(duration: 0.2)) {
+                                withAnimation(.spring(response: 0.25)) {
                                     store.profile.persona = p
                                 }
                             } label: {
-                                VStack(alignment: .leading, spacing: 6) {
-                                    HStack {
-                                        Image(systemName: p.icon)
-                                            .font(.system(size: 16))
-                                            .foregroundStyle(isChosen ? Color.trackerPrimaryDark : .secondary)
-                                        Spacer()
-                                        if isChosen {
-                                            Image(systemName: "checkmark.circle.fill")
-                                                .foregroundStyle(Color.trackerPrimaryDark)
-                                        }
-                                    }
+                                VStack(spacing: 3) {
+                                    Image(systemName: p.icon)
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(isChosen ? Color.trackerPrimaryDark : .secondary)
                                     Text(p.title)
-                                        .font(.subheadline.bold())
+                                        .font(.system(size: 10, weight: isChosen ? .bold : .regular))
+                                        .lineLimit(1)
                                         .foregroundStyle(isChosen ? Color.trackerPrimaryDark : .primary)
                                 }
-                                .padding(12)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
                                 .background(
-                                    isChosen ? Color.trackerPrimary.opacity(0.12) : Color(uiColor: .secondarySystemGroupedBackground),
-                                    in: RoundedRectangle(cornerRadius: 12)
+                                    isChosen ? Color.trackerPrimary.opacity(0.15) : Color(uiColor: .tertiarySystemGroupedBackground),
+                                    in: RoundedRectangle(cornerRadius: 8)
                                 )
                                 .overlay(
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .stroke(isChosen ? Color.trackerPrimaryDark : Color.secondary.opacity(0.2), lineWidth: isChosen ? 1.5 : 1)
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(isChosen ? Color.trackerPrimaryDark : Color.clear, lineWidth: 1.5)
                                 )
                             }
                             .buttonStyle(.plain)
                         }
                     }
 
-                    // Mô tả chi tiết persona
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Mô tả tính cách hiện tại:")
-                            .font(.caption.bold())
-                            .foregroundStyle(.secondary)
-
-                        if store.profile.persona == .custom {
-                            TextEditor(text: $store.profile.customPersonaDescription)
-                                .frame(height: 90)
-                                .padding(8)
-                                .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2), lineWidth: 1)
-                                )
-                        } else {
-                            Text(store.profile.persona.defaultDescription)
-                                .font(.footnote)
+                    // Mô tả ngắn persona hiện tại
+                    if store.profile.persona == .custom {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Nhập mô tả nhân cách theo ý bạn:")
+                                .font(.caption2.bold())
                                 .foregroundStyle(.secondary)
-                                .padding(10)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            TextEditor(text: $store.profile.customPersonaDescription)
+                                .frame(height: 60)
+                                .padding(6)
                                 .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
                         }
+                    } else {
+                        Text(store.profile.persona.defaultDescription)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
                     }
-                    .padding(.top, 4)
                 }
-                .padding(14)
-                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+                .padding(12)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
 
-                // Section: Độ dài & Giọng điệu
-                VStack(alignment: .leading, spacing: 14) {
-                    Label("Độ dài phản hồi mong muốn", systemImage: "text.alignleft")
-                        .font(.footnote.bold())
-                        .foregroundStyle(Color.trackerPrimaryDark)
+                // Card 2: Thiết lập Giọng điệu & Độ dài
+                VStack(alignment: .leading, spacing: 10) {
+                    // Độ dài phản hồi
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("Độ dài phản hồi", systemImage: "text.alignleft")
+                            .font(.caption.bold())
+                            .foregroundStyle(Color.trackerPrimaryDark)
 
-                    Picker("Độ dài", selection: $store.profile.replyLength) {
-                        ForEach(AIReplyLength.allCases) { len in
-                            Text(len.title).tag(len)
+                        Picker("Độ dài", selection: $store.profile.replyLength) {
+                            ForEach(AIReplyLength.allCases) { len in
+                                Text(len.title).tag(len)
+                            }
                         }
+                        .pickerStyle(.segmented)
                     }
-                    .pickerStyle(.segmented)
-
-                    Text(store.profile.replyLength.instruction)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
 
                     Divider()
 
                     // Giọng điệu chi tiết
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label("Giọng điệu & Cảm xúc chi tiết", systemImage: "waveform.path")
-                            .font(.footnote.bold())
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("Giọng điệu & Cảm xúc", systemImage: "waveform.path")
+                            .font(.caption.bold())
                             .foregroundStyle(Color.trackerPrimaryDark)
 
-                        TextField("VD: Nhiệt tình, xưng em, dùng icon sinh động...", text: $store.profile.toneVoice, axis: .vertical)
-                            .lineLimit(2...3)
-                            .padding(10)
+                        TextField("VD: Nhiệt tình, xưng em, dùng icon nhẹ nhàng...", text: $store.profile.toneVoice)
+                            .font(.caption)
+                            .padding(8)
                             .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
                     }
 
                     // Lời chào mở đầu
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label("Lời chào mở đầu ưu tiên", systemImage: "hand.wave.fill")
-                            .font(.footnote.bold())
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("Lời chào mở đầu", systemImage: "hand.wave.fill")
+                            .font(.caption.bold())
                             .foregroundStyle(Color.trackerPrimaryDark)
 
                         TextField("VD: Dạ em chào anh/chị ạ! ", text: $store.profile.defaultGreeting)
-                            .padding(10)
+                            .font(.caption)
+                            .padding(8)
                             .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
-                .padding(14)
-                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+                .padding(12)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
             }
-            .padding(14)
+            .padding(10)
         }
     }
 
-    // MARK: - Tab 2: Knowledge Base
-    private var knowledgeTabView: some View {
+    // MARK: - Tab 1: Knowledge Base (Dữ liệu sản phẩm & Doanh nghiệp)
+    private var compactKnowledgeTab: some View {
         ScrollView {
-            VStack(spacing: 16) {
-                // Tên thương hiệu
+            VStack(spacing: 12) {
+                // Thương hiệu & Hotline
                 VStack(alignment: .leading, spacing: 8) {
-                    Label("Tên thương hiệu / Trang / Cửa hàng", systemImage: "tag.fill")
-                        .font(.footnote.bold())
+                    Label("Thương hiệu & Hotline", systemImage: "storefront.fill")
+                        .font(.caption.bold())
                         .foregroundStyle(Color.trackerPrimaryDark)
 
-                    TextField("VD: ViePN Smart Store", text: $store.profile.brandName)
-                        .padding(10)
-                        .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+                    HStack(spacing: 8) {
+                        TextField("Tên thương hiệu / Shop", text: $store.profile.brandName)
+                            .font(.caption)
+                            .padding(8)
+                            .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+
+                        TextField("Hotline / Zalo", text: $store.profile.contactPhone)
+                            .font(.caption)
+                            .padding(8)
+                            .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+                    }
                 }
-                .padding(14)
-                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+                .padding(12)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
 
                 // Danh mục sản phẩm & Bảng giá
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Label("Danh mục sản phẩm & Bảng giá", systemImage: "list.bullet.rectangle.portrait.fill")
-                            .font(.footnote.bold())
+                            .font(.caption.bold())
                             .foregroundStyle(Color.trackerPrimaryDark)
                         Spacer()
                         Text("Dữ liệu gốc")
@@ -626,57 +644,46 @@ struct AITrainingAndManagementSheet: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    Text("Nhập thông tin sản phẩm, các gói dịch vụ và mức giá để AI tư vấn chính xác, không nói sai giá:")
-                        .font(.caption)
+                    Text("Nhập thông tin sản phẩm và giá để AI tư vấn chuẩn xác:")
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
 
                     TextEditor(text: $store.profile.productCatalog)
-                        .frame(minHeight: 120)
-                        .padding(8)
+                        .font(.caption)
+                        .frame(minHeight: 110)
+                        .padding(6)
                         .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.18), lineWidth: 1)
-                        )
                 }
-                .padding(14)
-                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+                .padding(12)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
 
-                // Chính sách & Thông tin liên hệ
-                VStack(alignment: .leading, spacing: 8) {
-                    Label("Chính sách & Kênh liên hệ (Hotline/Zalo/Địa chỉ)", systemImage: "shield.checkerboard")
-                        .font(.footnote.bold())
+                // Chính sách & Bảo hành
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Chính sách & Bảo hành", systemImage: "shield.checkerboard")
+                        .font(.caption.bold())
                         .foregroundStyle(Color.trackerPrimaryDark)
 
-                    Text("Chính sách bảo hành, đổi trả, phí ship, hotline Zalo để AI cung cấp cho khách:")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
                     TextEditor(text: $store.profile.policyAndContact)
-                        .frame(minHeight: 100)
-                        .padding(8)
+                        .font(.caption)
+                        .frame(minHeight: 80)
+                        .padding(6)
                         .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.18), lineWidth: 1)
-                        )
                 }
-                .padding(14)
-                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+                .padding(12)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
             }
-            .padding(14)
+            .padding(10)
         }
     }
 
-    // MARK: - Tab 3: Few-shot Q&A Training
-    private var fewShotQATabView: some View {
+    // MARK: - Tab 2: Few-shot Q&A Training (Mẫu huấn luyện)
+    private var compactFewShotQATab: some View {
         VStack(spacing: 0) {
+            // Header bar
             HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Mẫu Hỏi - Đáp đã huấn luyện")
-                        .font(.subheadline.bold())
-                    Text("AI sẽ học sâu từ các cặp mẫu thực tế này để trả lời chuẩn phong cách bạn muốn.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Text("Mẫu Hỏi - Đáp (\(store.profile.trainedQAs.count))")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
                 Spacer()
 
                 Button {
@@ -688,68 +695,63 @@ struct AITrainingAndManagementSheet: View {
                         Image(systemName: "plus.circle.fill")
                         Text("Thêm mẫu")
                     }
-                    .font(.caption.bold())
+                    .font(.caption2.bold())
                     .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
+                    .padding(.vertical, 5)
                     .background(Color.trackerPrimaryDark, in: Capsule())
                     .foregroundStyle(.white)
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
             .background(Color(uiColor: .secondarySystemGroupedBackground))
 
             Divider()
 
             if store.profile.trainedQAs.isEmpty {
-                VStack(spacing: 12) {
+                VStack(spacing: 8) {
                     Spacer()
-                    Image(systemName: "bubble.left.and.exclamationmark.bubble.right.fill")
-                        .font(.system(size: 40))
-                        .foregroundStyle(Color.trackerPrimary.opacity(0.6))
-                    Text("Chưa có mẫu huấn luyện nào")
-                        .font(.headline)
-                    Text("Nhấn 'Thêm mẫu' để dạy AI cách phản hồi những câu hỏi thường gặp của khách hàng.")
-                        .font(.caption)
+                    Image(systemName: "brain.head.profile")
+                        .font(.system(size: 36))
+                        .foregroundStyle(Color.trackerPrimary.opacity(0.5))
+                    Text("Chưa có mẫu câu huấn luyện")
+                        .font(.footnote.bold())
+                    Text("Nhấn 'Thêm mẫu' để dạy AI cách phản hồi câu hỏi phổ biến của khách.")
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 40)
                     Spacer()
                 }
             } else {
                 List {
                     ForEach($store.profile.trainedQAs) { $item in
-                        VStack(alignment: .leading, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 6) {
                             HStack(alignment: .top) {
                                 Toggle(isOn: $item.isEnabled) {
-                                    HStack(spacing: 6) {
+                                    HStack(spacing: 4) {
                                         Image(systemName: "person.crop.circle.fill")
-                                            .font(.caption)
+                                            .font(.caption2)
                                             .foregroundStyle(.blue)
                                         Text(item.question)
-                                            .font(.subheadline.bold())
+                                            .font(.caption.bold())
                                             .lineLimit(2)
                                     }
                                 }
                                 .tint(Color.trackerPrimaryDark)
                             }
 
-                            HStack(alignment: .top, spacing: 6) {
+                            HStack(alignment: .top, spacing: 4) {
                                 Image(systemName: "bubble.right.fill")
-                                    .font(.caption)
+                                    .font(.caption2)
                                     .foregroundStyle(Color.trackerPrimaryDark)
                                 Text(item.answer)
-                                    .font(.footnote)
+                                    .font(.caption)
                                     .foregroundStyle(item.isEnabled ? Color.primary : Color.secondary)
-                                    .padding(8)
+                                    .padding(6)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(
-                                        Color(uiColor: .tertiarySystemGroupedBackground),
-                                        in: RoundedRectangle(cornerRadius: 8)
-                                    )
+                                    .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 6))
                             }
                         }
-                        .padding(.vertical, 4)
+                        .padding(.vertical, 2)
                         .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
                         .swipeActions(edge: .trailing) {
                             Button(role: .destructive) {
@@ -766,109 +768,95 @@ struct AITrainingAndManagementSheet: View {
         }
     }
 
-    // MARK: - Tab 4: Guardrails
-    private var guardrailsTabView: some View {
+    // MARK: - Tab 3: Guardrails (Quy tắc & Từ cấm)
+    private var compactGuardrailsTab: some View {
         ScrollView {
-            VStack(spacing: 16) {
+            VStack(spacing: 12) {
                 // Từ ngữ cấm kỵ
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
                     Label("Từ ngữ cấm kỵ (AI tuyệt đối không được nói)", systemImage: "xmark.octagon.fill")
-                        .font(.footnote.bold())
+                        .font(.caption.bold())
                         .foregroundStyle(.red)
 
-                    Text("Các từ ngữ nhạy cảm, tiêu cực, chê đối thủ, hoặc nói năng bất lịch sự:")
-                        .font(.caption)
+                    Text("Các từ ngữ nhạy cảm, tiêu cực, chê đối thủ:")
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
 
                     TextField("Cách nhau bằng dấu phẩy (,)...", text: $store.profile.bannedWords, axis: .vertical)
-                        .lineLimit(2...4)
-                        .padding(10)
+                        .font(.caption)
+                        .lineLimit(2...3)
+                        .padding(8)
                         .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
                         .overlay(
                             RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.2), lineWidth: 1)
                         )
                 }
-                .padding(14)
-                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+                .padding(12)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
 
-                // Cụm từ bắt buộc / ưu tiên
-                VStack(alignment: .leading, spacing: 8) {
-                    Label("Cụm từ ưu tiên nhắc tới (Key Selling Points)", systemImage: "star.fill")
-                        .font(.footnote.bold())
+                // Cụm từ ưu tiên
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Cụm từ ưu tiên lồng ghép (Key Points)", systemImage: "star.fill")
+                        .font(.caption.bold())
                         .foregroundStyle(Color.trackerPrimaryDark)
-
-                    Text("Các từ khóa cam kết như chính hãng, freeship, bảo hành để tăng uy tín:")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
 
                     TextField("VD: chính hãng 100%, freeship toàn quốc, bảo hành 1 đổi 1...", text: $store.profile.requiredPhrases, axis: .vertical)
+                        .font(.caption)
                         .lineLimit(2...3)
-                        .padding(10)
+                        .padding(8)
                         .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
                 }
-                .padding(14)
-                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+                .padding(12)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
 
-                // Kêu gọi hành động CTA
-                VStack(alignment: .leading, spacing: 8) {
-                    Label("Lời kêu gọi hành động (Call To Action)", systemImage: "arrowshape.right.fill")
-                        .font(.footnote.bold())
+                // Lời kêu gọi hành động CTA
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Kêu gọi hành động (Call To Action)", systemImage: "arrowshape.right.fill")
+                        .font(.caption.bold())
                         .foregroundStyle(Color.trackerPrimaryDark)
 
-                    Text("Câu chốt ở cuối phản hồi để chuyển đổi khách bình luận thành khách mua hàng:")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
                     TextField("VD: Anh/chị nhắn tin cho shop để nhận ưu đãi ngay nhé!", text: $store.profile.callToAction)
-                        .padding(10)
+                        .font(.caption)
+                        .padding(8)
                         .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
                 }
-                .padding(14)
-                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+                .padding(12)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
             }
-            .padding(14)
+            .padding(10)
         }
     }
 
-    // MARK: - Tab 5: Interactive Playground
-    private var playgroundTabView: some View {
+    // MARK: - Tab 4: Live Playground (Phòng thử nghiệm)
+    private var compactPlaygroundTab: some View {
         ScrollView {
-            VStack(spacing: 16) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Label("Phòng thử nghiệm phản hồi AI trực tiếp", systemImage: "flask.fill")
-                        .font(.subheadline.bold())
-                        .foregroundStyle(Color.trackerPrimaryDark)
-
-                    Text("Nhập câu hỏi giả lập của khách hàng để xem AI đã áp dụng đúng kiến thức và nhân cách huấn luyện hay chưa.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    // Post Caption
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Nội dung bài viết:")
+            VStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Label("Thử nghiệm phản hồi thực tế", systemImage: "flask.fill")
                             .font(.caption.bold())
+                            .foregroundStyle(Color.trackerPrimaryDark)
+                        Spacer()
+                        Text("Môi trường Test")
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
-                        TextField("Nhập nội dung bài viết...", text: $testPostCaption, axis: .vertical)
-                            .lineLimit(2...3)
-                            .padding(8)
-                            .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
                     }
 
-                    // Customer Name & Comment
+                    // Bình luận giả lập của khách
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
-                            Text("Bình luận giả lập của khách:")
-                                .font(.caption.bold())
+                            Text("Bình luận của khách:")
+                                .font(.caption2.bold())
                                 .foregroundStyle(.secondary)
                             Spacer()
                             TextField("Tên khách", text: $testAuthorName)
-                                .font(.caption)
-                                .frame(width: 120)
+                                .font(.caption2)
+                                .frame(width: 90)
                                 .textFieldStyle(.roundedBorder)
                         }
 
-                        TextField("Nhập câu hỏi thử nghiệm của khách...", text: $testCustomerComment, axis: .vertical)
-                            .lineLimit(2...3)
+                        TextField("Nhập câu hỏi thử nghiệm của khách...", text: $testCustomerComment)
+                            .font(.caption)
                             .padding(8)
                             .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
                     }
@@ -877,122 +865,95 @@ struct AITrainingAndManagementSheet: View {
                     Button {
                         runPlaygroundTest()
                     } label: {
-                        HStack(spacing: 6) {
+                        HStack(spacing: 5) {
                             if isTestingAI {
                                 ProgressView()
                                     .tint(.white)
-                                Text("AI đang suy nghĩ...")
+                                    .scaleEffect(0.8)
+                                Text("Đang phân tích...")
                             } else {
                                 Image(systemName: "sparkles")
                                 Text("Chạy thử nghiệm AI")
                             }
                         }
-                        .font(.subheadline.bold())
+                        .font(.caption.bold())
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 11)
-                        .background(geminiApiKey.isEmpty ? Color.gray : Color.trackerPrimaryDark, in: RoundedRectangle(cornerRadius: 10))
+                        .padding(.vertical, 9)
+                        .background(geminiApiKey.isEmpty ? Color.gray : Color.trackerPrimaryDark, in: RoundedRectangle(cornerRadius: 8))
                         .foregroundStyle(.white)
                     }
                     .disabled(isTestingAI || geminiApiKey.isEmpty || testCustomerComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-                .padding(14)
-                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+                .padding(12)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
 
-                // Kết quả phản hồi của AI
+                // Kết quả
                 if !testResultReply.isEmpty || testErrorMessage != nil {
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Label("Kết quả AI phản hồi", systemImage: "checkmark.message.fill")
-                                .font(.subheadline.bold())
+                                .font(.caption.bold())
                                 .foregroundStyle(Color.trackerPrimaryDark)
                             Spacer()
                             if testResponseLatency > 0 {
                                 Text(String(format: "%.2fs", testResponseLatency))
                                     .font(.caption2.monospaced())
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 3)
-                                    .background(Color.trackerPrimary.opacity(0.15), in: Capsule())
-                                    .foregroundStyle(Color.trackerPrimaryDark)
+                                    .foregroundStyle(.secondary)
                             }
                         }
 
                         if let error = testErrorMessage {
                             Text(error)
-                                .font(.caption)
+                                .font(.caption2)
                                 .foregroundStyle(.red)
-                                .padding(10)
+                                .padding(8)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                                .background(Color.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
                         } else {
                             Text(testResultReply)
-                                .font(.callout)
-                                .padding(12)
+                                .font(.footnote)
+                                .padding(10)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.trackerPrimary.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+                                .background(Color.trackerPrimary.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
                                 .overlay(
-                                    RoundedRectangle(cornerRadius: 10).stroke(Color.trackerPrimary.opacity(0.3), lineWidth: 1)
+                                    RoundedRectangle(cornerRadius: 8).stroke(Color.trackerPrimary.opacity(0.25), lineWidth: 1)
                                 )
 
-                            HStack(spacing: 10) {
+                            HStack(spacing: 8) {
                                 Button {
                                     UIPasteboard.general.string = testResultReply
                                 } label: {
-                                    HStack(spacing: 4) {
+                                    HStack(spacing: 3) {
                                         Image(systemName: "doc.on.doc")
                                         Text("Sao chép")
                                     }
-                                    .font(.caption.bold())
+                                    .font(.caption2.bold())
                                 }
                                 .buttonStyle(.bordered)
+                                .controlSize(.small)
 
                                 Button {
                                     store.addQA(question: testCustomerComment, answer: testResultReply)
-                                    withAnimation {
-                                        selectedTab = 2
-                                    }
+                                    notifySaved()
+                                    withAnimation { selectedTab = 2 }
                                 } label: {
-                                    HStack(spacing: 4) {
+                                    HStack(spacing: 3) {
                                         Image(systemName: "plus.circle")
                                         Text("Lưu vào Mẫu Q&A")
                                     }
-                                    .font(.caption.bold())
+                                    .font(.caption2.bold())
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .tint(Color.trackerPrimaryDark)
+                                .controlSize(.small)
                             }
                         }
                     }
-                    .padding(14)
-                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+                    .padding(12)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
                 }
             }
-            .padding(14)
-        }
-    }
-
-    // MARK: - Bottom Action Bar
-    private var bottomActionBar: some View {
-        VStack(spacing: 0) {
-            Divider()
-            HStack(spacing: 12) {
-                Button {
-                    saveAll()
-                    dismiss()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "checkmark.seal.fill")
-                        Text("Lưu & Đóng")
-                    }
-                    .font(.subheadline.bold())
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                    .background(Color.trackerPrimaryDark, in: RoundedRectangle(cornerRadius: 12))
-                    .foregroundStyle(.white)
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(Color(uiColor: .secondarySystemGroupedBackground))
+            .padding(10)
         }
     }
 
@@ -1002,26 +963,25 @@ struct AITrainingAndManagementSheet: View {
             Form {
                 Section("Câu hỏi mẫu của khách hàng") {
                     TextField("VD: Sản phẩm có bảo hành không bạn?", text: $newQuestionText, axis: .vertical)
-                        .lineLimit(2...4)
+                        .lineLimit(2...3)
                 }
 
                 Section("Câu trả lời chuẩn mong muốn (AI sẽ học theo)") {
                     TextField("VD: Dạ bên em bảo hành 12 tháng 1 đổi 1 tận nơi ạ...", text: $newAnswerText, axis: .vertical)
-                        .lineLimit(3...6)
+                        .lineLimit(3...5)
                 }
             }
             .navigationTitle("Thêm mẫu Hỏi - Đáp")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Hủy") {
-                        showAddQASheet = false
-                    }
+                    Button("Hủy") { showAddQASheet = false }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Lưu mẫu") {
                         store.addQA(question: newQuestionText, answer: newAnswerText)
                         showAddQASheet = false
+                        notifySaved()
                     }
                     .bold()
                     .disabled(newQuestionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
@@ -1031,31 +991,24 @@ struct AITrainingAndManagementSheet: View {
         }
     }
 
-    // MARK: - Logic Actions
-    private func saveAll() {
-        SecureGeminiStore.saveKey(geminiApiKey)
-        store.saveToDisk()
-        withAnimation {
-            showSaveSuccessBanner = true
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            withAnimation {
-                showSaveSuccessBanner = false
-            }
+    // MARK: - Actions
+    private func notifySaved() {
+        withAnimation { showSaveSuccessBanner = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+            withAnimation { showSaveSuccessBanner = false }
         }
     }
 
     private func runPlaygroundTest() {
         let cleanKey = geminiApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanKey.isEmpty else {
-            testErrorMessage = "Vui lòng nhập Gemini API Key ở thanh phía trên để chạy thử."
+            testErrorMessage = "Vui lòng nhập Gemini API Key ở ô phía trên."
             return
         }
 
         isTestingAI = true
         testErrorMessage = nil
         testResultReply = ""
-
         let startTime = CFAbsoluteTimeGetCurrent()
 
         Task {
@@ -1093,6 +1046,31 @@ struct AITrainingAndManagementSheet: View {
                     self.testResponseLatency = elapsed
                     self.testErrorMessage = "Lỗi khi gọi AI: \(error.localizedDescription)"
                     self.isTestingAI = false
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 4. Modal Sheet Wrapper
+struct AITrainingAndManagementSheet: View {
+    @Binding var geminiApiKey: String
+    @Binding var geminiModel: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            AITrainingManagementView(
+                geminiApiKey: $geminiApiKey,
+                geminiModel: $geminiModel,
+                isEmbedded: false,
+                onDismiss: { dismiss() }
+            )
+            .navigationTitle("Huấn luyện & Quản lý AI")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Đóng") { dismiss() }
                 }
             }
         }

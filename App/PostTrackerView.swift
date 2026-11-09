@@ -2442,13 +2442,13 @@ struct PostTrackerView: View {
                 .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
                 .disabled(tracker.isSyncingAll || tracker.posts.isEmpty)
 
-                // Nút Huấn luyện & Quản lý AI
+                // Nút Quản lý AI
                 Button {
                     showAISettingsSheet = true
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: "brain.head.profile")
-                        Text(geminiApiKey.isEmpty ? "Cài đặt AI Key" : "Huấn luyện & Quản lý AI")
+                        Text(geminiApiKey.isEmpty ? "Cài đặt AI Key" : "Quản lý AI")
                     }
                     .frame(maxWidth: .infinity)
                 }

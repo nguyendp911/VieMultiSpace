@@ -2234,8 +2234,10 @@ struct SmartPostView: View {
     @StateObject private var scheduler = ScheduledPostManager.shared
     @StateObject private var tracker = TrackedPostManager.shared
 
-    // Navigation Tabs: 0 = Soạn & Đăng, 1 = Lịch đăng, 2 = Theo dõi & AI
+    // Navigation Tabs: 0 = Đăng bài, 1 = Lịch đăng, 2 = Theo dõi, 3 = Quản lý AI
     @State private var selectedTab: Int
+    @State private var geminiApiKey: String = SecureGeminiStore.readKey()
+    @State private var geminiModel: String = UserDefaults.standard.string(forKey: "gemini_model") ?? "auto"
 
     // Selection
     @State private var selectedSpaceIds: Set<UUID> = []
@@ -2296,11 +2298,11 @@ struct SmartPostView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Custom Modern 3-Tab Switcher (Gọn gàng & Trang trí đẹp mắt với tone #8FBC8F)
-            HStack(spacing: 6) {
+            // Custom Modern 4-Tab Switcher (Gọn gàng & Trang trí đẹp mắt với tone #8FBC8F)
+            HStack(spacing: 5) {
                 smartTabButton(
                     index: 0,
-                    title: "Soạn & Đăng",
+                    title: "Đăng bài",
                     icon: "square.and.pencil",
                     badgeCount: 0,
                     activeColors: [Color.themePrimary, Color.themePrimaryDark]
@@ -2314,21 +2316,34 @@ struct SmartPostView: View {
                 )
                 smartTabButton(
                     index: 2,
-                    title: "Theo dõi & AI",
+                    title: "Theo dõi",
                     icon: "chart.bar.doc.horizontal.fill",
                     badgeCount: tracker.posts.count,
                     activeColors: [Color.themePrimary, Color.themePrimaryDark]
                 )
+                smartTabButton(
+                    index: 3,
+                    title: "Quản lý AI",
+                    icon: "brain.head.profile",
+                    badgeCount: 0,
+                    activeColors: [Color.themePrimary, Color.themePrimaryDark]
+                )
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 8)
             .padding(.vertical, 6)
 
             if selectedTab == 0 {
                 composeForm
             } else if selectedTab == 1 {
                 scheduleManagerView
-            } else {
+            } else if selectedTab == 2 {
                 PostTrackerView()
+            } else {
+                AITrainingManagementView(
+                    geminiApiKey: $geminiApiKey,
+                    geminiModel: $geminiModel,
+                    isEmbedded: true
+                )
             }
         }
         .navigationTitle("Smart Post")
@@ -2392,32 +2407,32 @@ struct SmartPostView: View {
         Button {
             withAnimation(.spring(response: 0.28)) { selectedTab = index }
         } label: {
-            HStack(spacing: 5) {
+            HStack(spacing: 3) {
                 Image(systemName: icon)
-                    .font(.caption.bold())
+                    .font(.system(size: 11, weight: .bold))
                 Text(title)
-                    .font(.caption.bold())
+                    .font(.system(size: 11, weight: .bold))
                     .lineLimit(1)
                 if badgeCount > 0 {
                     Text("\(badgeCount)")
-                        .font(.system(size: 10, weight: .bold))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1.5)
+                        .font(.system(size: 8, weight: .bold))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
                         .background(isSelected ? Color.white.opacity(0.28) : (activeColors.first ?? .blue), in: Capsule())
                         .foregroundStyle(.white)
                 }
             }
             .foregroundStyle(isSelected ? Color.white : Color.primary)
-            .padding(.vertical, 8)
+            .padding(.vertical, 7)
             .frame(maxWidth: .infinity)
             .background(
-                RoundedRectangle(cornerRadius: 10)
+                RoundedRectangle(cornerRadius: 8)
                     .fill(
                         isSelected
                             ? AnyShapeStyle(LinearGradient(colors: activeColors, startPoint: .topLeading, endPoint: .bottomTrailing))
                             : AnyShapeStyle(Color(uiColor: .tertiarySystemGroupedBackground))
                     )
-                    .shadow(color: isSelected ? (activeColors.first ?? .blue).opacity(0.25) : Color.clear, radius: 3, x: 0, y: 1.5)
+                    .shadow(color: isSelected ? (activeColors.first ?? .blue).opacity(0.25) : Color.clear, radius: 2, x: 0, y: 1)
             )
         }
         .buttonStyle(.plain)
