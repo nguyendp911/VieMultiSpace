@@ -19,6 +19,7 @@ targets:
         CFBundleDisplayName: ViePN Smart+
         NSFaceIDUsageDescription: Dùng Face ID để khóa các không gian đăng nhập cá nhân.
         NSPhotoLibraryUsageDescription: Cho phép ứng dụng chọn ảnh để đăng bài viết lên Facebook trong chức năng Smart Post.
+        NSPhotoLibraryAddUsageDescription: Cho phép lưu ảnh chụp giới thiệu ứng dụng vào Album ảnh của bạn.
         LSRequiresIPhoneOS: true
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:

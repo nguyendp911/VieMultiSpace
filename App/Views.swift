@@ -24,6 +24,7 @@ struct SpaceDashboard: View {
     @State private var navigateToSync = false
     @State private var navigateToSmartPost = false
     @State private var navigateToPostTracker = false
+    @State private var showShowcaseStudio = false
     @State private var inlineRenameId: UUID? = nil
     @State private var inlineRenameText = ""
     @ObservedObject private var logger = AppLogger.shared
@@ -122,6 +123,48 @@ struct SpaceDashboard: View {
                                     navigateToSync = true
                                 }
                             }
+
+                            // Studio Chụp ảnh Giới thiệu App
+                            Button {
+                                showShowcaseStudio = true
+                            } label: {
+                                HStack(spacing: 9) {
+                                    ZStack {
+                                        RoundedRectangle(cornerRadius: 9)
+                                            .fill(LinearGradient(colors: [Color.blue, Color.purple], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                            .frame(width: 32, height: 32)
+                                        Image(systemName: "camera.viewfinder")
+                                            .font(.system(size: 14, weight: .bold))
+                                            .foregroundStyle(.white)
+                                    }
+
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        HStack(spacing: 4) {
+                                            Text("Studio Giới thiệu App")
+                                                .font(.caption.bold())
+                                                .foregroundStyle(.primary)
+                                            Text("HOT")
+                                                .font(.system(size: 8, weight: .heavy))
+                                                .padding(.horizontal, 4)
+                                                .padding(.vertical, 1)
+                                                .background(Color.pink, in: Capsule())
+                                                .foregroundStyle(.white)
+                                        }
+                                        Text("Chụp & xuất trọn bộ ảnh 8 cửa sổ chức năng để làm bài giới thiệu")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 11))
+                            }
+                            .buttonStyle(.plain)
                         }
                         .padding(.vertical, 2)
                     }
@@ -282,6 +325,12 @@ struct SpaceDashboard: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
+                        Button {
+                            showShowcaseStudio = true
+                        } label: {
+                            Label("Chụp ảnh giới thiệu App", systemImage: "camera.viewfinder")
+                        }
+                        Divider()
                         Toggle("Khóa bằng Face ID / mã máy", isOn: $requireUnlock)
                         Button("Khóa ngay", systemImage: "lock") { isLocked = true }
                             .disabled(!requireUnlock)
@@ -301,6 +350,9 @@ struct SpaceDashboard: View {
             }
             .navigationDestination(isPresented: $navigateToPostTracker) {
                 SmartPostView(initialTab: 2)
+            }
+            .sheet(isPresented: $showShowcaseStudio) {
+                AppShowcaseStudioView()
             }
             .sheet(isPresented: $showLog) {
                 LogConsoleView()

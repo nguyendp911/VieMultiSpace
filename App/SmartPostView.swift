@@ -2238,6 +2238,7 @@ struct SmartPostView: View {
     @State private var selectedTab: Int
     @State private var geminiApiKey: String = SecureGeminiStore.readKey()
     @State private var geminiModel: String = UserDefaults.standard.string(forKey: "gemini_model") ?? "auto"
+    @State private var showShowcaseStudio = false
 
     // Selection
     @State private var selectedSpaceIds: Set<UUID> = []
@@ -2348,6 +2349,19 @@ struct SmartPostView: View {
         }
         .navigationTitle("Smart Post")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showShowcaseStudio = true
+                } label: {
+                    Image(systemName: "camera.viewfinder")
+                        .font(.system(size: 15))
+                }
+            }
+        }
+        .sheet(isPresented: $showShowcaseStudio) {
+            AppShowcaseStudioView()
+        }
         .sheet(isPresented: $showPhotoPicker) {
             SmartPostMediaPicker(
                 onImagesPicked: { imgs in
