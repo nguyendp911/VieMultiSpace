@@ -3357,249 +3357,403 @@ struct PostDetailAndReplySheet: View {
         NavigationStack {
             VStack(spacing: 0) {
                 if let currentPost = post {
-                    // Header tóm tắt bài viết & chọn tài khoản phản hồi
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Label(currentPost.spaceName, systemImage: "person.crop.circle.badge.checkmark")
-                                .font(.caption.bold())
+                    // 1. Thẻ tóm tắt bài viết trên cùng (Gọn gàng & Hiện đại)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .center, spacing: 8) {
+                            Image(systemName: "person.crop.circle.fill")
+                                .font(.headline)
                                 .foregroundStyle(Color.trackerPrimaryDark)
+
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(currentPost.spaceName)
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                Text(currentPost.caption.isEmpty ? currentPost.postUrl : currentPost.caption)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+
                             Spacer()
-                            Text("❤️ \(currentPost.reactionCount) • 💬 \(currentPost.commentCount) • 🔄 \(currentPost.shareCount)")
-                                .font(.caption.bold())
-                                .foregroundStyle(.secondary)
+
+                            // Thống kê bằng Icon + Số
+                            HStack(spacing: 6) {
+                                Label("\(currentPost.reactionCount)", systemImage: "hand.thumbsup.fill")
+                                Label("\(currentPost.commentCount)", systemImage: "bubble.left.fill")
+                                Label("\(currentPost.shareCount)", systemImage: "arrowshape.turn.up.right.fill")
+                            }
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(Color.trackerPrimaryDark)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.trackerSoft, in: Capsule())
                         }
+                    }
+                    .padding(10)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
 
-                        Text(currentPost.caption.isEmpty ? currentPost.postUrl : currentPost.caption)
-                            .font(.caption)
-                            .foregroundStyle(.primary)
-                            .lineLimit(2)
+                    // 2. Thanh công cụ thao tác hàng loạt (Đồng bộ chiều cao & Giao diện phẳng)
+                    let allIds = Set(currentPost.comments.map(\.id))
+                    let allSelected = !allIds.isEmpty && tickedCommentIds == allIds
+                    let unrepliedCount = currentPost.comments.filter { !currentPost.isCommentHandled($0) }.count
 
-                        // Thanh công cụ Tick chọn bình luận để AI trả lời
-                        HStack(spacing: 8) {
-                            let allIds = Set(currentPost.comments.map(\.id))
-                            let allSelected = !allIds.isEmpty && tickedCommentIds == allIds
-
-                            Button {
+                    HStack(spacing: 8) {
+                        // Nút Chọn tất cả
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.18)) {
                                 if allSelected {
                                     tickedCommentIds.removeAll()
                                 } else {
                                     tickedCommentIds = allIds
                                 }
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: allSelected ? "checkmark.square.fill" : "square")
-                                    Text("Chọn hết (\(tickedCommentIds.count))")
-                                }
                             }
-                            .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
-
-                            Button {
-                                let unreplied = currentPost.comments
-                                    .filter { !currentPost.isCommentHandled($0) }
-                                    .map(\.id)
-                                tickedCommentIds = Set(unreplied)
-                            } label: {
-                                Text("Tick chưa trả lời")
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: allSelected ? "checkmark.circle.fill" : "circle")
+                                    .font(.caption.bold())
+                                Text(allSelected ? "Bỏ chọn" : "Chọn hết (\(currentPost.comments.count))")
+                                    .font(.caption2.bold())
                             }
-                            .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
-
-                            Spacer()
-
-                            Button {
-                                Task {
-                                    await tracker.syncSinglePost(id: currentPost.id, space: actingSpace)
-                                }
-                            } label: {
-                                Image(systemName: "arrow.clockwise")
-                            }
-                            .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
-
-                            Button {
-                                let key = geminiApiKey.isEmpty ? SecureGeminiStore.readKey() : geminiApiKey
-                                guard !key.isEmpty else {
-                                    feedbackBanner = "⚠️ Hãy cài đặt Gemini API Key trước!"
-                                    return
-                                }
-                                Task {
-                                    let res = await tracker.runAIReplyForPost(
-                                        postItemId: currentPost.id,
-                                        specificCommentIds: tickedCommentIds.isEmpty ? nil : tickedCommentIds,
-                                        replyDirectlyToPostIfNoComments: currentPost.comments.isEmpty,
-                                        actingSpace: actingSpace,
-                                        geminiApiKey: key,
-                                        geminiModel: geminiModel,
-                                        globalStylePrompt: globalStylePrompt
-                                    )
-                                    feedbackBanner = res.repliedCount > 0
-                                        ? "✅ AI đã trả lời \(res.repliedCount) bình luận!"
-                                        : (res.errorMessage ?? "Không có bình luận nào cần trả lời.")
-                                    tickedCommentIds.removeAll()
-                                }
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "sparkles")
-                                    Text(tickedCommentIds.isEmpty ? "AI Trả lời tự động" : "AI Trả lời (\(tickedCommentIds.count))")
-                                }
-                            }
-                            .buttonStyle(GradientPillButtonStyle(colors: [.trackerPrimary, .trackerPrimaryDark], isCompact: true))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(allSelected ? Color.trackerPrimary.opacity(0.18) : Color(uiColor: .tertiarySystemGroupedBackground), in: Capsule())
+                            .foregroundStyle(allSelected ? Color.trackerPrimaryDark : .primary)
                         }
-                    }
-                    .padding(12)
-                    .background(Color(uiColor: .secondarySystemGroupedBackground))
+                        .buttonStyle(.plain)
 
-                    if !feedbackBanner.isEmpty {
-                        Text(feedbackBanner)
-                            .font(.caption.bold())
-                            .foregroundStyle(Color.trackerPrimaryDark)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        // Nút lọc Chưa trả lời
+                        if unrepliedCount > 0 {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.18)) {
+                                    let unreplied = currentPost.comments
+                                        .filter { !currentPost.isCommentHandled($0) }
+                                        .map(\.id)
+                                    tickedCommentIds = Set(unreplied)
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "clock.badge.exclamationmark")
+                                        .font(.caption.bold())
+                                    Text("Chưa trả lời (\(unrepliedCount))")
+                                        .font(.caption2.bold())
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(Color.orange.opacity(0.14), in: Capsule())
+                                .foregroundStyle(Color.orange)
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        Spacer()
+
+                        // Nút AI Trả lời tự động
+                        Button {
+                            let key = geminiApiKey.isEmpty ? SecureGeminiStore.readKey() : geminiApiKey
+                            guard !key.isEmpty else {
+                                feedbackBanner = "⚠️ Hãy cài đặt Gemini API Key trước!"
+                                return
+                            }
+                            Task {
+                                let res = await tracker.runAIReplyForPost(
+                                    postItemId: currentPost.id,
+                                    specificCommentIds: tickedCommentIds.isEmpty ? nil : tickedCommentIds,
+                                    replyDirectlyToPostIfNoComments: currentPost.comments.isEmpty,
+                                    actingSpace: actingSpace,
+                                    geminiApiKey: key,
+                                    geminiModel: geminiModel,
+                                    globalStylePrompt: globalStylePrompt
+                                )
+                                feedbackBanner = res.repliedCount > 0
+                                    ? "✅ AI đã trả lời \(res.repliedCount) bình luận!"
+                                    : (res.errorMessage ?? "Không có bình luận nào cần trả lời.")
+                                tickedCommentIds.removeAll()
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "sparkles")
+                                    .font(.caption.bold())
+                                Text(tickedCommentIds.isEmpty ? "AI Trả lời" : "AI Trả lời (\(tickedCommentIds.count))")
+                                    .font(.caption.bold())
+                                    .lineLimit(1)
+                            }
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .background(Color.trackerSoft)
+                        }
+                        .buttonStyle(GradientPillButtonStyle(colors: [.trackerPrimary, .trackerPrimaryDark], isCompact: true))
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+
+                    if !feedbackBanner.isEmpty {
+                        HStack(spacing: 6) {
+                            Text(feedbackBanner)
+                                .font(.caption.bold())
+                                .foregroundStyle(Color.trackerPrimaryDark)
+                            Spacer()
+                            Button {
+                                feedbackBanner = ""
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.caption2.bold())
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.trackerSoft, in: RoundedRectangle(cornerRadius: 8))
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 4)
                     }
 
                     Divider()
 
-                    // Danh sách bình luận
+                    // 3. Danh sách bình luận dạng Card bóng bẩy (Không bị ngắt chữ)
                     if currentPost.comments.isEmpty {
-                        VStack(spacing: 10) {
+                        VStack(spacing: 12) {
                             Spacer()
                             Image(systemName: "bubble.left.and.exclamationmark.bubble.right")
-                                .font(.largeTitle)
-                                .foregroundStyle(.secondary)
-                            Text("Chưa có bình luận nào được tải")
+                                .font(.system(size: 40))
+                                .foregroundStyle(.secondary.opacity(0.6))
+                            Text("Chưa có bình luận nào")
                                 .font(.subheadline.bold())
-                            Text("Bạn có thể bấm nút Làm mới ở trên để tải bình luận mới nhất hoặc gửi bình luận trực tiếp vào bài viết ở khung bên dưới.")
+                            Text("Bấm nút làm mới ở góc phải trên để tải bình luận mới nhất.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
-                                .padding(.horizontal, 28)
+                                .padding(.horizontal, 32)
                             Spacer()
                         }
                     } else {
-                        List {
-                            ForEach(currentPost.comments) { cmt in
-                                let isTicked = tickedCommentIds.contains(cmt.id)
-                                let isHandled = currentPost.isCommentHandled(cmt)
+                        ScrollView {
+                            LazyVStack(spacing: 8) {
+                                ForEach(currentPost.comments) { cmt in
+                                    let isTicked = tickedCommentIds.contains(cmt.id)
+                                    let isHandled = currentPost.isCommentHandled(cmt)
+                                    let isReplying = selectedReplyTargetComment?.id == cmt.id
 
-                                VStack(alignment: .leading, spacing: 6) {
-                                    HStack(spacing: 8) {
-                                        // Nút tick chọn bình luận cho AI
+                                    HStack(alignment: .top, spacing: 10) {
+                                        // Tick tròn cho AI
                                         Button {
-                                            if isTicked { tickedCommentIds.remove(cmt.id) }
-                                            else { tickedCommentIds.insert(cmt.id) }
+                                            withAnimation(.easeInOut(duration: 0.15)) {
+                                                if isTicked { tickedCommentIds.remove(cmt.id) }
+                                                else { tickedCommentIds.insert(cmt.id) }
+                                            }
                                         } label: {
-                                            Image(systemName: isTicked ? "checkmark.square.fill" : "square")
+                                            Image(systemName: isTicked ? "checkmark.circle.fill" : "circle")
                                                 .font(.title3)
-                                                .foregroundStyle(isTicked ? Color.trackerPrimaryDark : .secondary)
+                                                .foregroundStyle(isTicked ? Color.trackerPrimaryDark : Color.gray.opacity(0.4))
+                                                .padding(.top, 4)
                                         }
                                         .buttonStyle(.plain)
 
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            HStack(spacing: 6) {
-                                                Text(cmt.authorName)
-                                                    .font(.subheadline.bold())
-                                                Text(cmt.createdTime)
-                                                    .font(.caption2)
-                                                    .foregroundStyle(.secondary)
-                                                if isHandled {
-                                                    Text("Đã trả lời")
-                                                        .font(.caption2.bold())
+                                        // Thẻ nội dung bình luận
+                                        VStack(alignment: .leading, spacing: 6) {
+                                            HStack(spacing: 8) {
+                                                // Avatar chữ cái đầu
+                                                ZStack {
+                                                    Circle()
+                                                        .fill(Color.trackerPrimary.opacity(0.18))
+                                                        .frame(width: 26, height: 26)
+                                                    Text(String(cmt.authorName.prefix(1)).uppercased())
+                                                        .font(.system(size: 11, weight: .bold))
                                                         .foregroundStyle(Color.trackerPrimaryDark)
-                                                        .padding(.horizontal, 6)
-                                                        .padding(.vertical, 2)
-                                                        .background(Color.trackerSoft, in: Capsule())
                                                 }
+
+                                                VStack(alignment: .leading, spacing: 1) {
+                                                    Text(cmt.authorName)
+                                                        .font(.caption.bold())
+                                                        .foregroundStyle(.primary)
+                                                        .lineLimit(1)
+                                                    Text(cmt.createdTime)
+                                                        .font(.system(size: 10))
+                                                        .foregroundStyle(.secondary)
+                                                }
+
+                                                Spacer()
+
+                                                if isHandled {
+                                                    HStack(spacing: 3) {
+                                                        Image(systemName: "checkmark")
+                                                            .font(.system(size: 8, weight: .bold))
+                                                        Text("Đã trả lời")
+                                                            .font(.system(size: 9, weight: .bold))
+                                                    }
+                                                    .padding(.horizontal, 6)
+                                                    .padding(.vertical, 2.5)
+                                                    .background(Color.trackerSoft, in: Capsule())
+                                                    .foregroundStyle(Color.trackerPrimaryDark)
+                                                }
+
+                                                // Nút Trả lời riêng
+                                                Button {
+                                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                                        if isReplying {
+                                                            selectedReplyTargetComment = nil
+                                                        } else {
+                                                            selectedReplyTargetComment = cmt
+                                                        }
+                                                    }
+                                                } label: {
+                                                    HStack(spacing: 3) {
+                                                        Image(systemName: isReplying ? "xmark" : "arrowshape.turn.up.left.fill")
+                                                            .font(.system(size: 9, weight: .bold))
+                                                        Text(isReplying ? "Hủy" : "Trả lời")
+                                                            .font(.system(size: 10, weight: .bold))
+                                                    }
+                                                    .padding(.horizontal, 8)
+                                                    .padding(.vertical, 4)
+                                                    .background(
+                                                        isReplying
+                                                            ? Color.red.opacity(0.12)
+                                                            : Color.trackerPrimary.opacity(0.14),
+                                                        in: Capsule()
+                                                    )
+                                                    .foregroundStyle(isReplying ? Color.red : Color.trackerPrimaryDark)
+                                                }
+                                                .buttonStyle(.plain)
                                             }
+
+                                            // Nội dung bình luận đầy đủ
                                             Text(cmt.message)
                                                 .font(.subheadline)
                                                 .foregroundStyle(.primary)
-                                        }
+                                                .textSelection(.enabled)
+                                                .fixedSize(horizontal: false, vertical: true)
 
-                                        Spacer()
-
-                                        // Nút chọn để trả lời trực tiếp hoặc AI trả lời lẻ
-                                        Button {
-                                            selectedReplyTargetComment = cmt
-                                        } label: {
-                                            HStack(spacing: 3) {
-                                                Image(systemName: "arrowshape.turn.up.left.fill")
-                                                Text("Trả lời")
+                                            // Lịch sử phản hồi trước đó
+                                            if let lastReply = cmt.lastReplyText, !lastReply.isEmpty {
+                                                HStack(alignment: .top, spacing: 6) {
+                                                    Image(systemName: "arrow.turn.down.right")
+                                                        .font(.caption2)
+                                                        .foregroundStyle(Color.trackerPrimaryDark)
+                                                    Text("Bạn: \"\(lastReply)\"")
+                                                        .font(.caption)
+                                                        .foregroundStyle(.secondary)
+                                                        .lineLimit(3)
+                                                }
+                                                .padding(6)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                                .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 6))
                                             }
                                         }
-                                        .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
+                                        .padding(10)
+                                        .background(
+                                            isReplying
+                                                ? Color.trackerPrimary.opacity(0.08)
+                                                : Color(uiColor: .secondarySystemGroupedBackground),
+                                            in: RoundedRectangle(cornerRadius: 12)
+                                        )
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 12)
+                                                .stroke(
+                                                    isReplying
+                                                        ? Color.trackerPrimaryDark
+                                                        : (isTicked ? Color.trackerPrimary.opacity(0.4) : Color.gray.opacity(0.15)),
+                                                    lineWidth: isReplying ? 1.5 : 1
+                                                )
+                                        )
                                     }
-
-                                    if let lastReply = cmt.lastReplyText, !lastReply.isEmpty {
-                                        HStack(spacing: 6) {
-                                            Image(systemName: "checkmark.bubble.fill")
-                                                .font(.caption2)
-                                                .foregroundStyle(Color.trackerPrimaryDark)
-                                            Text("Phản hồi: \"\(lastReply)\"")
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
-                                                .lineLimit(2)
-                                        }
-                                        .padding(.leading, 30)
-                                    }
+                                    .padding(.horizontal, 12)
                                 }
-                                .padding(.vertical, 4)
                             }
+                            .padding(.vertical, 8)
                         }
-                        .listStyle(.plain)
                     }
 
-                    Divider()
+                    // 4. Khung nhập trả lời dưới đáy màn hình (Phong cách chat bar hiện đại)
+                    VStack(spacing: 6) {
+                        Divider()
 
-                    // Khung nhập trả lời trực tiếp ở đáy màn hình
-                    VStack(spacing: 8) {
-                        HStack {
+                        HStack(spacing: 8) {
                             if let targetCmt = selectedReplyTargetComment {
                                 HStack(spacing: 4) {
-                                    Text("Đang trả lời: \(targetCmt.authorName)")
-                                        .font(.caption.bold())
+                                    Image(systemName: "arrowshape.turn.up.left.fill")
+                                        .font(.caption2)
                                         .foregroundStyle(Color.trackerPrimaryDark)
+                                    Text("Đang trả lời:")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    Text(targetCmt.authorName)
+                                        .font(.caption2.bold())
+                                        .foregroundStyle(Color.trackerPrimaryDark)
+                                        .lineLimit(1)
                                     Button {
-                                        selectedReplyTargetComment = nil
+                                        withAnimation { selectedReplyTargetComment = nil }
                                     } label: {
                                         Image(systemName: "xmark.circle.fill")
-                                            .font(.caption)
+                                            .font(.caption2)
                                             .foregroundStyle(.secondary)
                                     }
+                                    .buttonStyle(.plain)
                                 }
                             } else {
-                                Text("Bình luận trực tiếp vào bài viết")
-                                    .font(.caption.bold())
-                                    .foregroundStyle(.secondary)
+                                HStack(spacing: 4) {
+                                    Image(systemName: "bubble.left.and.bubble.right.fill")
+                                        .font(.caption2)
+                                        .foregroundStyle(Color.trackerPrimaryDark)
+                                    Text("Bình luận vào bài viết")
+                                        .font(.caption2.bold())
+                                        .foregroundStyle(.secondary)
+                                }
                             }
 
                             Spacer()
 
+                            // Chọn tài khoản gửi dạng Menu Badge
                             if !spaces.isEmpty {
-                                Picker("Tài khoản gửi", selection: $actingSpaceId) {
+                                Menu {
                                     ForEach(spaces) { sp in
-                                        Text(sp.name).tag(Optional(sp.id))
+                                        Button {
+                                            actingSpaceId = sp.id
+                                        } label: {
+                                            HStack {
+                                                Text(sp.name)
+                                                if actingSpaceId == sp.id {
+                                                    Image(systemName: "checkmark")
+                                                }
+                                            }
+                                        }
                                     }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "person.circle.fill")
+                                            .font(.caption2)
+                                        Text(actingSpace?.name ?? "Chọn nick")
+                                            .font(.caption2.bold())
+                                            .lineLimit(1)
+                                        Image(systemName: "chevron.up.chevron.down")
+                                            .font(.system(size: 8, weight: .bold))
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3.5)
+                                    .background(Color.trackerSoft, in: Capsule())
+                                    .foregroundStyle(Color.trackerPrimaryDark)
                                 }
-                                .labelsHidden()
-                                .controlSize(.mini)
                             }
                         }
+                        .padding(.horizontal, 14)
 
+                        // Ô nhập liệu + Nút AI Soạn + Nút Gửi
                         HStack(spacing: 8) {
                             TextField(
                                 selectedReplyTargetComment != nil
-                                    ? "Nhập câu trả lời cho \(selectedReplyTargetComment!.authorName)..."
-                                    : "Nhập nội dung bình luận trực tiếp...",
+                                    ? "Trả lời @\(selectedReplyTargetComment!.authorName)..."
+                                    : "Viết bình luận bài viết...",
                                 text: $directReplyText,
                                 axis: .vertical
                             )
                             .font(.subheadline)
-                            .lineLimit(1...3)
-                            .padding(.horizontal, 10)
+                            .lineLimit(1...4)
+                            .padding(.horizontal, 12)
                             .padding(.vertical, 8)
-                            .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
+                            .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
 
-                            // Nút dùng AI soạn câu trả lời vào ô nhập
+                            // Nút AI Soạn tròn
                             Button {
                                 let key = geminiApiKey.isEmpty ? SecureGeminiStore.readKey() : geminiApiKey
                                 guard !key.isEmpty else {
@@ -3625,19 +3779,23 @@ struct PostDetailAndReplySheet: View {
                                     isGeneratingAI = false
                                 }
                             } label: {
-                                HStack(spacing: 3) {
+                                ZStack {
+                                    Circle()
+                                        .fill(Color.trackerSoft)
+                                        .frame(width: 36, height: 36)
                                     if isGeneratingAI {
-                                        ProgressView().controlSize(.mini)
+                                        ProgressView().controlSize(.mini).tint(Color.trackerPrimaryDark)
                                     } else {
-                                        Image(systemName: "wand.and.stars")
+                                        Image(systemName: "sparkles")
+                                            .font(.system(size: 15, weight: .semibold))
+                                            .foregroundStyle(Color.trackerPrimaryDark)
                                     }
-                                    Text("AI Soạn")
                                 }
                             }
-                            .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
+                            .buttonStyle(.plain)
                             .disabled(isGeneratingAI)
 
-                            // Nút Gửi phản hồi
+                            // Nút Gửi tròn phong cách Messenger
                             Button {
                                 guard !isSending else { return }
                                 let text = directReplyText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3661,28 +3819,51 @@ struct PostDetailAndReplySheet: View {
                                     }
                                 }
                             } label: {
-                                HStack(spacing: 4) {
+                                ZStack {
+                                    Circle()
+                                        .fill(
+                                            directReplyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                                ? LinearGradient(colors: [Color.gray.opacity(0.3), Color.gray.opacity(0.4)], startPoint: .top, endPoint: .bottom)
+                                                : LinearGradient(colors: [Color.trackerPrimary, Color.trackerPrimaryDark], startPoint: .top, endPoint: .bottom)
+                                        )
+                                        .frame(width: 36, height: 36)
                                     if isSending {
                                         ProgressView().tint(.white).controlSize(.mini)
                                     } else {
                                         Image(systemName: "paperplane.fill")
+                                            .font(.system(size: 14, weight: .bold))
+                                            .foregroundStyle(.white)
                                     }
-                                    Text("Gửi")
                                 }
                             }
-                            .buttonStyle(GradientPillButtonStyle(colors: [.trackerPrimary, .trackerPrimaryDark], isCompact: true))
+                            .buttonStyle(.plain)
                             .disabled(isSending || directReplyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 6)
                     }
-                    .padding(12)
                     .background(Color(uiColor: .secondarySystemGroupedBackground))
                 }
             }
-            .navigationTitle("Thống kê & Trả lời bài viết")
+            .navigationTitle("Chi tiết & Trả lời")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Đóng") { dismiss() }
+                        .foregroundStyle(Color.trackerPrimaryDark)
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    if let currentPost = post {
+                        Button {
+                            Task {
+                                await tracker.syncSinglePost(id: currentPost.id, space: actingSpace)
+                            }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.subheadline.bold())
+                                .foregroundStyle(Color.trackerPrimaryDark)
+                        }
+                    }
                 }
             }
             .onAppear {
