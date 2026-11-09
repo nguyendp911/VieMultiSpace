@@ -2083,25 +2083,17 @@ enum PostTrackingAPIClient {
             avoidBlock = "\nKhông lặp lại câu chữ với các phản hồi vừa gửi:\n\(list)"
         }
 
-        let prompt: String
-        let targetUserName: String
-
-        if let cAuthor = commentAuthor, let cText = commentText, !cText.isEmpty {
-            targetUserName = cAuthor
-            prompt = """
-            \(stylePrompt)
-            Bạn là CHỦ BÀI VIẾT đang trả lời bình luận của "\(cAuthor)".
-            - Nội dung bài viết gốc của bạn: "\(contextCaption)"
-            - Bình luận của \(cAuthor): "\(cText)"
-            Hãy viết câu trả lời trực tiếp, thân thiện, đúng ngữ cảnh bình luận của \(cAuthor), ngắn gọn 1-2 câu tự nhiên.\(avoidBlock)
-            """
-        } else {
-            targetUserName = "Chủ bài viết"
-            prompt = """
-            \(stylePrompt)
-            Hãy viết 1 bình luận tương tác tự nhiên, lịch sự vào bài viết có nội dung: "\(contextCaption)".\(avoidBlock)
-            """
+        let profile = await MainActor.run { AITrainingStore.shared.profile }
+        var prompt = profile.buildEffectivePrompt(
+            postCaption: contextCaption,
+            commentAuthor: commentAuthor,
+            commentText: commentText,
+            previousReplies: previousReplies
+        )
+        if !stylePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            prompt += "\n\n### YÊU CẦU BỔ SUNG CỦA NGƯỜI DÙNG:\n\(stylePrompt)"
         }
+        let targetUserName = commentAuthor ?? "Khách hàng"
 
         let postItem = FeedPostItem(
             postId: "reply_target",
@@ -2450,13 +2442,13 @@ struct PostTrackerView: View {
                 .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
                 .disabled(tracker.isSyncingAll || tracker.posts.isEmpty)
 
-                // Nút Cấu hình Gemini AI
+                // Nút Huấn luyện & Quản lý AI
                 Button {
                     showAISettingsSheet = true
                 } label: {
                     HStack(spacing: 5) {
-                        Image(systemName: "wand.and.stars")
-                        Text(geminiApiKey.isEmpty ? "Cài đặt AI Key" : "Cấu hình AI Reply")
+                        Image(systemName: "brain.head.profile")
+                        Text(geminiApiKey.isEmpty ? "Cài đặt AI Key" : "Huấn luyện & Quản lý AI")
                     }
                     .frame(maxWidth: .infinity)
                 }
@@ -3887,54 +3879,9 @@ struct TrackerAISettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("Gemini API Key (Dùng chung toàn hệ thống)") {
-                    SecureField("Nhập Gemini API Key (AIza...)", text: $geminiApiKey)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                }
-
-                Section("Model AI & Phong cách trả lời") {
-                    Picker("Model Gemini", selection: $geminiModel) {
-                        ForEach(GeminiCommentService.availableModels, id: \.self) { m in
-                            Text(GeminiCommentService.modelLabel(m)).tag(m)
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Hướng dẫn văn phong khi AI trả lời:")
-                            .font(.caption.bold())
-                            .foregroundStyle(.secondary)
-                        TextField("Nhập phong cách trả lời...", text: $aiStylePrompt, axis: .vertical)
-                            .lineLimit(3...5)
-                    }
-                }
-
-                Section {
-                    Button {
-                        SecureGeminiStore.saveKey(geminiApiKey)
-                        dismiss()
-                    } label: {
-                        HStack {
-                            Spacer()
-                            Image(systemName: "checkmark.seal.fill")
-                            Text("Lưu cấu hình AI Reply")
-                            Spacer()
-                        }
-                    }
-                    .buttonStyle(GradientPillButtonStyle(colors: [.trackerPrimary, .trackerPrimaryDark], isCompact: false))
-                    .listRowBackground(Color.clear)
-                }
-            }
-            .navigationTitle("Cấu hình AI Trả lời")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Đóng") { dismiss() }
-                }
-            }
-        }
-        .presentationDetents([.medium, .large])
+        AITrainingAndManagementSheet(
+            geminiApiKey: $geminiApiKey,
+            geminiModel: $geminiModel
+        )
     }
 }
