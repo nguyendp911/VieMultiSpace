@@ -285,7 +285,25 @@ final class ScheduledPostManager: ObservableObject {
                 tasks[idx].status = .running
                 saveTasks()
 
-                let resultLog = await executeTask(task)
+                #if canImport(UIKit)
+                var bgTask: UIBackgroundTaskIdentifier = .invalid
+                bgTask = UIApplication.shared.beginBackgroundTask(withName: "ScheduledPost-\(task.id.uuidString)") {
+                    if bgTask != .invalid {
+                        UIApplication.shared.endBackgroundTask(bgTask)
+                        bgTask = .invalid
+                    }
+                }
+                #endif
+
+                let resultLog = await executeTask(task, taskIndex: idx)
+
+                #if canImport(UIKit)
+                if bgTask != .invalid {
+                    UIApplication.shared.endBackgroundTask(bgTask)
+                    bgTask = .invalid
+                }
+                #endif
+
                 if resultLog.successCount == resultLog.totalCount && resultLog.totalCount > 0 {
                     tasks[idx].status = .completed
                 } else if resultLog.successCount > 0 {
@@ -299,7 +317,7 @@ final class ScheduledPostManager: ObservableObject {
         }
     }
 
-    private func executeTask(_ task: ScheduledPostTask) async -> (successCount: Int, totalCount: Int, summary: String) {
+    private func executeTask(_ task: ScheduledPostTask, taskIndex: Int? = nil) async -> (successCount: Int, totalCount: Int, summary: String) {
         let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         var loadedImages: [UIImage] = []
         for name in task.imageFileNames {
@@ -310,9 +328,14 @@ final class ScheduledPostManager: ObservableObject {
         }
 
         var loadedVideoData: Data? = nil
+        var videoFileURL: URL? = nil
         if let vname = task.videoFileName {
             let fileURL = documentsDir.appendingPathComponent(vname)
-            loadedVideoData = try? Data(contentsOf: fileURL)
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                videoFileURL = fileURL
+            } else {
+                loadedVideoData = try? Data(contentsOf: fileURL)
+            }
         }
 
         var successCount = 0
@@ -348,8 +371,21 @@ final class ScheduledPostManager: ObservableObject {
             if destType == .personalProfile || destinations.isEmpty {
                 totalCount += 1
                 do {
-                    if let vdata = loadedVideoData {
-                        let vid = try await SmartPostAPIClient.uploadVideo(videoData: vdata, caption: task.caption, accessToken: token, userId: uid)
+                    if videoFileURL != nil || loadedVideoData != nil {
+                        logs.append("⏳ Bắt đầu tải video lên Trang cá nhân...")
+                        let vid = try await SmartPostAPIClient.uploadVideo(
+                            videoFileURL: videoFileURL,
+                            videoData: loadedVideoData,
+                            caption: task.caption,
+                            accessToken: token,
+                            userId: uid
+                        ) { pct, msg in
+                            Task { @MainActor in
+                                if let tIdx = taskIndex, tIdx < self.tasks.count {
+                                    self.tasks[tIdx].executionLog = msg
+                                }
+                            }
+                        }
                         successCount += 1
                         logs.append("✅ Đăng video cá nhân thành công ID: \(vid)")
                         TrackedPostManager.shared.registerPublishedPost(
@@ -399,8 +435,21 @@ final class ScheduledPostManager: ObservableObject {
                     let videoTarget = dest.id
                     let displayLabel = "\(accountDisplayName) → \(dest.name)"
                     do {
-                        if let vdata = loadedVideoData {
-                            let vid = try await SmartPostAPIClient.uploadVideo(videoData: vdata, caption: task.caption, accessToken: effectiveToken, userId: videoTarget)
+                        if videoFileURL != nil || loadedVideoData != nil {
+                            logs.append("⏳ Bắt đầu tải video lên [\(dest.name)]...")
+                            let vid = try await SmartPostAPIClient.uploadVideo(
+                                videoFileURL: videoFileURL,
+                                videoData: loadedVideoData,
+                                caption: task.caption,
+                                accessToken: effectiveToken,
+                                userId: videoTarget
+                            ) { pct, msg in
+                                Task { @MainActor in
+                                    if let tIdx = taskIndex, tIdx < self.tasks.count {
+                                        self.tasks[tIdx].executionLog = "[\(dest.name)] \(msg)"
+                                    }
+                                }
+                            }
                             successCount += 1
                             logs.append("✅ [\(dest.name)] Đăng video thành công ID: \(vid)")
                             TrackedPostManager.shared.registerPublishedPost(
@@ -428,6 +477,26 @@ final class ScheduledPostManager: ObservableObject {
                                 privacy: task.privacy,
                                 destinationType: destType,
                                 targetDestinationId: dest.id,
+                                pageAccessToken: dest.pageAccessToken,
+                                accessToken: token,
+                                userId: uid
+                            )
+                            successCount += 1
+                            logs.append("✅ [\(dest.name)] Đăng bài thành công ID: \(res.postId)")
+                            TrackedPostManager.shared.registerPublishedPost(
+                                spaceId: sid,
+                                spaceName: displayLabel,
+                                postId: res.postId,
+                                postUrl: res.postUrl,
+                                caption: task.caption,
+                                enableAIAutoReply: true
+                            )
+
+                            // Thả cảm xúc & bình luận đầu tiên
+                            await triggerPostReactionAndComment(postId: res.postId, task: task, token: effectiveToken, logs: &logs)
+                        }
+                    } catch {
+                        let cleanErr = SmartPostAPIClient.formatFacebookAPIError(error.localizedDescription)
                                 pageAccessToken: dest.pageAccessToken,
                                 accessToken: token,
                                 userId: uid
@@ -1419,51 +1488,301 @@ enum SmartPostAPIClient {
         }
     }
 
-    /// Đăng Video lên Facebook qua Graph API /\(userId)/videos (hỗ trợ Trang cá nhân, Group ID, hoặc Page ID)
+    // Session chuyên dụng cho Upload Video thời lượng dài, chống Timeout
+    private static let videoUploadSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 600    // 10 phút cho mỗi chunk / request
+        config.timeoutIntervalForResource = 3600  // 60 phút cho toàn bộ phiên truyền tải video
+        config.waitsForConnectivity = true
+        config.allowsCellularAccess = true
+        return URLSession(configuration: config)
+    }()
 
+    /// Đăng Video lên Facebook hỗ trợ video dài / dung lượng lớn không giới hạn
+    /// 1. Tự động chia nhỏ video thành các chunk 4MB (Resumable Chunked Upload) chống Timeout
+    /// 2. Hỗ trợ stream từ file không tốn bộ nhớ RAM (tránh crash khi video hàng trăm MB)
+    /// 3. Cơ chế tự động thử lại (Retry) khi mạng chập chờn
+    /// 4. Fallback qua Direct Streaming Upload với thời gian chờ 15 phút nếu Graph API yêu cầu
     static func uploadVideo(
-        videoData: Data,
+        videoFileURL: URL? = nil,
+        videoData: Data? = nil,
         caption: String,
         accessToken: String,
-        userId: String
+        userId: String,
+        onProgress: ((Double, String) -> Void)? = nil
+    ) async throws -> String {
+        let sourceURL: URL
+        let isTempFile: Bool
+
+        if let vurl = videoFileURL, FileManager.default.fileExists(atPath: vurl.path) {
+            sourceURL = vurl
+            isTempFile = false
+        } else if let vdata = videoData {
+            let tempDir = FileManager.default.temporaryDirectory
+            let tempURL = tempDir.appendingPathComponent("sp_vid_upload_\(UUID().uuidString).mp4")
+            try vdata.write(to: tempURL)
+            sourceURL = tempURL
+            isTempFile = true
+        } else {
+            throw NSError(domain: "SmartPost", code: -1, userInfo: [NSLocalizedDescriptionKey: "Không tìm thấy file video để đăng."])
+        }
+
+        defer {
+            if isTempFile {
+                try? FileManager.default.removeItem(at: sourceURL)
+            }
+        }
+
+        let fileSize = (try? sourceURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard fileSize > 0 else {
+            throw NSError(domain: "SmartPost", code: -1, userInfo: [NSLocalizedDescriptionKey: "Dữ liệu video rỗng (0 bytes)."])
+        }
+
+        let totalMB = Double(fileSize) / (1024.0 * 1024.0)
+        onProgress?(0.01, String(format: "Chuẩn bị tải video (%.1f MB)...", totalMB))
+
+        // Chiến lược 1: Thử Resumable Chunked Upload theo chuẩn Facebook Graph Video
+        do {
+            let vid = try await uploadVideoResumable(
+                fileURL: sourceURL,
+                fileSize: fileSize,
+                caption: caption,
+                accessToken: accessToken,
+                userId: userId,
+                onProgress: onProgress
+            )
+            return vid
+        } catch {
+            print("[SmartPost] Resumable video upload error: \(error.localizedDescription). Falling back to direct streaming upload...")
+            onProgress?(0.05, "Đang chuyển sang chế độ tải trực tiếp mở rộng thời gian chờ...")
+        }
+
+        // Chiến lược 2: Fallback qua Direct Streaming Multipart với timeout 15 phút
+        return try await uploadVideoDirectStreaming(
+            fileURL: sourceURL,
+            fileSize: fileSize,
+            caption: caption,
+            accessToken: accessToken,
+            userId: userId,
+            onProgress: onProgress
+        )
+    }
+
+    private static func uploadVideoResumable(
+        fileURL: URL,
+        fileSize: Int,
+        caption: String,
+        accessToken: String,
+        userId: String,
+        onProgress: ((Double, String) -> Void)?
+    ) async throws -> String {
+        let totalMB = Double(fileSize) / (1024.0 * 1024.0)
+
+        // ── GIAI ĐOẠN 1: upload_phase = start ──
+        let startURL = URL(string: "https://graph-video.facebook.com/v19.0/\(userId)/videos")!
+        var startReq = URLRequest(url: startURL)
+        startReq.httpMethod = "POST"
+        startReq.timeoutInterval = 60
+        startReq.setValue("OAuth \(accessToken)", forHTTPHeaderField: "authorization")
+        startReq.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "content-type")
+
+        let startBodyString = "upload_phase=start&file_size=\(fileSize)"
+        startReq.httpBody = startBodyString.data(using: .utf8)
+
+        let (startData, startResp) = try await videoUploadSession.data(for: startReq)
+        let startCode = (startResp as? HTTPURLResponse)?.statusCode ?? 0
+        guard let startJson = (try? JSONSerialization.jsonObject(with: startData)) as? [String: Any],
+              let uploadSessionId = startJson["upload_session_id"] as? String,
+              let videoId = (startJson["video_id"] as? String) ?? (startJson["id"] as? String) else {
+            let errText = String(data: startData, encoding: .utf8) ?? "HTTP \(startCode)"
+            throw NSError(domain: "SmartPost", code: startCode, userInfo: [NSLocalizedDescriptionKey: "Giai đoạn khởi tạo video thất bại: \(errText.prefix(120))"])
+        }
+
+        var startOffset = Int64(startJson["start_offset"] as? String ?? "") ?? 0
+        let chunkSize: Int64 = 4 * 1024 * 1024 // 4 MB mỗi phân đoạn
+
+        let fileHandle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? fileHandle.close() }
+
+        // ── GIAI ĐOẠN 2: upload_phase = transfer theo từng phân đoạn (Chunk) ──
+        while startOffset < Int64(fileSize) {
+            let endOffset = min(startOffset + chunkSize, Int64(fileSize))
+            let currentChunkLength = Int(endOffset - startOffset)
+
+            try fileHandle.seek(toOffset: UInt64(startOffset))
+            let chunkData = fileHandle.readData(ofLength: currentChunkLength)
+            guard !chunkData.isEmpty else { break }
+
+            let pct = Double(startOffset) / Double(fileSize)
+            let uploadedMB = Double(startOffset) / (1024.0 * 1024.0)
+            onProgress?(pct, String(format: "Đang tải video: %.0f%% (%.1f/%.1f MB)...", pct * 100, uploadedMB, totalMB))
+
+            // Upload chunk này với cơ chế tự động thử lại 3 lần nếu mạng lag
+            var chunkSuccess = false
+            var nextStartOffset: Int64 = endOffset
+            var lastChunkError: Error?
+
+            for retry in 1...3 {
+                do {
+                    let boundary = "Boundary-\(UUID().uuidString)"
+                    var transferReq = URLRequest(url: startURL)
+                    transferReq.httpMethod = "POST"
+                    transferReq.timeoutInterval = 600 // 10 phút cho mỗi chunk 4MB
+                    transferReq.setValue("OAuth \(accessToken)", forHTTPHeaderField: "authorization")
+                    transferReq.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "content-type")
+
+                    var body = Data()
+                    body.append("--\(boundary)\r\n".data(using: .utf8)!)
+                    body.append("Content-Disposition: form-data; name=\"upload_phase\"\r\n\r\n".data(using: .utf8)!)
+                    body.append("transfer\r\n".data(using: .utf8)!)
+
+                    body.append("--\(boundary)\r\n".data(using: .utf8)!)
+                    body.append("Content-Disposition: form-data; name=\"upload_session_id\"\r\n\r\n".data(using: .utf8)!)
+                    body.append("\(uploadSessionId)\r\n".data(using: .utf8)!)
+
+                    body.append("--\(boundary)\r\n".data(using: .utf8)!)
+                    body.append("Content-Disposition: form-data; name=\"start_offset\"\r\n\r\n".data(using: .utf8)!)
+                    body.append("\(startOffset)\r\n".data(using: .utf8)!)
+
+                    body.append("--\(boundary)\r\n".data(using: .utf8)!)
+                    body.append("Content-Disposition: form-data; name=\"video_file_chunk\"; filename=\"chunk.bin\"\r\n".data(using: .utf8)!)
+                    body.append("Content-Type: application/octet-stream\r\n\r\n".data(using: .utf8)!)
+                    body.append(chunkData)
+                    body.append("\r\n".data(using: .utf8)!)
+                    body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+
+                    transferReq.httpBody = body
+
+                    let (transData, transResp) = try await videoUploadSession.data(for: transferReq)
+                    let transCode = (transResp as? HTTPURLResponse)?.statusCode ?? 0
+                    if let transJson = (try? JSONSerialization.jsonObject(with: transData)) as? [String: Any] {
+                        if let nStartStr = transJson["start_offset"] as? String, let nStart = Int64(nStartStr) {
+                            nextStartOffset = nStart
+                        }
+                        chunkSuccess = true
+                        break
+                    } else {
+                        let errText = String(data: transData, encoding: .utf8) ?? "HTTP \(transCode)"
+                        throw NSError(domain: "SmartPost", code: transCode, userInfo: [NSLocalizedDescriptionKey: "Lỗi chunk: \(errText.prefix(80))"])
+                    }
+                } catch {
+                    lastChunkError = error
+                    if retry < 3 {
+                        try? await Task.sleep(nanoseconds: UInt64(retry * 2_000_000_000))
+                    }
+                }
+            }
+
+            guard chunkSuccess else {
+                throw lastChunkError ?? NSError(domain: "SmartPost", code: -1, userInfo: [NSLocalizedDescriptionKey: "Truyền tải đoạn video thất bại sau 3 lần thử."])
+            }
+
+            startOffset = nextStartOffset
+        }
+
+        onProgress?(0.98, "Đang hoàn tất và xuất bản video...")
+
+        // ── GIAI ĐOẠN 3: upload_phase = finish ──
+        var finishReq = URLRequest(url: startURL)
+        finishReq.httpMethod = "POST"
+        finishReq.timeoutInterval = 120
+        finishReq.setValue("OAuth \(accessToken)", forHTTPHeaderField: "authorization")
+        finishReq.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "content-type")
+
+        let finishParams: [String: String] = [
+            "upload_phase": "finish",
+            "upload_session_id": uploadSessionId,
+            "description": caption,
+            "title": String(caption.prefix(50)),
+            "published": "true"
+        ]
+        let finishBodyString = finishParams.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? $0.value)" }.joined(separator: "&")
+        finishReq.httpBody = finishBodyString.data(using: .utf8)
+
+        let (finishData, finishResp) = try await videoUploadSession.data(for: finishReq)
+        let finishCode = (finishResp as? HTTPURLResponse)?.statusCode ?? 0
+        if let finishJson = (try? JSONSerialization.jsonObject(with: finishData)) as? [String: Any] {
+            if finishJson["success"] as? Bool == true || finishJson["id"] != nil || finishCode == 200 {
+                onProgress?(1.0, "Đăng video thành công!")
+                return videoId
+            }
+        }
+
+        if finishCode == 200 {
+            onProgress?(1.0, "Đăng video thành công!")
+            return videoId
+        }
+
+        let errText = String(data: finishData, encoding: .utf8) ?? "HTTP \(finishCode)"
+        throw NSError(domain: "SmartPost", code: finishCode, userInfo: [NSLocalizedDescriptionKey: "Hoàn tất đăng video thất bại: \(errText.prefix(120))"])
+    }
+
+    private static func uploadVideoDirectStreaming(
+        fileURL: URL,
+        fileSize: Int,
+        caption: String,
+        accessToken: String,
+        userId: String,
+        onProgress: ((Double, String) -> Void)?
     ) async throws -> String {
         let url = URL(string: "https://graph-video.facebook.com/v19.0/\(userId)/videos")!
         let boundary = "Boundary-\(UUID().uuidString)"
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.timeoutInterval = 900 // 15 phút cho video thời lượng dài
         for (k, v) in fbHeaders {
             request.setValue(v, forHTTPHeaderField: k)
         }
         request.setValue("OAuth \(accessToken)", forHTTPHeaderField: "authorization")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "content-type")
 
-        var body = Data()
+        // Ghi multipart body ra file tạm để stream upload, không tải toàn bộ dung lượng lớn vào RAM
+        let tempDir = FileManager.default.temporaryDirectory
+        let multipartTempURL = tempDir.appendingPathComponent("mp_upload_\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: multipartTempURL) }
+
+        FileManager.default.createFile(atPath: multipartTempURL.path, contents: nil)
+        let writeHandle = try FileHandle(forWritingTo: multipartTempURL)
+        defer { try? writeHandle.close() }
+
+        var headerData = Data()
         let fields: [String: String] = [
             "description": caption,
-            "title": String(caption.prefix(30)),
+            "title": String(caption.prefix(40)),
             "published": "true"
         ]
-
         for (k, v) in fields {
-            body.append("--\(boundary)\r\n".data(using: .utf8)!)
-            body.append("Content-Disposition: form-data; name=\"\(k)\"\r\n\r\n".data(using: .utf8)!)
-            body.append("\(v)\r\n".data(using: .utf8)!)
+            headerData.append("--\(boundary)\r\n".data(using: .utf8)!)
+            headerData.append("Content-Disposition: form-data; name=\"\(k)\"\r\n\r\n".data(using: .utf8)!)
+            headerData.append("\(v)\r\n".data(using: .utf8)!)
+        }
+        headerData.append("--\(boundary)\r\n".data(using: .utf8)!)
+        headerData.append("Content-Disposition: form-data; name=\"source\"; filename=\"video.mp4\"\r\n".data(using: .utf8)!)
+        headerData.append("Content-Type: video/mp4\r\n\r\n".data(using: .utf8)!)
+        writeHandle.write(headerData)
+
+        // Stream nội dung video từ fileURL sang multipartTempURL theo từng block 1MB
+        let readHandle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? readHandle.close() }
+        while true {
+            let block = readHandle.readData(ofLength: 1024 * 1024)
+            if block.isEmpty { break }
+            writeHandle.write(block)
         }
 
-        body.append("--\(boundary)\r\n".data(using: .utf8)!)
-        body.append("Content-Disposition: form-data; name=\"source\"; filename=\"video.mp4\"\r\n".data(using: .utf8)!)
-        body.append("Content-Type: video/mp4\r\n\r\n".data(using: .utf8)!)
-        body.append(videoData)
-        body.append("\r\n".data(using: .utf8)!)
-        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+        var footerData = Data()
+        footerData.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        writeHandle.write(footerData)
+        try writeHandle.synchronize()
 
-        request.httpBody = body
+        onProgress?(0.2, "Đang truyền tải video lên máy chủ Facebook...")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await videoUploadSession.upload(for: request, fromFile: multipartTempURL)
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let videoId = json["id"] as? String {
+           let videoId = (json["id"] as? String) ?? (json["video_id"] as? String) {
+            onProgress?(1.0, "Đăng video thành công!")
             return videoId
         } else {
             let errText = String(data: data, encoding: .utf8) ?? "HTTP \(statusCode)"
@@ -3240,6 +3559,22 @@ struct SmartPostView: View {
         results.removeAll()
         defer { isPublishing = false }
 
+        #if canImport(UIKit)
+        var bgTaskId: UIBackgroundTaskIdentifier = .invalid
+        bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "SmartPostPublishNow") {
+            if bgTaskId != .invalid {
+                UIApplication.shared.endBackgroundTask(bgTaskId)
+                bgTaskId = .invalid
+            }
+        }
+        defer {
+            if bgTaskId != .invalid {
+                UIApplication.shared.endBackgroundTask(bgTaskId)
+                bgTaskId = .invalid
+            }
+        }
+        #endif
+
         // Nếu người dùng đang gõ dở link/ID Nhóm hoặc Fanpage mà quên bấm "Thêm", tự động chuyển đổi & thêm luôn
         if destinationType != .personalProfile && activeSelectedDestinations.isEmpty && !manualDestinationInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             await resolveAndAddManualDestination(kind: destinationType)
@@ -3306,13 +3641,18 @@ struct SmartPostView: View {
             if destinationType == .personalProfile {
                 if let vdata = selectedVideoData {
                     do {
-                        progressMessage = "\(space.name): Đang đăng Video MP4 lên Trang cá nhân..."
+                        progressMessage = "\(space.name): Đang chuẩn bị tải Video..."
                         let videoId = try await SmartPostAPIClient.uploadVideo(
+                            videoFileURL: nil,
                             videoData: vdata,
                             caption: postCaption,
                             accessToken: token,
                             userId: uid
-                        )
+                        ) { pct, msg in
+                            Task { @MainActor in
+                                progressMessage = "\(space.name): \(msg)"
+                            }
+                        }
                         let videoUrl = "https://www.facebook.com/watch/?v=\(videoId)"
                         tracker.registerPublishedPost(
                             spaceId: space.id,
@@ -3408,13 +3748,18 @@ struct SmartPostView: View {
 
                     if let vdata = selectedVideoData {
                         do {
-                            progressMessage = "\(label): Đang đăng Video MP4..."
+                            progressMessage = "\(label): Đang chuẩn bị tải Video..."
                             let videoId = try await SmartPostAPIClient.uploadVideo(
+                                videoFileURL: nil,
                                 videoData: vdata,
                                 caption: postCaption,
                                 accessToken: effectiveUploadToken,
                                 userId: dest.id
-                            )
+                            ) { pct, msg in
+                                Task { @MainActor in
+                                    progressMessage = "\(label): \(msg)"
+                                }
+                            }
                             let videoUrl = "https://www.facebook.com/watch/?v=\(videoId)"
                             tracker.registerPublishedPost(
                                 spaceId: space.id,
