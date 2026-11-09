@@ -497,26 +497,6 @@ final class ScheduledPostManager: ObservableObject {
                         }
                     } catch {
                         let cleanErr = SmartPostAPIClient.formatFacebookAPIError(error.localizedDescription)
-                                pageAccessToken: dest.pageAccessToken,
-                                accessToken: token,
-                                userId: uid
-                            )
-                            successCount += 1
-                            logs.append("✅ [\(dest.name)] Đăng bài thành công ID: \(res.postId)")
-                            TrackedPostManager.shared.registerPublishedPost(
-                                spaceId: sid,
-                                spaceName: displayLabel,
-                                postId: res.postId,
-                                postUrl: res.postUrl,
-                                caption: task.caption,
-                                enableAIAutoReply: true
-                            )
-
-                            // Thả cảm xúc & bình luận đầu tiên
-                            await triggerPostReactionAndComment(postId: res.postId, task: task, token: effectiveToken, logs: &logs)
-                        }
-                    } catch {
-                        let cleanErr = SmartPostAPIClient.formatFacebookAPIError(error.localizedDescription)
                         logs.append("❌ [\(dest.name)] Lỗi: \(cleanErr)")
                     }
                 }
