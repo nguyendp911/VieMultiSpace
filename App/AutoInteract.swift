@@ -971,6 +971,18 @@ enum FacebookTargetPostResolver {
                         }
                     }
 
+                    // 3b. Video chia sẻ từ Nhóm: nếu HTML chứa URL bài viết trong Nhóm thì dùng đúng dạng
+                    // https://www.facebook.com/groups/<groupId>/posts/<postId> (không rơi về /reel/<videoId>)
+                    if extractedId == nil, !html.isEmpty,
+                       let regex = try? NSRegularExpression(
+                        pattern: #"/groups/([A-Za-z0-9._-]+)/(?:posts|permalink)/(\d{5,25})"#),
+                       let m = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+                       let gr = Range(m.range(at: 1), in: html),
+                       let pr = Range(m.range(at: 2), in: html) {
+                        extractedId = String(html[pr])
+                        resolvedFinalURL = "https://www.facebook.com/groups/\(html[gr])/posts/\(html[pr])"
+                    }
+
                     // 4. Nếu chưa có ID, tìm các idPatterns trong HTML
                     if extractedId == nil, !html.isEmpty {
                         let idPatterns = [
