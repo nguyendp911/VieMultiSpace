@@ -890,28 +890,39 @@ enum FacebookTargetPostResolver {
             }
         }
 
-        // Follow redirects để lấy final URL (kèm Cookie nếu có để giải mã share/p, share/r, pfbid...)
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 15
-        if !cookieString.isEmpty {
-            let cookieStorage = HTTPCookieStorage()
-            for c in FacebookGraphQLAutoClient.parseCookies(from: cookieString) {
-                cookieStorage.setCookie(c)
+        // Follow redirects để lấy final URL.
+        // Với link share, thử TRƯỚC khi không có Cookie: trang công khai trả og:url chuẩn
+        // (vd. /groups/<id>/posts/<id>), còn trang đã đăng nhập thường chỉ có JSON video_id
+        // và làm mất thông tin Nhóm. Sau đó mới thử lại kèm Cookie.
+        func makeSession(withCookie: Bool) -> URLSession {
+            let config = URLSessionConfiguration.default
+            config.timeoutIntervalForRequest = 15
+            if withCookie && !cookieString.isEmpty {
+                let cookieStorage = HTTPCookieStorage()
+                for c in FacebookGraphQLAutoClient.parseCookies(from: cookieString) {
+                    cookieStorage.setCookie(c)
+                }
+                config.httpCookieStorage = cookieStorage
+                config.httpCookieAcceptPolicy = .always
+                config.httpShouldSetCookies = true
+            } else {
+                config.httpCookieStorage = nil
+                config.httpShouldSetCookies = false
             }
-            config.httpCookieStorage = cookieStorage
-            config.httpCookieAcceptPolicy = .always
-            config.httpShouldSetCookies = true
+            if let proxy, proxy.isEnabled {
+                config.proxyConfigurations = [proxy.toNetworkProxyConfiguration()]
+            }
+            return URLSession(configuration: config)
         }
-        if let proxy, proxy.isEnabled {
-            config.proxyConfigurations = [proxy.toNetworkProxyConfiguration()]
-        }
-        let session = URLSession(configuration: config)
+        let cookieModes: [Bool] = (isShareLink && !cookieString.isEmpty) ? [false, true] : [true]
 
         let uas = [
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
         ]
 
+        for useCookie in cookieModes {
+        let session = makeSession(withCookie: useCookie)
         for candURL in candidateURLs {
             for ua in uas {
                 var request = URLRequest(url: candURL)
@@ -919,7 +930,7 @@ enum FacebookTargetPostResolver {
                 request.setValue(ua, forHTTPHeaderField: "User-Agent")
                 request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
                 request.setValue("vi,en-US;q=0.8,en;q=0.6", forHTTPHeaderField: "Accept-Language")
-                if !cookieString.isEmpty {
+                if useCookie && !cookieString.isEmpty {
                     request.setValue(cookieString, forHTTPHeaderField: "Cookie")
                 }
 
@@ -1038,6 +1049,7 @@ enum FacebookTargetPostResolver {
                 }
             }
         }
+        } // useCookie
         return nil
     }
 
