@@ -557,7 +557,7 @@ struct ResolvedTargetPost {
 enum FacebookTargetPostResolver {
     static func detectKind(from input: String) -> String {
         let lower = input.lowercased()
-        if lower.contains("/reel/") || lower.contains("/reels/") || lower.contains("/share/r/") || lower.contains("fb.watch") || lower.contains("/watch") {
+        if lower.contains("/reel/") || lower.contains("/reels/") || lower.contains("/share/r/") || lower.contains("/share/v/") || lower.contains("fb.watch") || lower.contains("/watch") {
             return "Reel / Video"
         }
         if lower.contains("/groups/") {
@@ -881,6 +881,13 @@ enum FacebookTargetPostResolver {
             if let mbURL = URL(string: mbasicStr), mbURL != url {
                 candidateURLs.append(mbURL)
             }
+            // Link share/v, share/r đôi khi chỉ redirect đúng trên m.facebook.com
+            let mStr = urlStr
+                .replacingOccurrences(of: "https://www.facebook.com", with: "https://m.facebook.com")
+                .replacingOccurrences(of: "https://web.facebook.com", with: "https://m.facebook.com")
+            if let mURL = URL(string: mStr), !candidateURLs.contains(mURL) {
+                candidateURLs.append(mURL)
+            }
         }
 
         // Follow redirects để lấy final URL (kèm Cookie nếu có để giải mã share/p, share/r, pfbid...)
@@ -931,7 +938,9 @@ enum FacebookTargetPostResolver {
                     var extractedId = extractNumericIdFromURL(decodedFinalURL)
                     var resolvedFinalURL = finalURLStr
 
-                    let html = String(data: data, encoding: .utf8) ?? ""
+                    var html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
+                    // JSON trong HTML thường escape dấu gạch chéo (\/) nên cần gỡ để regex khớp được
+                    html = html.replacingOccurrences(of: "\\/", with: "/")
 
                     // 2. Thử bóc tách meta og:url hoặc link canonical
                     let ogPatterns = [
@@ -976,6 +985,10 @@ enum FacebookTargetPostResolver {
                             #"/reel/(\d{8,25})"#,
                             #"/posts/(\d{8,25})"#,
                             #"/videos/(\d{8,25})"#,
+                            #""videoId"\s*:\s*"?(\d{8,25})"?"#,
+                            #""video":\{"id":"(\d{8,25})""#,
+                            #"content="fb://(?:video|reel)/(\d{8,25})""#,
+                            #"/watch/?\?v=(\d{8,25})"#,
                             #"content="fb://post/(\d{8,25})""#,
                             #"content="fb://photo/(\d{8,25})""#
                         ]
@@ -1019,7 +1032,7 @@ enum FacebookTargetPostResolver {
     static func buildCanonicalURL(id: String, kind: String, originalURL: String) -> String {
         let decoded = originalURL.removingPercentEncoding ?? originalURL
         let lower = decoded.lowercased()
-        if lower.contains("/reel/") || lower.contains("/reels/") || lower.contains("/share/r/") || lower.contains("fb.watch") || lower.contains("/watch") {
+        if lower.contains("/reel/") || lower.contains("/reels/") || lower.contains("/share/r/") || lower.contains("/share/v/") || lower.contains("fb.watch") || lower.contains("/watch") {
             return "https://www.facebook.com/reel/\(id)"
         }
         if lower.contains("/groups/") {
