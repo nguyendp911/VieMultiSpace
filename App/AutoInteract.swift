@@ -1087,18 +1087,62 @@ enum FacebookTargetPostResolver {
         let wrapped = "\"\(raw)\""
         if let data = wrapped.data(using: .utf8),
            let decoded = try? JSONDecoder().decode(String.self, from: data) {
-            return decoded
+            // og:title / og:description có thể chứa entity số (&#xe0;) dù không có escape JSON
+            return decoded.htmlEntityDecoded
         }
         return decodeHTMLEntities(raw)
     }
 
-    private static func decodeHTMLEntities(_ raw: String) -> String {
-        raw.replacingOccurrences(of: "&quot;", with: "\"")
-           .replacingOccurrences(of: "&#039;", with: "'")
-           .replacingOccurrences(of: "&apos;", with: "'")
-           .replacingOccurrences(of: "&amp;", with: "&")
-           .replacingOccurrences(of: "&lt;", with: "<")
-           .replacingOccurrences(of: "&gt;", with: ">")
+    static func decodeHTMLEntities(_ raw: String) -> String {
+        raw.htmlEntityDecoded
+    }
+}
+
+extension String {
+    /// Giải mã HTML entity dạng tên (`&amp;`, `&quot;`...), thập phân (`&#224;`)
+    /// và thập lục phân (`&#xe0;`). Facebook trả og:description / og:title với
+    /// entity số hex nên tiếng Việt bị hiển thị thành `V&#xe0;i b&#x1b0;&#x1edb;c`.
+    /// Chạy một lượt duy nhất nên không bị giải mã kép (`&amp;lt;` -> `&lt;`).
+    var htmlEntityDecoded: String {
+        guard contains("&") else { return self }
+        let named: [String: String] = [
+            "amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'",
+            "nbsp": "\u{00A0}", "hellip": "…", "ndash": "–", "mdash": "—",
+            "lsquo": "‘", "rsquo": "’", "ldquo": "“", "rdquo": "”"
+        ]
+        var result = ""
+        result.reserveCapacity(utf8.count)
+        var i = startIndex
+        while i < endIndex {
+            let ch = self[i]
+            if ch == "&",
+               let semi = self[i...].prefix(12).firstIndex(of: ";") {
+                let body = String(self[index(after: i)..<semi])
+                var decoded: String?
+                if body.hasPrefix("#") {
+                    let digits = body.dropFirst()
+                    let value: UInt32?
+                    if let first = digits.first, first == "x" || first == "X" {
+                        value = UInt32(digits.dropFirst(), radix: 16)
+                    } else {
+                        value = UInt32(digits, radix: 10)
+                    }
+                    if let v = value, let scalar = Unicode.Scalar(v) {
+                        decoded = String(Character(scalar))
+                    }
+                } else {
+                    decoded = named[body.lowercased()]
+                }
+                if let decoded = decoded {
+                    result += decoded
+                    i = index(after: semi)
+                    continue
+                }
+            }
+            result.append(ch)
+            i = index(after: i)
+        }
+        return result
     }
 }
 

@@ -88,7 +88,25 @@ final class TrackedPostManager: ObservableObject {
               let decoded = try? JSONDecoder().decode([TrackedPostItem].self, from: data) else {
             return
         }
-        self.posts = decoded
+        // Sửa dữ liệu cũ đã lưu bị lỗi entity HTML (V&#xe0;i b&#x1b0;&#x1edb;c ...)
+        var changed = false
+        self.posts = decoded.map { item in
+            var p = item
+            let cap = p.caption.htmlEntityDecoded
+            if cap != p.caption { p.caption = cap; changed = true }
+            let author = p.authorName.htmlEntityDecoded
+            if author != p.authorName { p.authorName = author; changed = true }
+            p.comments = p.comments.map { c in
+                var c = c
+                let msg = c.message.htmlEntityDecoded
+                if msg != c.message { c.message = msg; changed = true }
+                let name = c.authorName.htmlEntityDecoded
+                if name != c.authorName { c.authorName = name; changed = true }
+                return c
+            }
+            return p
+        }
+        if changed { savePosts() }
     }
 
     func savePosts() {
