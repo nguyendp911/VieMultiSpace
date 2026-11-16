@@ -22,7 +22,8 @@ final class ReactionExchangeManager: ObservableObject {
     static let shared = ReactionExchangeManager()
 
     @Published var waiting: [WaitingExchange] = []
-    @Published var mine: [MyExchange] = []
+    @Published var requests: [MyRequest] = []
+    @Published var pairs: [MyPair] = []
     @Published var isLoading = false
     @Published var banner: String?
     @Published var runningTaskIds: Set<UUID> = []
@@ -39,10 +40,12 @@ final class ReactionExchangeManager: ObservableObject {
         defer { isLoading = false }
         do {
             // Gọi tuần tự để chỉ tạo đúng một phiên ẩn danh ở lần đầu
-            let myList = try await ExchangeBackend.shared.myExchanges()
-            let waitingList = try await ExchangeBackend.shared.listWaiting()
-            mine = myList
-            waiting = waitingList
+            let pairList = try await ExchangeBackend.shared.myPairs()
+            let requestList = try await ExchangeBackend.shared.myRequests()
+            let openList = try await ExchangeBackend.shared.listOpen()
+            pairs = pairList
+            requests = requestList
+            waiting = openList
         } catch {
             banner = "⚠️ \(error.localizedDescription)"
             return
@@ -77,7 +80,7 @@ final class ReactionExchangeManager: ObservableObject {
                 postURL: c.url, postId: c.id, reaction: reaction.rawValue, displayName: ExchangeConfig.displayName
             )
             ExchangeConfig.defaultSpaceId = space.id
-            banner = "✅ Đã gửi yêu cầu. Đang chờ người khác nhận."
+            banner = "✅ Đã đăng yêu cầu. Ai nhận yêu cầu, hai bên sẽ thả reaction cho nhau."
             return true
         } catch {
             banner = "❌ \(error.localizedDescription)"
@@ -93,7 +96,7 @@ final class ReactionExchangeManager: ObservableObject {
                 reaction: reaction.rawValue, displayName: ExchangeConfig.displayName
             )
             ExchangeConfig.defaultSpaceId = space.id
-            banner = "✅ Đã ghép cặp! Hệ thống sẽ thả reaction cho nhau."
+            banner = "✅ Đã nhận yêu cầu! Hệ thống sẽ thả reaction cho nhau."
             return true
         } catch {
             banner = "❌ \(error.localizedDescription)"
@@ -101,10 +104,10 @@ final class ReactionExchangeManager: ObservableObject {
         }
     }
 
-    func cancel(_ item: MyExchange) async {
+    func cancel(_ item: MyRequest) async {
         do {
             try await ExchangeBackend.shared.cancel(requestId: item.id)
-            banner = "Đã hủy yêu cầu."
+            banner = "Đã đóng yêu cầu (các lượt đã nhận vẫn tiếp tục)."
         } catch {
             banner = "❌ \(error.localizedDescription)"
         }
@@ -138,9 +141,7 @@ final class ReactionExchangeManager: ObservableObject {
         isRunningTasks = true
         defer { isRunningTasks = false }
 
-        let pending = mine.filter {
-            $0.status == "matched" && $0.taskStatus == "pending" && $0.partnerPostId != nil
-        }
+        let pending = pairs.filter { $0.status == "matched" && $0.myTaskStatus == "pending" }
         guard !pending.isEmpty else { return }
 
         guard let space = actingSpace(from: spaces) else {
@@ -151,15 +152,16 @@ final class ReactionExchangeManager: ObservableObject {
         for item in pending {
             await execute(item, space: space)
         }
-        if let updated = try? await ExchangeBackend.shared.myExchanges() { mine = updated }
+        if let updated = try? await ExchangeBackend.shared.myPairs() { pairs = updated }
     }
 
-    private func execute(_ item: MyExchange, space: Space) async {
-        guard let postId = item.partnerPostId, Self.isSafePostId(postId) else {
-            try? await ExchangeBackend.shared.reportTask(requestId: item.id, success: false, message: "ID bài viết đối tác không hợp lệ")
+    private func execute(_ item: MyPair, space: Space) async {
+        let postId = item.partnerPostId
+        guard Self.isSafePostId(postId) else {
+            try? await ExchangeBackend.shared.reportTask(pairId: item.id, success: false, message: "ID bài viết đối tác không hợp lệ")
             return
         }
-        let reaction = FacebookReactionType(rawValue: item.partnerReaction ?? "") ?? .like
+        let reaction = FacebookReactionType(rawValue: item.partnerReaction) ?? .like
 
         runningTaskIds.insert(item.id)
         defer { runningTaskIds.remove(item.id) }
@@ -185,8 +187,8 @@ final class ReactionExchangeManager: ObservableObject {
         if result.success {
             setAttempts(0, for: item.id)
             do {
-                try await ExchangeBackend.shared.reportTask(requestId: item.id, success: true, message: "Đã thả \(reaction.rawValue)")
-                banner = "✅ Đã thả \(exchangeEmoji(reaction.rawValue)) lên bài của \(item.partnerDisplayName ?? "đối tác")."
+                try await ExchangeBackend.shared.reportTask(pairId: item.id, success: true, message: "Đã thả \(reaction.rawValue)")
+                banner = "✅ Đã thả \(exchangeEmoji(reaction.rawValue)) lên bài của \(item.partnerDisplayName)."
             } catch {
                 // Reaction trên Facebook là idempotent, lần sau thả lại không gây hại
                 banner = "⚠️ Đã thả nhưng chưa báo được về máy chủ: \(error.localizedDescription)"
@@ -195,7 +197,7 @@ final class ReactionExchangeManager: ObservableObject {
             let n = attempts(for: item.id) + 1
             setAttempts(n, for: item.id)
             if n >= maxAttempts {
-                try? await ExchangeBackend.shared.reportTask(requestId: item.id, success: false, message: String(result.message.prefix(200)))
+                try? await ExchangeBackend.shared.reportTask(pairId: item.id, success: false, message: String(result.message.prefix(200)))
                 banner = "❌ Thả reaction lỗi \(n) lần, đã báo thất bại: \(result.message)"
             } else {
                 banner = "⚠️ Thả reaction lỗi (lần \(n)/\(maxAttempts)), sẽ thử lại: \(result.message)"
@@ -240,9 +242,9 @@ struct ReactionExchangeView: View {
                     setupCard
                 } else {
                     Picker("", selection: $tab) {
-                        Text("Danh sách chờ (\(manager.waiting.count))").tag(0)
+                        Text("Yêu cầu (\(manager.waiting.count))").tag(0)
                         Text("Tạo yêu cầu").tag(1)
-                        Text("Của tôi (\(manager.mine.count))").tag(2)
+                        Text("Của tôi (\(manager.requests.count + manager.pairs.count))").tag(2)
                     }
                     .pickerStyle(.segmented)
 
@@ -317,7 +319,7 @@ struct ReactionExchangeView: View {
     private var waitingTab: some View {
         VStack(spacing: 10) {
             if manager.waiting.isEmpty {
-                emptyState("Chưa có yêu cầu nào đang chờ", "Hãy tạo yêu cầu của bạn ở tab \"Tạo yêu cầu\".")
+                emptyState("Chưa có yêu cầu nào đang mở", "Hãy tạo yêu cầu của bạn ở tab \"Tạo yêu cầu\".")
             }
             ForEach(manager.waiting) { item in
                 VStack(alignment: .leading, spacing: 8) {
@@ -335,7 +337,7 @@ struct ReactionExchangeView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                     HStack {
-                        Text(item.createdAt, style: .relative)
+                        Text("\(item.acceptedCount) người đã nhận · \(item.createdAt, style: .relative)")
                             .font(.caption2).foregroundStyle(.secondary)
                         Spacer()
                         Button { acceptTarget = item } label: {
@@ -354,7 +356,7 @@ struct ReactionExchangeView: View {
 
     private var createTab: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Dán link bài viết của bạn và chọn reaction bạn muốn nhận. Yêu cầu sẽ chờ đến khi có người nhận, rồi hai bên thả reaction cho nhau.")
+            Text("Dán link bài viết của bạn và chọn reaction bạn muốn nhận. Ai nhận yêu cầu thì hai bên thả reaction cho nhau. Một yêu cầu có thể được nhiều người nhận.")
                 .font(.caption).foregroundStyle(.secondary)
 
             TextField("Link bài viết Facebook của bạn", text: $createLink)
@@ -397,64 +399,88 @@ struct ReactionExchangeView: View {
     // MARK: Tab 3: của tôi
 
     private var mineTab: some View {
-        VStack(spacing: 10) {
-            if manager.mine.isEmpty {
-                emptyState("Bạn chưa có yêu cầu nào", "Tạo yêu cầu hoặc nhận một yêu cầu từ danh sách chờ.")
+        VStack(alignment: .leading, spacing: 10) {
+            if manager.requests.isEmpty && manager.pairs.isEmpty {
+                emptyState("Bạn chưa có hoạt động nào", "Tạo yêu cầu hoặc nhận một yêu cầu ở tab đầu tiên.")
             }
-            ForEach(manager.mine) { item in
-                mineCard(item)
+            if !manager.requests.isEmpty {
+                Text("Yêu cầu của tôi").font(.caption.bold()).foregroundStyle(.secondary)
+                ForEach(manager.requests) { requestCard($0) }
+            }
+            if !manager.pairs.isEmpty {
+                Text("Các lượt trao đổi").font(.caption.bold()).foregroundStyle(.secondary).padding(.top, 4)
+                ForEach(manager.pairs) { pairCard($0) }
             }
         }
     }
 
-    private func mineCard(_ item: MyExchange) -> some View {
+    private func requestCard(_ item: MyRequest) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(statusTitle(item)).font(.caption.bold())
-                    .padding(.horizontal, 8).padding(.vertical, 3)
-                    .background(statusColor(item).opacity(0.18), in: Capsule())
-                    .foregroundStyle(statusColor(item))
+                chip(requestStatusTitle(item.status), color: item.status == "open" ? .orange : .gray)
                 Spacer()
                 Text(item.createdAt, style: .relative).font(.caption2).foregroundStyle(.secondary)
             }
-            Text("Bài của bạn · nhận \(exchangeEmoji(item.reaction))")
-                .font(.caption.bold())
+            Text("Bài của bạn · muốn nhận \(exchangeEmoji(item.reaction))").font(.caption.bold())
             Text(item.postUrl).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-
-            if item.status == "waiting" {
-                HStack {
-                    Text("Hết hạn \(item.expiresAt, style: .relative)").font(.caption2).foregroundStyle(.secondary)
-                    Spacer()
+            HStack {
+                Label("\(item.acceptedCount) người đã nhận", systemImage: "person.2.fill")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                if item.status == "open" {
                     Button(role: .destructive) {
                         Task { await manager.cancel(item); await reload() }
-                    } label: { Text("Hủy yêu cầu") }
+                    } label: { Text("Đóng yêu cầu") }
                     .buttonStyle(SoftTintedButtonStyle(tint: .red, isCompact: true))
-                }
-            } else if item.status == "matched" || item.status == "done" {
-                Divider()
-                let partner = item.partnerDisplayName ?? "Đối tác"
-                taskLine(
-                    "Bạn thả \(exchangeEmoji(item.partnerReaction)) lên bài của \(partner)",
-                    status: item.taskStatus,
-                    message: item.taskMessage,
-                    running: manager.runningTaskIds.contains(item.id)
-                )
-                taskLine(
-                    "\(partner) thả \(exchangeEmoji(item.reaction)) lên bài của bạn",
-                    status: item.partnerTaskStatus ?? "pending",
-                    message: nil,
-                    running: false
-                )
-                if item.status == "matched" && item.taskStatus == "pending" {
-                    Button {
-                        Task { await manager.runPendingTasks(spaces: library.spaces) }
-                    } label: { Label("Thả ngay", systemImage: "bolt.fill") }
-                    .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
                 }
             }
         }
         .padding(12)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func pairCard(_ item: MyPair) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                chip(item.status == "done" ? "Hoàn tất" : "Đang thực hiện",
+                     color: item.status == "done" ? .trackerPrimaryDark : .blue)
+                Spacer()
+                Text(item.createdAt, style: .relative).font(.caption2).foregroundStyle(.secondary)
+            }
+            Text("Trao đổi với \(item.partnerDisplayName)").font(.caption.bold())
+            Text(item.role == "requester"
+                 ? "\(item.partnerDisplayName) đã nhận yêu cầu của bạn"
+                 : "Bạn đã nhận yêu cầu của \(item.partnerDisplayName)")
+                .font(.caption2).foregroundStyle(.secondary)
+            Divider()
+            taskLine(
+                "Bạn thả \(exchangeEmoji(item.partnerReaction)) lên bài của \(item.partnerDisplayName)",
+                status: item.myTaskStatus,
+                message: item.myTaskMessage,
+                running: manager.runningTaskIds.contains(item.id)
+            )
+            taskLine(
+                "\(item.partnerDisplayName) thả \(exchangeEmoji(item.myReaction)) lên bài của bạn",
+                status: item.partnerTaskStatus,
+                message: nil,
+                running: false
+            )
+            if item.status == "matched" && item.myTaskStatus == "pending" {
+                Button {
+                    Task { await manager.runPendingTasks(spaces: library.spaces) }
+                } label: { Label("Thả ngay", systemImage: "bolt.fill") }
+                .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
+            }
+        }
+        .padding(12)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func chip(_ text: String, color: Color) -> some View {
+        Text(text).font(.caption.bold())
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(color.opacity(0.18), in: Capsule())
+            .foregroundStyle(color)
     }
 
     private func taskLine(_ text: String, status: String, message: String?, running: Bool) -> some View {
@@ -477,23 +503,12 @@ struct ReactionExchangeView: View {
         }
     }
 
-    private func statusTitle(_ item: MyExchange) -> String {
-        switch item.status {
-        case "waiting": return "Đang chờ người nhận"
-        case "matched": return "Đã ghép cặp"
-        case "done": return "Hoàn tất"
-        case "cancelled": return "Đã hủy"
+    private func requestStatusTitle(_ status: String) -> String {
+        switch status {
+        case "open": return "Đang mở"
+        case "cancelled": return "Đã đóng"
         case "expired": return "Hết hạn"
-        default: return item.status
-        }
-    }
-
-    private func statusColor(_ item: MyExchange) -> Color {
-        switch item.status {
-        case "waiting": return .orange
-        case "matched": return .blue
-        case "done": return .trackerPrimaryDark
-        default: return .gray
+        default: return status
         }
     }
 

@@ -54,10 +54,9 @@ enum ExchangeError: LocalizedError {
 
     private static func friendly(_ raw: String) -> String {
         let map: [(String, String)] = [
-            ("ALREADY_WAITING", "Bạn đang có một yêu cầu chờ. Hãy hủy hoặc chờ có người nhận trước khi tạo yêu cầu mới."),
-            ("DAILY_LIMIT", "Bạn đã dùng hết hạn mức yêu cầu trong 24 giờ qua."),
-            ("TOO_MANY_ACTIVE", "Bạn đang có quá nhiều yêu cầu chưa hoàn tất."),
-            ("ALREADY_TAKEN", "Yêu cầu này vừa có người khác nhận."),
+            ("DUPLICATE_POST", "Bài viết này đang có yêu cầu mở rồi."),
+            ("ALREADY_ACCEPTED", "Bạn đã nhận yêu cầu này rồi."),
+            ("CLOSED", "Yêu cầu này đã được đóng."),
             ("EXPIRED", "Yêu cầu này đã hết hạn."),
             ("OWN_REQUEST", "Không thể tự nhận yêu cầu của chính mình."),
             ("SAME_POST", "Hai bên đang dùng cùng một bài viết. Hãy dán bài viết của riêng bạn."),
@@ -72,30 +71,43 @@ enum ExchangeError: LocalizedError {
 
 // MARK: - Mô hình dữ liệu trả về từ RPC
 
+/// Yêu cầu của người khác đang mở (nhiều người có thể cùng nhận)
 struct WaitingExchange: Codable, Identifiable, Hashable {
     let id: UUID
     let displayName: String
     let postUrl: String
     let reaction: String
     let createdAt: Date
+    let expiresAt: Date
+    let acceptedCount: Int
 }
 
-struct MyExchange: Codable, Identifiable, Hashable {
+/// Yêu cầu do chính tôi tạo
+struct MyRequest: Codable, Identifiable, Hashable {
     let id: UUID
     let status: String
     let postUrl: String
-    let postId: String
     let reaction: String
-    let displayName: String
     let createdAt: Date
     let expiresAt: Date
-    let taskStatus: String
-    let taskMessage: String?
-    let partnerDisplayName: String?
-    let partnerPostUrl: String?
-    let partnerPostId: String?
-    let partnerReaction: String?
-    let partnerTaskStatus: String?
+    let acceptedCount: Int
+}
+
+/// Một cặp trao đổi, nhìn từ phía tôi (my* là của tôi, partner* là của đối tác)
+struct MyPair: Codable, Identifiable, Hashable {
+    let id: UUID
+    let role: String
+    let status: String
+    let createdAt: Date
+    let myPostUrl: String
+    let myReaction: String
+    let partnerDisplayName: String
+    let partnerPostUrl: String
+    let partnerPostId: String
+    let partnerReaction: String
+    let myTaskStatus: String
+    let myTaskMessage: String?
+    let partnerTaskStatus: String
 }
 
 // MARK: - Lưu phiên đăng nhập trong Keychain
@@ -291,14 +303,19 @@ actor ExchangeBackend {
 
     // MARK: API công khai
 
-    func listWaiting() async throws -> [WaitingExchange] {
-        let data = try await rpc("list_waiting_requests")
+    func listOpen() async throws -> [WaitingExchange] {
+        let data = try await rpc("list_open_requests")
         return try decoder.decode([WaitingExchange].self, from: data)
     }
 
-    func myExchanges() async throws -> [MyExchange] {
-        let data = try await rpc("get_my_exchanges")
-        return try decoder.decode([MyExchange].self, from: data)
+    func myRequests() async throws -> [MyRequest] {
+        let data = try await rpc("get_my_requests")
+        return try decoder.decode([MyRequest].self, from: data)
+    }
+
+    func myPairs() async throws -> [MyPair] {
+        let data = try await rpc("get_my_pairs")
+        return try decoder.decode([MyPair].self, from: data)
     }
 
     func createRequest(postURL: String, postId: String, reaction: String, displayName: String) async throws {
@@ -324,9 +341,9 @@ actor ExchangeBackend {
         _ = try await rpc("cancel_exchange_request", params: ["p_request_id": requestId.uuidString.lowercased()])
     }
 
-    func reportTask(requestId: UUID, success: Bool, message: String) async throws {
+    func reportTask(pairId: UUID, success: Bool, message: String) async throws {
         _ = try await rpc("report_exchange_task", params: [
-            "p_request_id": requestId.uuidString.lowercased(),
+            "p_pair_id": pairId.uuidString.lowercased(),
             "p_success": success,
             "p_message": message
         ])
