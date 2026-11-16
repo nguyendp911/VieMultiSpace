@@ -24,6 +24,7 @@ struct SpaceDashboard: View {
     @State private var navigateToSync = false
     @State private var navigateToSmartPost = false
     @State private var navigateToPostTracker = false
+    @State private var navigateToExchange = false
     @State private var showShowcaseStudio = false
     @State private var inlineRenameId: UUID? = nil
     @State private var inlineRenameText = ""
@@ -122,6 +123,16 @@ struct SpaceDashboard: View {
                                 ) {
                                     navigateToSync = true
                                 }
+                            }
+
+                            compactFeatureButton(
+                                title: "Trao đổi reaction",
+                                subtitle: "Thả reaction chéo giữa người dùng",
+                                icon: "arrow.left.arrow.right.circle.fill",
+                                colors: [Color.green, Color.teal],
+                                badge: "MỚI"
+                            ) {
+                                navigateToExchange = true
                             }
 
                             // Studio Chụp ảnh Giới thiệu App
@@ -366,6 +377,9 @@ struct SpaceDashboard: View {
             }
             .navigationDestination(isPresented: $navigateToPostTracker) {
                 SmartPostView(initialTab: 2)
+            }
+            .navigationDestination(isPresented: $navigateToExchange) {
+                ReactionExchangeView()
             }
             .sheet(isPresented: $showShowcaseStudio) {
                 AppShowcaseStudioView()
