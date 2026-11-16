@@ -341,7 +341,7 @@ final class AIAutoPostEngine: ObservableObject {
         UserDefaults.standard.set(plans.contains { $0.isEnabled }, forKey: "vie.aiautopost.hasEnabled")
     }
 
-    static var hasEnabledPlansFlag: Bool {
+    nonisolated static var hasEnabledPlansFlag: Bool {
         UserDefaults.standard.bool(forKey: "vie.aiautopost.hasEnabled")
     }
 
