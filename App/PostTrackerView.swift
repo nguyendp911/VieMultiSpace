@@ -368,6 +368,17 @@ final class TrackedPostManager: ObservableObject {
         )
 
         guard let currentIndex = posts.firstIndex(where: { $0.id == id }) else { return }
+
+        // Lấy thất bại (toàn 0) mà trước đó đã có số liệu → giữ số cũ, tránh hiện thống kê = 0 sai
+        let fetchedNothing = details.reactionCount == 0 && details.commentCount == 0
+            && details.shareCount == 0 && details.comments.isEmpty
+        let hadStats = posts[currentIndex].reactionCount > 0 || posts[currentIndex].commentCount > 0
+            || posts[currentIndex].shareCount > 0
+        if fetchedNothing && hadStats {
+            statusBanner = "⚠️ Chưa lấy được thống kê mới của \(post.spaceName), giữ nguyên số liệu cũ."
+            return
+        }
+
         posts[currentIndex].reactionCount = details.reactionCount
         posts[currentIndex].reactionBreakdown = details.reactionBreakdown
         posts[currentIndex].commentCount = max(details.commentCount, details.comments.count)
@@ -980,17 +991,38 @@ enum PostTrackingAPIClient {
                         #"\"video_id\":\"(\d+)\""#,
                         #"\"legacyID\":\"(\d+)\""#
                     ]
-                    for pat in patterns {
-                        if let match = FacebookTargetPostResolver.firstMatch(pattern: pat, in: html), match.count > 5 {
-                            extractedFeedbackTargetId = match
-                            break
+                    // Chỉ nhận ID thuộc đúng bài viết này (trang còn chứa ID của bài gợi ý / bài khác)
+                    let ownIds: Set<String> = {
+                        let clean = postId.components(separatedBy: "_").last ?? postId
+                        return Set([postId, clean].filter { !$0.isEmpty })
+                    }()
+                    func belongsToPost(_ cand: String) -> Bool {
+                        if ownIds.contains(where: { cand.contains($0) }) { return true }
+                        if let d = Data(base64Encoded: cand), let dec = String(data: d, encoding: .utf8) {
+                            return ownIds.contains(where: { dec.contains($0) })
+                        }
+                        return false
+                    }
+                    outer: for pat in patterns {
+                        guard let rx = try? NSRegularExpression(pattern: pat) else { continue }
+                        let ns = html as NSString
+                        for m in rx.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
+                            let r = m.numberOfRanges > 1 ? m.range(at: 1) : m.range
+                            guard r.location != NSNotFound else { continue }
+                            let cand = ns.substring(with: r)
+                            if cand.count > 5, belongsToPost(cand) {
+                                extractedFeedbackTargetId = cand
+                                break outer
+                            }
                         }
                     }
                 }
             }
         }
 
-        let targetId = extractedFeedbackTargetId ?? postId
+        // Không xác thực được ID từ trang → dùng ID bài viết gốc dạng feedback chuẩn, tuyệt đối không lấy ID của bài khác
+        let targetId = extractedFeedbackTargetId
+            ?? (postId.allSatisfy(\.isNumber) ? Data("feedback:\(postId)".utf8).base64EncodedString() : postId)
         guard !targetId.isEmpty, targetId.count > 4 else { return nil }
 
         let lsd = !lsdToken.isEmpty ? lsdToken : "AV..."
@@ -1095,6 +1127,7 @@ enum PostTrackingAPIClient {
         proxy: SpaceProxy? = nil
     ) async -> PostEngagementSnapshot {
         var finalSnap = PostEngagementSnapshot()
+        var exactReactionsSnapshot: (totalCount: Int, breakdown: [String: Int], reactors: [(id: String, name: String, type: String)])? = nil
 
         // Tầng 0: Lấy chính xác Reaction theo CometUFI (chuẩn 1748401675-getuidnamereactionpostfacebookcachetoken.py)
         if let exactReactions = await fetchExactReactionsViaCometUFI(
@@ -1106,6 +1139,7 @@ enum PostTrackingAPIClient {
             finalSnap.reactionCount = exactReactions.totalCount
             finalSnap.reactionBreakdown = exactReactions.breakdown
             finalSnap.reactors = exactReactions.reactors
+            exactReactionsSnapshot = exactReactions
         }
 
         // Tầng 1: Truy vấn qua Graph API (thử cả ownerUserId_postId và postId trực tiếp + truy vấn nhánh con /comments & /reactions)
@@ -1156,6 +1190,13 @@ enum PostTrackingAPIClient {
                     mergeSnapshots(into: &finalSnap, from: gqlSnap)
                 }
             }
+        }
+
+        // Reaction đếm chính xác theo từng loại (Tầng 0) là nguồn đáng tin nhất → không để tầng khác ghi đè bằng số lớn hơn
+        if let exact = exactReactionsSnapshot {
+            finalSnap.reactionCount = exact.totalCount
+            finalSnap.reactionBreakdown = exact.breakdown
+            finalSnap.reactors = exact.reactors
         }
 
         finalSnap.commentCount = max(finalSnap.commentCount, finalSnap.comments.count)
@@ -1424,15 +1465,59 @@ enum PostTrackingAPIClient {
         return best
     }
 
+    /// Nhận diện đúng đối tượng Feedback của bài viết đang theo dõi.
+    /// Trang Facebook chứa cả bài gợi ý / bài liên quan / bình luận, mỗi cái có số liệu riêng,
+    /// nếu lấy "số lớn nhất trên cả trang" sẽ ra thống kê sai.
+    struct EngagementTarget {
+        let ids: Set<String>
+
+        init(postId: String, feedbackId: String) {
+            var s = Set<String>()
+            let clean = postId.components(separatedBy: "_").last ?? postId
+            for v in [postId, clean] where !v.isEmpty {
+                s.insert(v)
+                s.insert(Data("feedback:\(v)".utf8).base64EncodedString())
+            }
+            if !feedbackId.isEmpty { s.insert(feedbackId) }
+            ids = s
+        }
+
+        func matches(_ dict: [String: Any]) -> Bool {
+            if (dict["__typename"] as? String) == "Comment" { return false }
+            for key in ["id", "subscription_target_id", "legacy_token", "legacy_fbid", "post_id", "feedback_target_id"] {
+                guard let v = dict[key] as? String, !v.isEmpty else { continue }
+                if ids.contains(v) { return true }
+                if let d = Data(base64Encoded: v),
+                   let dec = String(data: d, encoding: .utf8),
+                   dec.hasPrefix("feedback:"),
+                   ids.contains(String(dec.dropFirst("feedback:".count))) {
+                    return true
+                }
+            }
+            return false
+        }
+    }
+
+    /// - target: nil = chế độ cũ (quét rộng); có giá trị = chỉ nhận số liệu thuộc đúng bài viết đó.
     private static func extractFromRelayObject(
         _ obj: Any,
         ownerUserId: String,
         into snap: inout PostEngagementSnapshot,
         seenCommentIds: inout Set<String>,
+        target: EngagementTarget? = nil,
+        inTarget: Bool = false,
         depth: Int = 0
     ) {
         guard depth < 18 else { return }
         if let dict = obj as? [String: Any] {
+            let typeNameForScope = (dict["__typename"] as? String) ?? ""
+            let owns = target?.matches(dict) ?? false
+            let childInTarget = inTarget || owns
+            // Số liệu chỉ lấy từ chính đối tượng Feedback của bài viết (không lấy từ bình luận / bài khác)
+            let applyCounts = target == nil ? (typeNameForScope != "Comment") : owns
+            let applyContent = target == nil || childInTarget
+
+            if applyCounts {
             // 1. Reaction counts
             if let rc = (dict["reaction_count"] as? [String: Any])?["count"] as? Int {
                 snap.reactionCount = max(snap.reactionCount, rc)
@@ -1482,9 +1567,10 @@ enum PostTrackingAPIClient {
             if let i18nS = dict["i18n_share_count"] as? String, let parsed = parseCompactCount(i18nS) {
                 snap.shareCount = max(snap.shareCount, parsed)
             }
+            }
 
             // 4. Caption
-            if snap.caption.isEmpty,
+            if applyContent, snap.caption.isEmpty,
                let msgText = (dict["message"] as? [String: Any])?["text"] as? String,
                !msgText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 snap.caption = msgText
@@ -1494,7 +1580,7 @@ enum PostTrackingAPIClient {
             let typeName = (dict["__typename"] as? String) ?? ""
             let bodyText = (dict["body"] as? [String: Any])?["text"] as? String
             let authorDict = dict["author"] as? [String: Any]
-            if (typeName == "Comment" || bodyText != nil),
+            if applyContent, (typeName == "Comment" || bodyText != nil),
                let text = bodyText?.trimmingCharacters(in: .whitespacesAndNewlines),
                !text.isEmpty,
                let authorName = authorDict?["name"] as? String {
@@ -1535,19 +1621,51 @@ enum PostTrackingAPIClient {
             }
 
             for (_, v) in dict {
-                extractFromRelayObject(v, ownerUserId: ownerUserId, into: &snap, seenCommentIds: &seenCommentIds, depth: depth + 1)
+                extractFromRelayObject(v, ownerUserId: ownerUserId, into: &snap, seenCommentIds: &seenCommentIds, target: target, inTarget: childInTarget, depth: depth + 1)
             }
         } else if let arr = obj as? [Any] {
             for item in arr {
-                extractFromRelayObject(item, ownerUserId: ownerUserId, into: &snap, seenCommentIds: &seenCommentIds, depth: depth + 1)
+                extractFromRelayObject(item, ownerUserId: ownerUserId, into: &snap, seenCommentIds: &seenCommentIds, target: target, inTarget: inTarget, depth: depth + 1)
             }
         }
     }
 
-    private static func parseHTMLAndRelayPayload(_ html: String, ownerUserId: String) -> PostEngagementSnapshot {
+    private static func parseHTMLAndRelayPayload(
+        _ html: String,
+        ownerUserId: String,
+        target: EngagementTarget? = nil
+    ) -> PostEngagementSnapshot {
+        // Ưu tiên: chỉ nhận số liệu thuộc đúng Feedback của bài viết đang theo dõi
+        if let target {
+            var scoped = PostEngagementSnapshot()
+            var seenScoped = Set<String>()
+            scanRelayPayload(html, ownerUserId: ownerUserId, into: &scoped, seen: &seenScoped, target: target)
+            if scoped.reactionCount > 0 || scoped.commentCount > 0 || scoped.shareCount > 0 {
+                if scoped.comments.isEmpty {
+                    // Giữ hành vi cũ cho danh sách bình luận nếu Facebook không gắn id vào nhánh bình luận
+                    var legacy = PostEngagementSnapshot()
+                    var seenLegacy = Set<String>()
+                    scanRelayPayload(html, ownerUserId: ownerUserId, into: &legacy, seen: &seenLegacy, target: nil)
+                    scoped.comments = legacy.comments
+                }
+                scoped.commentCount = max(scoped.commentCount, scoped.comments.count)
+                return scoped
+            }
+        }
+        // Không nhận diện được Feedback của bài → quét rộng như trước (fallback)
         var snap = PostEngagementSnapshot()
         var seenCommentIds = Set<String>()
+        scanRelayPayload(html, ownerUserId: ownerUserId, into: &snap, seen: &seenCommentIds, target: nil)
+        return finishLegacyHTMLParse(html, snap: snap)
+    }
 
+    private static func scanRelayPayload(
+        _ html: String,
+        ownerUserId: String,
+        into snap: inout PostEngagementSnapshot,
+        seen seenCommentIds: inout Set<String>,
+        target: EngagementTarget?
+    ) {
         // 1. Duyệt toàn bộ các khối <script type="application/json"> của Facebook Comet
         let scriptPattern = #"<script[^>]*>([\s\S]*?)<\/script>"#
         if let scriptRegex = try? NSRegularExpression(pattern: scriptPattern, options: []) {
@@ -1564,7 +1682,7 @@ enum PostTrackingAPIClient {
                 }
                 if let d = cleaned.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: d) {
-                    extractFromRelayObject(json, ownerUserId: ownerUserId, into: &snap, seenCommentIds: &seenCommentIds)
+                    extractFromRelayObject(json, ownerUserId: ownerUserId, into: &snap, seenCommentIds: &seenCommentIds, target: target)
                 }
             }
         }
@@ -1575,9 +1693,12 @@ enum PostTrackingAPIClient {
             guard trimmed.hasPrefix("{"),
                   let d = trimmed.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: d) else { continue }
-            extractFromRelayObject(json, ownerUserId: ownerUserId, into: &snap, seenCommentIds: &seenCommentIds)
+            extractFromRelayObject(json, ownerUserId: ownerUserId, into: &snap, seenCommentIds: &seenCommentIds, target: target)
         }
+    }
 
+    private static func finishLegacyHTMLParse(_ html: String, snap input: PostEngagementSnapshot) -> PostEngagementSnapshot {
+        var snap = input
         // 3. Quét Regex trực tiếp trên toàn bộ HTML để đảm bảo không sót số liệu
         let rMax = maxIntMatch(
             patterns: [
@@ -1665,7 +1786,11 @@ enum PostTrackingAPIClient {
                 guard !html.isEmpty else { continue }
                 anyLoaded = true
 
-                let parsed = parseHTMLAndRelayPayload(html, ownerUserId: ownerUserId)
+                let parsed = parseHTMLAndRelayPayload(
+                    html,
+                    ownerUserId: ownerUserId,
+                    target: EngagementTarget(postId: postId, feedbackId: feedbackId)
+                )
                 mergeSnapshots(into: &combinedSnap, from: parsed)
 
                 if combinedSnap.reactionCount > 0 || combinedSnap.commentCount > 0 || !combinedSnap.comments.isEmpty {
@@ -1741,7 +1866,11 @@ enum PostTrackingAPIClient {
 
             if let (data, _) = try? await session.data(for: req),
                let text = String(data: data, encoding: .utf8), !text.isEmpty {
-                let parsed = parseHTMLAndRelayPayload(text, ownerUserId: ownerUserId)
+                let parsed = parseHTMLAndRelayPayload(
+                    text,
+                    ownerUserId: ownerUserId,
+                    target: EngagementTarget(postId: postId, feedbackId: feedbackId)
+                )
                 mergeSnapshots(into: &snap, from: parsed)
                 if snap.reactionCount > 0 || snap.commentCount > 0 || !snap.comments.isEmpty {
                     return snap
@@ -2479,7 +2608,10 @@ struct PostTrackerView: View {
                         Text(allTicked ? "Bỏ tick AI (\(aiTickedPostsCount))" : "Tick hết AI (\(aiTickedPostsCount)/\(filteredPosts.count))")
                             .font(.caption.bold())
                             .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
+                    .frame(maxWidth: .infinity)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
                     .background(Color(uiColor: .tertiarySystemGroupedBackground), in: Capsule())
@@ -2496,7 +2628,10 @@ struct PostTrackerView: View {
                     HStack(spacing: 4) {
                         Image(systemName: tracker.autoMonitorEnabled ? "antenna.radiowaves.left.and.right" : "clock.arrow.circlepath")
                         Text(tracker.autoMonitorEnabled ? "Auto Canh: BẬT" : "Auto Canh: TẮT")
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
+                    .frame(maxWidth: .infinity)
                     .font(.caption2.bold())
                     .foregroundStyle(tracker.autoMonitorEnabled ? .white : Color.trackerPrimaryDark)
                     .padding(.horizontal, 9)
@@ -2512,10 +2647,10 @@ struct PostTrackerView: View {
                     )
                 }
                 .buttonStyle(.plain)
+            }
 
-                Spacer(minLength: 0)
-
-                // Nút Chạy AI trả lời các bài đã tick
+            // Nút Chạy AI trả lời các bài đã tick (hàng riêng, full-width để không bị tràn)
+            HStack(spacing: 8) {
                 Button {
                     if geminiApiKey.isEmpty {
                         geminiApiKey = SecureGeminiStore.readKey()
@@ -2540,7 +2675,9 @@ struct PostTrackerView: View {
                             Image(systemName: "sparkles")
                         }
                         Text("AI Trả lời (\(aiTickedPostsCount))")
+                            .lineLimit(1)
                     }
+                    .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(GradientPillButtonStyle(colors: [.trackerPrimary, .trackerPrimaryDark], isCompact: true))
                 .disabled(tracker.isRunningAIReply || aiTickedPostsCount == 0)
@@ -2879,31 +3016,17 @@ struct PostTrackerView: View {
 
             Divider()
 
-            // Dòng 4: Các Button thao tác thiết kế chống tràn dòng (#8FBC8F và trắng)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    // 1. Nút Làm mới thống kê
-                    Button {
-                        Task {
-                            await tracker.syncSinglePost(id: post.id, space: space)
-                        }
-                    } label: {
-                        HStack(spacing: 5) {
-                            if isSyncing {
-                                ProgressView().controlSize(.mini)
-                            } else {
-                                Image(systemName: "arrow.clockwise")
-                            }
-                            Text("Thống kê")
-                                .lineLimit(1)
-                        }
-                        .fixedSize(horizontal: true, vertical: false)
+            // Dòng 4: Các nút thao tác xếp lưới 2x2, tự co giãn theo bề rộng thẻ (không cuộn ngang, không tràn)
+            Grid(horizontalSpacing: 8, verticalSpacing: 8) {
+                GridRow {
+                    // 1. Làm mới thống kê
+                    cardActionButton(icon: "arrow.clockwise", title: "Thống kê", isLoading: isSyncing) {
+                        Task { await tracker.syncSinglePost(id: post.id, space: space) }
                     }
-                    .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
                     .disabled(isSyncing)
 
-                    // 2. Nút Trả lời nhanh trực tiếp
-                    Button {
+                    // 2. Trả lời nhanh trực tiếp
+                    cardActionButton(icon: "text.bubble.fill", title: "Trả lời nhanh") {
                         withAnimation(.spring(response: 0.25)) {
                             if quickReplyPostId == post.id {
                                 quickReplyPostId = nil
@@ -2912,31 +3035,16 @@ struct PostTrackerView: View {
                                 quickReplyText = ""
                             }
                         }
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "text.bubble.fill")
-                            Text("Trả lời nhanh")
-                                .lineLimit(1)
-                        }
-                        .fixedSize(horizontal: true, vertical: false)
                     }
-                    .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
-
-                    // 3. Nút Xem DS Bình luận & Tick chọn trả lời chi tiết
-                    Button {
+                }
+                GridRow {
+                    // 3. Xem DS bình luận & tick chọn trả lời chi tiết
+                    cardActionButton(icon: "list.bullet.indent", title: "DS Cmt (\(post.comments.count))") {
                         activeReplyPost = post
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "list.bullet.indent")
-                            Text("DS Cmt (\(post.comments.count))")
-                                .lineLimit(1)
-                        }
-                        .fixedSize(horizontal: true, vertical: false)
                     }
-                    .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
 
-                    // 4. Nút Chạy AI trả lời ngay cho bài viết này
-                    Button {
+                    // 4. Chạy AI trả lời ngay cho bài viết này
+                    cardActionButton(icon: "sparkles", title: "AI Reply", isLoading: isAIRunning, isPrimary: true) {
                         let key = geminiApiKey.isEmpty ? SecureGeminiStore.readKey() : geminiApiKey
                         if key.isEmpty {
                             showAISettingsSheet = true
@@ -2953,22 +3061,9 @@ struct PostTrackerView: View {
                                 )
                             }
                         }
-                    } label: {
-                        HStack(spacing: 5) {
-                            if isAIRunning {
-                                ProgressView().tint(.white).controlSize(.mini)
-                            } else {
-                                Image(systemName: "sparkles")
-                            }
-                            Text("AI Reply")
-                                .lineLimit(1)
-                        }
-                        .fixedSize(horizontal: true, vertical: false)
                     }
-                    .buttonStyle(GradientPillButtonStyle(colors: [.trackerPrimary, .trackerPrimaryDark], isCompact: true))
                     .disabled(isAIRunning)
                 }
-                .padding(.vertical, 2)
             }
         }
         .padding(12)
@@ -2981,6 +3076,36 @@ struct PostTrackerView: View {
                 )
         )
         .shadow(color: Color.black.opacity(0.04), radius: 4, x: 0, y: 2)
+    }
+
+    /// Nút thao tác trên thẻ bài viết: chiếm đủ bề rộng ô lưới, chữ co lại nếu cần thay vì tràn ra ngoài.
+    @ViewBuilder
+    private func cardActionButton(
+        icon: String,
+        title: String,
+        isLoading: Bool = false,
+        isPrimary: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        let label = HStack(spacing: 5) {
+            if isLoading {
+                ProgressView().tint(isPrimary ? .white : nil).controlSize(.mini)
+            } else {
+                Image(systemName: icon)
+            }
+            Text(title)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity)
+
+        if isPrimary {
+            Button(action: action) { label }
+                .buttonStyle(GradientPillButtonStyle(colors: [.trackerPrimary, .trackerPrimaryDark], isCompact: true))
+        } else {
+            Button(action: action) { label }
+                .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
+        }
     }
 
     private func reactionSummaryText(for post: TrackedPostItem) -> String {
