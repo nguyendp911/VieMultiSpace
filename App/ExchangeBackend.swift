@@ -55,6 +55,12 @@ enum ExchangeError: LocalizedError {
     private static func friendly(_ raw: String) -> String {
         let map: [(String, String)] = [
             ("DUPLICATE_POST", "Bài viết này đang có yêu cầu mở rồi."),
+            ("Could not find the function", "Máy chủ chưa cập nhật schema mới. Hãy chạy lại file supabase/schema.sql (v3) trong Supabase SQL Editor."),
+            ("LOW_REPUTATION", "Điểm uy tín của bạn đang quá thấp nên tạm thời không thể dùng tính năng này."),
+            ("NOT_IN_GROUP", "Bạn chưa tham gia nhóm này."),
+            ("GROUP_NOT_FOUND", "Không tìm thấy nhóm với mã này."),
+            ("NAME_TOO_SHORT", "Tên nhóm quá ngắn."),
+            ("TOO_MANY_GROUPS", "Bạn đã tạo tối đa 5 nhóm."),
             ("ALREADY_ACCEPTED", "Bạn đã nhận yêu cầu này rồi."),
             ("CLOSED", "Yêu cầu này đã được đóng."),
             ("EXPIRED", "Yêu cầu này đã hết hạn."),
@@ -80,6 +86,7 @@ struct WaitingExchange: Codable, Identifiable, Hashable {
     let createdAt: Date
     let expiresAt: Date
     let acceptedCount: Int
+    let ownerScore: Int
 }
 
 /// Yêu cầu do chính tôi tạo
@@ -91,6 +98,7 @@ struct MyRequest: Codable, Identifiable, Hashable {
     let createdAt: Date
     let expiresAt: Date
     let acceptedCount: Int
+    let groupName: String?
 }
 
 /// Một cặp trao đổi, nhìn từ phía tôi (my* là của tôi, partner* là của đối tác)
@@ -100,6 +108,7 @@ struct MyPair: Codable, Identifiable, Hashable {
     let status: String
     let createdAt: Date
     let myPostUrl: String
+    let myPostId: String
     let myReaction: String
     let partnerDisplayName: String
     let partnerPostUrl: String
@@ -108,6 +117,25 @@ struct MyPair: Codable, Identifiable, Hashable {
     let myTaskStatus: String
     let myTaskMessage: String?
     let partnerTaskStatus: String
+    let partnerActorUid: String?
+    let partnerVerify: String
+    let myVerify: String
+}
+
+struct ExchangeGroup: Codable, Identifiable, Hashable {
+    let groupId: UUID
+    let groupName: String
+    let groupCode: String
+    let memberCount: Int
+    let isOwner: Bool
+    var id: UUID { groupId }
+}
+
+struct ExchangeReputation: Codable, Hashable {
+    let score: Int
+    let doneCount: Int
+    let failedCount: Int
+    let missingCount: Int
 }
 
 // MARK: - Lưu phiên đăng nhập trong Keychain
@@ -303,8 +331,10 @@ actor ExchangeBackend {
 
     // MARK: API công khai
 
-    func listOpen() async throws -> [WaitingExchange] {
-        let data = try await rpc("list_open_requests")
+    func listOpen(group: UUID? = nil) async throws -> [WaitingExchange] {
+        var params: [String: Any] = [:]
+        if let group { params["p_group"] = group.uuidString.lowercased() }
+        let data = try await rpc("list_open_requests", params: params)
         return try decoder.decode([WaitingExchange].self, from: data)
     }
 
@@ -318,13 +348,15 @@ actor ExchangeBackend {
         return try decoder.decode([MyPair].self, from: data)
     }
 
-    func createRequest(postURL: String, postId: String, reaction: String, displayName: String) async throws {
-        _ = try await rpc("create_exchange_request", params: [
+    func createRequest(postURL: String, postId: String, reaction: String, displayName: String, groupId: UUID? = nil) async throws {
+        var params: [String: Any] = [
             "p_post_url": postURL,
             "p_post_id": postId,
             "p_reaction": reaction,
             "p_display_name": displayName
-        ])
+        ]
+        if let groupId { params["p_group_id"] = groupId.uuidString.lowercased() }
+        _ = try await rpc("create_exchange_request", params: params)
     }
 
     func accept(targetId: UUID, postURL: String, postId: String, reaction: String, displayName: String) async throws {
@@ -341,11 +373,64 @@ actor ExchangeBackend {
         _ = try await rpc("cancel_exchange_request", params: ["p_request_id": requestId.uuidString.lowercased()])
     }
 
-    func reportTask(pairId: UUID, success: Bool, message: String) async throws {
+    func reportTask(pairId: UUID, success: Bool, message: String, actorUid: String = "") async throws {
         _ = try await rpc("report_exchange_task", params: [
             "p_pair_id": pairId.uuidString.lowercased(),
             "p_success": success,
-            "p_message": message
+            "p_message": message,
+            "p_actor_uid": actorUid
         ])
+    }
+
+    func reportVerification(pairId: UUID, ok: Bool) async throws {
+        _ = try await rpc("report_verification", params: [
+            "p_pair_id": pairId.uuidString.lowercased(),
+            "p_ok": ok
+        ])
+    }
+
+    func reportRequest(requestId: UUID, reason: String) async throws {
+        _ = try await rpc("report_request", params: [
+            "p_request_id": requestId.uuidString.lowercased(),
+            "p_reason": reason
+        ])
+    }
+
+    func blockOwner(ofRequest requestId: UUID) async throws {
+        _ = try await rpc("block_request_owner", params: ["p_request_id": requestId.uuidString.lowercased()])
+    }
+
+    func clearBlocks() async throws {
+        _ = try await rpc("clear_my_blocks")
+    }
+
+    func myGroups() async throws -> [ExchangeGroup] {
+        let data = try await rpc("get_my_groups")
+        return try decoder.decode([ExchangeGroup].self, from: data)
+    }
+
+    func createGroup(name: String) async throws -> ExchangeGroup {
+        let data = try await rpc("create_exchange_group", params: ["p_name": name])
+        guard let g = try decoder.decode([ExchangeGroup].self, from: data).first else {
+            throw ExchangeError.server("Không tạo được nhóm.")
+        }
+        return g
+    }
+
+    func joinGroup(code: String) async throws -> ExchangeGroup {
+        let data = try await rpc("join_exchange_group", params: ["p_code": code])
+        guard let g = try decoder.decode([ExchangeGroup].self, from: data).first else {
+            throw ExchangeError.server("Không tham gia được nhóm.")
+        }
+        return g
+    }
+
+    func leaveGroup(id: UUID) async throws {
+        _ = try await rpc("leave_exchange_group", params: ["p_group_id": id.uuidString.lowercased()])
+    }
+
+    func myReputation() async throws -> ExchangeReputation? {
+        let data = try await rpc("get_my_reputation")
+        return try decoder.decode([ExchangeReputation].self, from: data).first
     }
 }

@@ -47,6 +47,9 @@ struct SpaceDashboard: View {
                         }
                         .padding(.vertical, 10)
                     }
+                    Section("Tổng quan") {
+                        HomeDashboardCard()
+                    }
                     Section("Mạng & Bảo mật phiên") {
                         NavigationLink {
                             BatchProxyManagerView()

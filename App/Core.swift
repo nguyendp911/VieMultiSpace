@@ -271,6 +271,12 @@ final class SpaceLibrary: ObservableObject {
 @main
 struct VieMultiSpaceApp: App {
     @StateObject private var library = SpaceLibrary()
+    @Environment(\.scenePhase) private var scenePhase
+
+    init() {
+        // Phải đăng ký trước khi app khởi chạy xong
+        ExchangeBackground.register()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -279,6 +285,9 @@ struct VieMultiSpaceApp: App {
                 .overlay {
                     FloatingCaptureOverlay()
                 }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { ExchangeBackground.schedule() }
         }
     }
 }

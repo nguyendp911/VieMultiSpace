@@ -21,6 +21,11 @@ targets:
         NSPhotoLibraryUsageDescription: Cho phép ứng dụng chọn ảnh để đăng bài viết lên Facebook trong chức năng Smart Post.
         NSPhotoLibraryAddUsageDescription: Cho phép lưu ảnh chụp giới thiệu ứng dụng vào Album ảnh của bạn.
         LSRequiresIPhoneOS: true
+        UIBackgroundModes:
+          - fetch
+          - processing
+        BGTaskSchedulerPermittedIdentifiers:
+          - vn.vie.multispace.exchange.refresh
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

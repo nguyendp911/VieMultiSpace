@@ -220,6 +220,7 @@ final class TrackedPostManager: ObservableObject {
 
     func removePost(_ item: TrackedPostItem) {
         posts.removeAll { $0.id == item.id }
+        PostStatsHistory.shared.remove(id: item.id)
         savePosts()
     }
 
@@ -379,10 +380,31 @@ final class TrackedPostManager: ObservableObject {
             return
         }
 
+        let prior = PostStatsHistory.shared.last(for: id)
         posts[currentIndex].reactionCount = details.reactionCount
         posts[currentIndex].reactionBreakdown = details.reactionBreakdown
         posts[currentIndex].commentCount = max(details.commentCount, details.comments.count)
         posts[currentIndex].shareCount = details.shareCount
+
+        // Lưu lịch sử để vẽ biểu đồ và báo động khi tụt / tăng đột biến
+        let newR = posts[currentIndex].reactionCount
+        let newC = posts[currentIndex].commentCount
+        let newS = posts[currentIndex].shareCount
+        if let prior {
+            let alerts = PostAlertEngine.evaluate(
+                label: PostAlertEngine.label(for: posts[currentIndex]),
+                old: prior, reactions: newR, comments: newC, shares: newS
+            )
+            if let first = alerts.first {
+                statusBanner = first
+                ExchangeNotifier.notify(
+                    title: "Cảnh báo tương tác",
+                    body: alerts.joined(separator: "\n"),
+                    id: "vie.tracker.alert.\(id.uuidString)"
+                )
+            }
+        }
+        PostStatsHistory.shared.append(id: id, reactions: newR, comments: newC, shares: newS)
         if !details.caption.isEmpty && posts[currentIndex].caption.isEmpty {
             posts[currentIndex].caption = details.caption
         }
@@ -2324,6 +2346,8 @@ struct PostTrackerView: View {
     @State private var searchText: String = ""
     @State private var showAddURLSheet = false
     @State private var showAISettingsSheet = false
+    @State private var chartPost: TrackedPostItem? = nil
+    @State private var exportItem: ExportItem? = nil
     @State private var activeReplyPost: TrackedPostItem? = nil
     @State private var quickReplyPostId: UUID? = nil
     @State private var quickReplyText: String = ""
@@ -2449,6 +2473,12 @@ struct PostTrackerView: View {
                 geminiModel: $geminiModel,
                 aiStylePrompt: $aiStylePrompt
             )
+        }
+        .sheet(item: $chartPost) { post in
+            PostGrowthChartView(post: post)
+        }
+        .sheet(item: $exportItem) { item in
+            ShareSheet(items: [item.url])
         }
         .sheet(item: $activeReplyPost) { post in
             PostDetailAndReplySheet(
@@ -2582,6 +2612,25 @@ struct PostTrackerView: View {
                     .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(SoftTintedButtonStyle(tint: .trackerPrimaryDark, isCompact: true))
+
+                // Xuất báo cáo thống kê (CSV / PDF)
+                Menu {
+                    Button {
+                        if let url = PostReportExporter.csv(posts: filteredPosts) { exportItem = ExportItem(url: url) }
+                    } label: { Label("Xuất CSV (mở bằng Excel)", systemImage: "tablecells") }
+                    Button {
+                        if let url = PostReportExporter.pdf(posts: filteredPosts) { exportItem = ExportItem(url: url) }
+                    } label: { Label("Xuất PDF", systemImage: "doc.richtext") }
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.caption.bold())
+                        .foregroundStyle(Color.trackerPrimaryDark)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(Color.trackerSoft, in: RoundedRectangle(cornerRadius: 9))
+                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.trackerPrimary.opacity(0.35), lineWidth: 1))
+                }
+                .disabled(filteredPosts.isEmpty)
             }
         }
         .padding(10)
@@ -2859,6 +2908,11 @@ struct PostTrackerView: View {
                             tracker.statusBanner = "📋 Đã sao chép ID: \(post.postId)"
                         } label: {
                             Label("Sao chép Post ID", systemImage: "number")
+                        }
+                        Button {
+                            chartPost = post
+                        } label: {
+                            Label("Biểu đồ tăng trưởng", systemImage: "chart.line.uptrend.xyaxis")
                         }
                         Divider()
                         Button(role: .destructive) {
