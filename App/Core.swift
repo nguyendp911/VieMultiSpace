@@ -288,6 +288,13 @@ struct VieMultiSpaceApp: App {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background { ExchangeBackground.schedule() }
+            if phase == .active {
+                // Mở app: đăng các bài đã đến giờ và bổ sung lịch AI
+                Task {
+                    await ScheduledPostManager.shared.checkAndExecuteDueTasks()
+                    await AIAutoPostEngine.shared.tick(spaces: library.spaces)
+                }
+            }
         }
     }
 }

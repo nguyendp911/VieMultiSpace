@@ -114,6 +114,7 @@ struct SmartPostResult: Identifiable, Codable {
 // MARK: - Scheduled Post Models
 
 enum ScheduledTaskStatus: String, Codable {
+    case draft = "Bản nháp"
     case pending = "Chờ đăng"
     case running = "Đang chạy"
     case completed = "Hoàn thành"
@@ -122,6 +123,7 @@ enum ScheduledTaskStatus: String, Codable {
 
     var badgeColor: Color {
         switch self {
+        case .draft: return .gray
         case .pending: return .blue
         case .running: return .orange
         case .completed: return Color.themePrimary
@@ -149,6 +151,9 @@ struct ScheduledPostTask: Identifiable, Codable {
     var reactionType: String? = "LIKE"
     var reactionRate: Double? = 100.0
     var firstComment: String? = nil
+    /// Bài do AI Auto Post tạo (kế hoạch nào) và hạn chót được phép đăng (quá hạn thì bỏ qua)
+    var aiPlanId: UUID? = nil
+    var expiresAt: Date? = nil
 }
 
 // MARK: - Scheduled Post Storage Manager
@@ -281,6 +286,18 @@ final class ScheduledPostManager: ObservableObject {
         let now = Date()
         for idx in tasks.indices {
             let task = tasks[idx]
+            // Quá hạn khung giờ vàng (app không mở lúc đó): bỏ qua thay vì đăng sai giờ
+            if task.status == .pending, let exp = task.expiresAt, now > exp {
+                tasks[idx].status = .failed
+                tasks[idx].executionLog = "⏭ Bỏ lỡ khung giờ vàng (app không mở đúng giờ), đã bỏ qua để không đăng sai giờ."
+                saveTasks()
+                ExchangeNotifier.notify(
+                    title: "Bỏ lỡ khung giờ vàng",
+                    body: "Một bài AI không được đăng vì app không mở đúng giờ.",
+                    id: "vie.aipost.missed.\(task.id.uuidString)"
+                )
+                continue
+            }
             if task.status == .pending && task.scheduledDate <= now {
                 tasks[idx].status = .running
                 saveTasks()

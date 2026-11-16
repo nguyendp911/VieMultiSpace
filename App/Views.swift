@@ -25,6 +25,7 @@ struct SpaceDashboard: View {
     @State private var navigateToSmartPost = false
     @State private var navigateToPostTracker = false
     @State private var navigateToExchange = false
+    @State private var navigateToAIAutoPost = false
     @State private var showShowcaseStudio = false
     @State private var inlineRenameId: UUID? = nil
     @State private var inlineRenameText = ""
@@ -136,6 +137,16 @@ struct SpaceDashboard: View {
                                 badge: "MỚI"
                             ) {
                                 navigateToExchange = true
+                            }
+
+                            compactFeatureButton(
+                                title: "AI đăng bài tự động",
+                                subtitle: "Khung giờ vàng · cá nhân, nhóm, page",
+                                icon: "sparkles.rectangle.stack.fill",
+                                colors: [Color.purple, Color.indigo],
+                                badge: "MỚI"
+                            ) {
+                                navigateToAIAutoPost = true
                             }
 
                             // Studio Chụp ảnh Giới thiệu App
@@ -383,6 +394,9 @@ struct SpaceDashboard: View {
             }
             .navigationDestination(isPresented: $navigateToExchange) {
                 ReactionExchangeView()
+            }
+            .navigationDestination(isPresented: $navigateToAIAutoPost) {
+                AIAutoPostView()
             }
             .sheet(isPresented: $showShowcaseStudio) {
                 AppShowcaseStudioView()

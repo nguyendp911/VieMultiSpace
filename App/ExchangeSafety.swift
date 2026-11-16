@@ -175,7 +175,7 @@ enum ExchangeBackground {
     }
 
     static func schedule() {
-        guard ExchangeConfig.isConfigured else { return }
+        guard ExchangeConfig.isConfigured || AIAutoPostEngine.hasEnabledPlansFlag else { return }
         let req = BGAppRefreshTaskRequest(identifier: taskId)
         req.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
         try? BGTaskScheduler.shared.submit(req)
@@ -187,6 +187,9 @@ enum ExchangeBackground {
             let spaces = SpaceLibrary.shared?.spaces ?? []
             // Cửa sổ nền rất ngắn: chỉ thả tối đa 2 lệnh mỗi lượt
             await ReactionExchangeManager.shared.refresh(spaces: spaces, maxTasks: 2)
+            // AI đăng bài: đăng các bài đến giờ và giữ lịch luôn đầy
+            await ScheduledPostManager.shared.checkAndExecuteDueTasks()
+            await AIAutoPostEngine.shared.tick(spaces: spaces)
             task.setTaskCompleted(success: true)
         }
         task.expirationHandler = { work.cancel() }
